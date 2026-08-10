@@ -6,6 +6,7 @@ let videoEl = null, subtitles = [], ci = -1;
 let observer = null, settings = {};
 let loadedVideoId = "", loadGeneration = 0;
 let statusTimer = null;
+let loadAbortController = null;
 
 const DEF = {
   backendUrl: "http://localhost:8787",
@@ -45,15 +46,54 @@ function syncStyle() {
 
 // ── API ────────────────────────────────────────────────────
 
-async function apiPost(path, body) {
+async function apiStream(path, body, signal, onEvent) {
   const baseUrl = (settings.backendUrl || DEF.backendUrl).replace(/\/+$/, "");
   const url = `${baseUrl}${path}`;
-  const r = await fetch(url, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body) });
+  const r = await fetch(url, {
+    method:"POST",
+    headers:{"Content-Type":"application/json", "Accept":"text/event-stream"},
+    body:JSON.stringify(body),
+    signal,
+  });
   if (!r.ok) {
     const error = await r.json().catch(() => ({}));
     throw new Error(error.detail || `Backend ${r.status}`);
   }
-  return r.json();
+  if (!r.body) throw new Error("浏览器不支持流式字幕响应");
+
+  const reader = r.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  const consumeFrame = (frame) => {
+    const data = frame
+      .split("\n")
+      .filter(line => line.startsWith("data:"))
+      .map(line => line.slice(5).trimStart())
+      .join("\n");
+    if (!data) return;
+    onEvent(JSON.parse(data));
+  };
+
+  while (true) {
+    const { value, done } = await reader.read();
+    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+    buffer = buffer.replace(/\r\n/g, "\n");
+    let boundary = buffer.indexOf("\n\n");
+    while (boundary >= 0) {
+      consumeFrame(buffer.slice(0, boundary));
+      buffer = buffer.slice(boundary + 2);
+      boundary = buffer.indexOf("\n\n");
+    }
+    if (done) break;
+  }
+  if (buffer.trim()) consumeFrame(buffer);
+}
+
+function cancelActiveLoad() {
+  loadGeneration += 1;
+  loadAbortController?.abort();
+  loadAbortController = null;
 }
 
 // ── overlay ────────────────────────────────────────────────
@@ -165,6 +205,9 @@ function idxOf(ms) {
 // ── load ───────────────────────────────────────────────────
 
 async function load(pageUrl) {
+  loadAbortController?.abort();
+  const controller = new AbortController();
+  loadAbortController = controller;
   const generation = ++loadGeneration;
   subtitles = [];
   ci = -1;
@@ -178,7 +221,9 @@ async function load(pageUrl) {
       .map(value => value.trim())
       .filter(Boolean);
     const params = new URLSearchParams({ url: pageUrl, languages: langs.join(",") });
-    const tracksResponse = await fetch(`${baseUrl}/api/subtitle/tracks?${params}`);
+    const tracksResponse = await fetch(`${baseUrl}/api/subtitle/tracks?${params}`, {
+      signal: controller.signal,
+    });
     if (!tracksResponse.ok) throw new Error(`Backend ${tracksResponse.status}`);
     const tr = await tracksResponse.json();
 
@@ -221,24 +266,67 @@ async function load(pageUrl) {
       if (settings.whisperLanguage) body.whisper_language = settings.whisperLanguage;
     }
 
-    showStatus(track ? "正在处理并翻译字幕…" : "没有字幕，正在使用 Whisper 转写…");
-    const resp = await apiPost("/api/subtitle/process", body);
+    showStatus(track ? "正在处理并流式翻译字幕…" : "没有字幕，正在使用 Whisper 转写…");
+    let totalCues = 0;
+    let streamDone = false;
+    const translated = new Set();
+
+    await apiStream("/api/subtitle/stream", body, controller.signal, event => {
+      if (generation !== loadGeneration || settings.enabled === false) return;
+
+      if (event.type === "meta") {
+        totalCues = Number(event.total_cues) || 0;
+        showStatus(totalCues ? `字幕已获取，正在翻译 0/${totalCues}…` : "正在翻译字幕…");
+        return;
+      }
+
+      if (["source_cue", "cue_chunk", "cue"].includes(event.type)) {
+        const index = Number(event.index);
+        if (!Number.isInteger(index) || index < 0) return;
+        const previous = subtitles[index] || {};
+        subtitles[index] = {
+          start: event.start ?? previous.start,
+          end: event.end ?? previous.end,
+          text: event.text ?? previous.text ?? "",
+          translation: event.translation ?? previous.translation ?? "",
+        };
+        if (event.type === "cue") translated.add(index);
+        if (videoEl && subtitles.every(Boolean)) {
+          ci = idxOf(videoEl.currentTime * 1000);
+          refresh();
+        }
+        if (event.type === "cue" && (translated.size === 1 || translated.size % 10 === 0)) {
+          showStatus(`字幕翻译中 ${translated.size}/${totalCues || subtitles.length}…`);
+        }
+        return;
+      }
+
+      if (event.type === "error") throw new Error(event.detail || "字幕流处理失败");
+      if (event.type === "done") {
+        streamDone = true;
+        const failed = Number(event.failed_cues) || 0;
+        if (failed > 0) {
+          showStatus(`已完成，${failed} 条翻译失败；刷新可继续`, "error");
+        } else {
+          showStatus(`字幕翻译完成（${totalCues || subtitles.length} 条）`, "success", 3000);
+        }
+      }
+    });
+
     if (generation !== loadGeneration || settings.enabled === false) return;
-    subtitles = (resp.cues||[]).map(c => ({ start:c.start, end:c.end, text:c.text, translation:c.translation||"" }));
-    if (!subtitles.length) {
-      showStatus("后端没有返回可显示的字幕", "error");
-      return;
-    }
-    showStatus(`字幕已加载（${subtitles.length} 条）`, "success", 2500);
-    tick();
+    if (!streamDone) throw new Error("字幕流提前结束");
+    if (!subtitles.length) showStatus("后端没有返回可显示的字幕", "error");
   } catch (e) {
     if (generation !== loadGeneration) return;
+    if (e?.name === "AbortError") return;
     const baseUrl = (settings.backendUrl || DEF.backendUrl).replace(/\/+$/, "");
     const message = e instanceof TypeError
       ? `无法连接后端 ${baseUrl}，请先启动服务`
       : `字幕加载失败：${e.message || e}`;
     showStatus(message, "error");
     console.error("[YTS]", e);
+  } finally {
+    if (loadAbortController === controller) loadAbortController = null;
   }
 }
 
@@ -330,7 +418,7 @@ function injectToggle() {
     btn.innerHTML = settings.enabled !== false ? ICON_ON : ICON_OFF;
     btn.title = settings.enabled !== false ? "关闭字幕翻译" : "开启字幕翻译";
     if (settings.enabled === false) {
-      loadGeneration += 1;
+      cancelActiveLoad();
       clearStatus();
       subtitles = []; ci = -1; refresh();
       const el = document.getElementById(CID);
@@ -339,7 +427,6 @@ function injectToggle() {
       const el = document.getElementById(CID);
       if (el) el.style.display = "";
       loadedVideoId = "";
-      findV();
     }
     chrome.storage.local.get(["ytsSettings"], d => {
       const s = d.ytsSettings || {};
@@ -382,7 +469,7 @@ chrome.storage.local.get(["ytsSettings"], d => {
 
   window.addEventListener("yt-navigate-finish", () => {
     loadedVideoId = "";
-    loadGeneration += 1;
+    cancelActiveLoad();
     clearStatus();
     subtitles = []; ci = -1; refresh();
     setTimeout(() => { injectToggle(); findV(); }, 1000);
@@ -394,7 +481,7 @@ chrome.storage.onChanged.addListener(changes => {
     settings = { ...DEF, ...(changes.ytsSettings.newValue||{}) };
     syncStyle();
     if (settings.enabled === false) {
-      loadGeneration += 1;
+      cancelActiveLoad();
       clearStatus();
       subtitles = []; ci = -1; refresh();
       const el = document.getElementById(CID); if (el) el.style.display = "none";

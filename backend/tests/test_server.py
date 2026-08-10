@@ -356,51 +356,39 @@ class ServerProcessTest(unittest.TestCase):
 
 
 class ServerSSETest(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        try:
-            from fastapi.testclient import TestClient
-            cls._has_testclient = True
-        except ImportError:
-            cls._has_testclient = False
+    @staticmethod
+    def collect_stream(req):
+        from youtube_ingest.server import process_subtitle_stream
 
-    def setUp(self):
-        if not self._has_testclient:
-            self.skipTest("fastapi.testclient not available")
+        async def collect():
+            response = await process_subtitle_stream(req)
+            chunks = []
+            async for chunk in response.body_iterator:
+                chunks.append(chunk.decode() if isinstance(chunk, bytes) else chunk)
+            return response, "".join(chunks)
 
-    @patch("youtube_ingest.server._cache")
-    @patch("youtube_ingest.server._fetch_json3_subtitle")
-    @patch("youtube_ingest.server.fetch_metadata")
-    def test_stream_no_translate_returns_all_cues(self, mock_fetch, mock_json3, mock_cache):
-        from youtube_ingest.server import app
-        from fastapi.testclient import TestClient
+        return asyncio.run(collect())
 
-        mock_fetch.return_value = {
-            "id": "test123",
-            "title": "Test",
-            "subtitles": {"en": [{}]},
-            "automatic_captions": {},
-        }
-        mock_json3.return_value = json.dumps({
-            "events": [
-                {"tStartMs": 0, "dDurationMs": 500, "segs": [{"utf8": "A.", "tOffsetMs": 0}]},
-                {"tStartMs": 600, "dDurationMs": 500, "segs": [{"utf8": "B.", "tOffsetMs": 0}]},
-            ]
-        })
-        mock_cache.get_cues.return_value = None
-        mock_cache.get_json3.return_value = None
+    @patch("youtube_ingest.server.run_in_threadpool", new_callable=AsyncMock)
+    def test_stream_no_translate_returns_all_cues(self, mock_process):
+        from youtube_ingest.server import SubtitleRequest
 
-        client = TestClient(app)
-        resp = client.post("/api/subtitle/stream", json={
-            "url": "https://www.youtube.com/watch?v=test123",
-            "languages": ["en"],
-            "segmentation": "rule",
-        })
+        mock_process.return_value = ({
+            "video_id": "test123", "title": "Test",
+            "from_lang": "en", "source": "manual",
+        }, [
+            {"start": 0, "end": 500, "text": "A.", "translation": ""},
+            {"start": 600, "end": 1100, "text": "B.", "translation": ""},
+        ])
+
+        resp, body = self.collect_stream(SubtitleRequest(
+            url="https://www.youtube.com/watch?v=test123",
+            languages=["en"], segmentation="rule",
+        ))
         self.assertEqual(resp.status_code, 200)
-        self.assertIn("text/event-stream", resp.headers["content-type"])
-
-        body = resp.text
+        self.assertEqual(resp.media_type, "text/event-stream")
         self.assertIn('"type": "meta"', body)
+        self.assertIn('"total_cues": 2', body)
         self.assertIn('"type": "cue"', body)
         self.assertIn('"type":"done"', body)
         # Should have at least 2 cues
@@ -408,44 +396,36 @@ class ServerSSETest(unittest.TestCase):
         self.assertGreaterEqual(len(cue_chunks), 2)
 
     @patch("youtube_ingest.server._cache")
-    @patch("youtube_ingest.server._fetch_json3_subtitle")
-    @patch("youtube_ingest.server.fetch_metadata")
-    def test_stream_with_translate(self, mock_fetch, mock_json3, mock_cache):
-        from youtube_ingest.server import app
-        from fastapi.testclient import TestClient
+    @patch("youtube_ingest.server.run_in_threadpool", new_callable=AsyncMock)
+    def test_stream_with_translate(self, mock_process, mock_cache):
+        from youtube_ingest.server import SubtitleRequest
 
-        mock_fetch.return_value = {
-            "id": "test123",
-            "title": "Test",
-            "subtitles": {"en": [{}]},
-            "automatic_captions": {},
-        }
-        mock_json3.return_value = json.dumps({
-            "events": [
-                {"tStartMs": 0, "dDurationMs": 500, "segs": [{"utf8": "Hello.", "tOffsetMs": 0}]},
-            ]
-        })
+        mock_process.return_value = ({
+            "video_id": "test123", "title": "Test",
+            "from_lang": "en", "source": "manual",
+        }, [
+            {"start": 0, "end": 500, "text": "Hello.", "translation": ""},
+        ])
         mock_cache.get_cues.return_value = None
-        mock_cache.get_json3.return_value = None
 
-        # Mock translate_stream to yield a single chunk
-        async def fake_stream(*args, **kwargs):
-            yield "你好"
-
-        client = TestClient(app)
-        with patch("youtube_ingest.server.translate_stream", side_effect=fake_stream):
-            resp = client.post("/api/subtitle/stream", json={
-                "url": "https://www.youtube.com/watch?v=test123",
-                "languages": ["en"],
-                "segmentation": "rule",
-                "translate_to": "zh-CN",
-                "translate_provider": "openai",
-                "translate_api_key": "sk-test",
-            })
+        with patch(
+            "youtube_ingest.server.translate_subtitles", new_callable=AsyncMock,
+        ) as mock_translate:
+            mock_translate.return_value = [
+                {"start": 0, "end": 500, "text": "Hello.", "translation": "你好。"},
+            ]
+            resp, body = self.collect_stream(SubtitleRequest(
+                url="https://www.youtube.com/watch?v=test123",
+                languages=["en"], segmentation="rule",
+                translate_to="zh-CN", translate_provider="openai",
+                translate_api_key="sk-test", translate_whole=True,
+            ))
             self.assertEqual(resp.status_code, 200)
-            body = resp.text
-            self.assertIn('"type": "cue_chunk"', body)
-            self.assertIn("你好", body)
+            self.assertIn('"type": "source_cue"', body)
+            self.assertIn('"type": "cue"', body)
+            self.assertIn("你好。", body)
+            self.assertIn('"failed_cues": 0', body)
+            self.assertTrue(mock_translate.await_args.kwargs["whole"])
 
 
 class ServerCacheAdminTest(unittest.TestCase):

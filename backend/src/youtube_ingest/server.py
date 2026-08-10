@@ -7,6 +7,7 @@ Run with:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -459,47 +460,127 @@ async def process_subtitle_stream(req: SubtitleRequest):
     if not to_lang or not cues:
         # No translation — return all cues at once
         async def _no_translate():
-            yield f"data: {json.dumps({'type': 'meta', **meta, 'to_lang': None, 'segmentation': req.segmentation}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'meta', **meta, 'to_lang': None, 'segmentation': req.segmentation, 'total_cues': len(cues)}, ensure_ascii=False)}\n\n"
             for i, c in enumerate(cues):
                 yield f"data: {json.dumps({'type': 'cue', 'index': i, **c}, ensure_ascii=False)}\n\n"
             yield "data: {\"type\":\"done\"}\n\n"
-        return StreamingResponse(_no_translate(), media_type="text/event-stream")
+        return StreamingResponse(
+            _no_translate(), media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
-    # Stream translate
+    # Stream source cues immediately, then translate in bounded concurrent chunks.
+    # Long videos no longer depend on a single silent HTTP request completing before
+    # Cloudflare's proxy timeout. Completed chunks are cached so reconnects resume.
     async def _event_stream():
-        yield f"data: {json.dumps({'type': 'meta', **meta, 'to_lang': to_lang, 'segmentation': req.segmentation}, ensure_ascii=False)}\n\n"
+        total = len(cues)
+        cache_args = (
+            meta["video_id"], meta["from_lang"], req.segmentation, to_lang,
+        )
+        working = [dict(cue) for cue in cues]
+        cached = _cache.get_cues(*cache_args)
+        if cached and len(cached) == total:
+            for idx, cached_cue in enumerate(cached):
+                if cached_cue.get("text") == working[idx].get("text"):
+                    working[idx]["translation"] = cached_cue.get("translation", "")
 
-        for idx, cue in enumerate(cues):
-            text = cue["text"]
-            if not text.strip():
-                yield f"data: {json.dumps({'type': 'cue', 'index': idx, **cue}, ensure_ascii=False)}\n\n"
-                continue
+        def is_complete(cue: dict) -> bool:
+            translation = str(cue.get("translation") or "").strip()
+            return bool(translation and translation != "[Translation failed]")
 
-            # Stream this cue's translation
-            translation_parts: list[str] = []
-            try:
-                async for chunk in translate_stream(
-                    text, from_lang=meta["from_lang"], to_lang=to_lang,
-                    provider=req.translate_provider,
-                    api_key=req.translate_api_key,
-                    base_url=req.translate_base_url,
-                    model=req.translate_model,
-                ):
-                    translation_parts.append(chunk)
-                    partial = "".join(translation_parts)
-                    yield f"data: {json.dumps({'type': 'cue_chunk', 'index': idx, 'text': text, 'translation': partial}, ensure_ascii=False)}\n\n"
+        completed = {idx for idx, cue in enumerate(working) if is_complete(cue)}
+        yield f"data: {json.dumps({'type': 'meta', **meta, 'to_lang': to_lang, 'segmentation': req.segmentation, 'total_cues': total, 'completed_cues': len(completed)}, ensure_ascii=False)}\n\n"
+        for idx, cue in enumerate(working):
+            source_cue = {**cue, "translation": cue.get("translation", "")}
+            yield f"data: {json.dumps({'type': 'source_cue', 'index': idx, **source_cue}, ensure_ascii=False)}\n\n"
+        for idx in sorted(completed):
+            yield f"data: {json.dumps({'type': 'cue', 'index': idx, **working[idx], 'cached': True}, ensure_ascii=False)}\n\n"
 
-                full = "".join(translation_parts)
-                cue["translation"] = full
-            except Exception as exc:
-                logger.warning("Stream translate failed for cue %d: %s", idx, exc)
-                cue["translation"] = "[Translation failed]"
+        pending_indices = [idx for idx in range(total) if idx not in completed]
+        if not pending_indices:
+            yield f"data: {json.dumps({'type': 'done', 'total_cues': total, 'failed_cues': 0})}\n\n"
+            return
 
-            yield f"data: {json.dumps({'type': 'cue', 'index': idx, **cue}, ensure_ascii=False)}\n\n"
+        # Context-aware chunks keep terminology coherent while ensuring each API
+        # call remains comfortably below provider and proxy time limits.
+        # Automatically use context chunks for long videos even if an older
+        # extension saved translate_whole=false. Per-cue translation of hundreds
+        # of cues is too slow and expensive for an interactive stream.
+        use_context_chunks = req.translate_whole or total >= 100
+        chunk_size = 40 if use_context_chunks else 12
+        chunks = [
+            pending_indices[start:start + chunk_size]
+            for start in range(0, len(pending_indices), chunk_size)
+        ]
+        semaphore = asyncio.Semaphore(3)
 
-        yield "data: {\"type\":\"done\"}\n\n"
+        async def translate_chunk(indices: list[int]) -> tuple[list[int], list[dict] | None]:
+            async with semaphore:
+                batch = [working[idx] for idx in indices]
+                for attempt in range(2):
+                    try:
+                        translated = await translate_subtitles(
+                            batch,
+                            from_lang=meta["from_lang"],
+                            to_lang=to_lang,
+                            provider=req.translate_provider,
+                            api_key=req.translate_api_key,
+                            base_url=req.translate_base_url,
+                            model=req.translate_model,
+                            concurrency=3,
+                            timeout=60.0,
+                            whole=use_context_chunks,
+                        )
+                        return indices, translated
+                    except Exception as exc:
+                        logger.warning(
+                            "SSE chunk translation failed (attempt %d/2, cues %d-%d): %s",
+                            attempt + 1, indices[0], indices[-1], exc,
+                        )
+                        if attempt == 0:
+                            await asyncio.sleep(1)
+                return indices, None
 
-    return StreamingResponse(_event_stream(), media_type="text/event-stream")
+        tasks = {asyncio.create_task(translate_chunk(indices)) for indices in chunks}
+        failed: set[int] = set()
+        try:
+            while tasks:
+                done, tasks = await asyncio.wait(
+                    tasks, timeout=10.0, return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not done:
+                    yield ": keepalive\n\n"
+                    continue
+
+                for task in done:
+                    indices, translated = await task
+                    if translated is None:
+                        failed.update(indices)
+                        continue
+
+                    for idx, translated_cue in zip(indices, translated):
+                        translation = str(translated_cue.get("translation") or "").strip()
+                        if not translation or translation == "[Translation failed]":
+                            failed.add(idx)
+                            continue
+                        working[idx]["translation"] = translation
+                        completed.add(idx)
+                        yield f"data: {json.dumps({'type': 'cue', 'index': idx, **working[idx]}, ensure_ascii=False)}\n\n"
+
+                    # A partial cache makes a reconnect resume only unfinished cues.
+                    _cache.put_cues(*cache_args, working)
+        finally:
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+        yield f"data: {json.dumps({'type': 'done', 'total_cues': total, 'failed_cues': len(failed)}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        _event_stream(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ── WebSocket ──────────────────────────────────────────────────────────

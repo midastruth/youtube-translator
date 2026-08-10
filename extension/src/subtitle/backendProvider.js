@@ -210,7 +210,8 @@ export class YouTubeBackendProvider {
       name === "translateProvider" ||
       name === "translateApiKey" ||
       name === "translateBaseUrl" ||
-      name === "translateModel"
+      name === "translateModel" ||
+      name === "translateWhole"
     ) {
       this.reprocess();
       return;
@@ -304,6 +305,7 @@ export class YouTubeBackendProvider {
       if (this.#setting.translateApiKey) body.translate_api_key = this.#setting.translateApiKey;
       if (this.#setting.translateBaseUrl) body.translate_base_url = this.#setting.translateBaseUrl;
       if (this.#setting.translateModel) body.translate_model = this.#setting.translateModel;
+      if (this.#setting.translateWhole) body.translate_whole = true;
     }
 
     // Use streaming endpoint for faster first-cue display

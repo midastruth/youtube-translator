@@ -359,6 +359,11 @@ export default function SubtitleSetting() {
     translationStyle,
     showLoadNotification = true,
     hideSubtitleButton = false,
+    backendUrl = "",
+    translateApiKey = "",
+    translateBaseUrl = "",
+    translateModel = "",
+    translateWhole = false,
   } = subtitleSetting;
 
   // 整理悬浮查词模式和字幕列表模式的回退逻辑
@@ -984,6 +989,111 @@ export default function SubtitleSetting() {
                 value={hideSubtitleButton}
                 label={i18n("hide_subtitle_button")}
                 onChange={handleChange}
+              >
+                <MenuItem value={true}>{i18n("enable")}</MenuItem>
+                <MenuItem value={false}>{i18n("disable")}</MenuItem>
+              </TextField>
+            </Grid>
+          </Grid>
+        </Box>
+
+        {/* ── 后端代理模式配置 ── */}
+        <Box
+          sx={{
+            border: "1px solid",
+            borderColor: backendUrl ? "primary.main" : "divider",
+            borderRadius: 1,
+            p: 2,
+          }}
+        >
+          <Typography variant="subtitle2" gutterBottom>
+            🖥 {i18n("backend_mode") || "后端代理模式（youtube-ingest）"}
+          </Typography>
+          <Typography variant="body2" color="text.secondary" gutterBottom>
+            {i18n("backend_mode_desc") ||
+              "配置后端地址后，字幕获取、分句、翻译全部由后端服务完成，扩展只负责渲染。"}
+          </Typography>
+
+          <Grid container spacing={2} sx={{ mt: 1 }}>
+            {/* 后端地址 */}
+            <Grid item xs={12} sm={6} md={6} lg={4}>
+              <TextField
+                fullWidth
+                size="small"
+                name="backendUrl"
+                value={backendUrl}
+                label={i18n("backend_url") || "后端地址"}
+                placeholder="http://localhost:8787"
+                onChange={handleChange}
+                helperText={
+                  backendUrl
+                    ? i18n("backend_enabled") || "✓ 后端模式已启用"
+                    : i18n("backend_disabled") || "留空则使用前端模式"
+                }
+                FormHelperTextProps={{
+                  sx: { color: backendUrl ? "success.main" : "text.secondary" },
+                }}
+              />
+            </Grid>
+
+            {/* 翻译 API Key */}
+            <Grid item xs={12} sm={6} md={6} lg={4}>
+              <TextField
+                fullWidth
+                size="small"
+                name="translateApiKey"
+                value={translateApiKey}
+                label={i18n("translate_api_key") || "翻译 API Key"}
+                placeholder={i18n("translate_api_key_placeholder") || "sk-...（留空则用服务端配置）"}
+                onChange={handleChange}
+                type="password"
+                helperText={i18n("translate_api_key_hint") || "OpenAI / 兼容 API 的 key"}
+              />
+            </Grid>
+
+            {/* 翻译 API 地址 */}
+            <Grid item xs={12} sm={6} md={6} lg={4}>
+              <TextField
+                fullWidth
+                size="small"
+                name="translateBaseUrl"
+                value={translateBaseUrl}
+                label={i18n("translate_base_url") || "API 地址"}
+                placeholder="https://api.openai.com/v1"
+                onChange={handleChange}
+                helperText={i18n("translate_base_url_hint") || "留空用默认 OpenAI 地址"}
+              />
+            </Grid>
+
+            {/* 翻译模型 */}
+            <Grid item xs={12} sm={6} md={6} lg={3}>
+              <TextField
+                fullWidth
+                size="small"
+                name="translateModel"
+                value={translateModel}
+                label={i18n("translate_model") || "翻译模型"}
+                placeholder="gpt-4o"
+                onChange={handleChange}
+                helperText={i18n("translate_model_hint") || "留空用默认"}
+              />
+            </Grid>
+
+            {/* 全文翻译开关 */}
+            <Grid item xs={12} sm={6} md={6} lg={3}>
+              <TextField
+                fullWidth
+                select
+                size="small"
+                name="translateWhole"
+                value={translateWhole}
+                label={i18n("translate_whole") || "全文一次翻译"}
+                onChange={handleChange}
+                helperText={
+                  translateWhole
+                    ? i18n("translate_whole_on") || "术语统一、代词正确"
+                    : i18n("translate_whole_off") || "逐句并行，速度快"
+                }
               >
                 <MenuItem value={true}>{i18n("enable")}</MenuItem>
                 <MenuItem value={false}>{i18n("disable")}</MenuItem>

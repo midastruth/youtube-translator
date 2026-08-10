@@ -195,6 +195,10 @@ export const DEFAULT_SUBTITLE_SETTING = {
   segPromptMode: PROMPT_MODE_FOLLOW_API, // AI 断句提示词来源：接口默认或指定 subtitle prompt
   segPromptSlug: DEFAULT_SUBTITLE_PROMPT_SLUG, // 指定的 subtitle prompt slug，仅在指定提示词模式下生效
   backendUrl: "", // 后端代理地址（如 http://localhost:8787），不为空时启用后端模式
+  translateApiKey: "", // 后端模式下传给服务器的翻译 API key（空则用服务端 .env）
+  translateBaseUrl: "", // 后端模式下的 OpenAI 兼容 API 地址
+  translateModel: "", // 后端模式下的翻译模型（如 gpt-4o，空则用默认）
+  translateWhole: false, // 后端模式下是否全文一次性翻译（true=术语统一，false=逐句并行）
 };
 
 // 预设配置规则的在线订阅 URL 地址列表 (从服务器拉取全球主流网站的最优适配 CSS 选择器规则)

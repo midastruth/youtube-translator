@@ -113,6 +113,7 @@ class ServerProcessTest(unittest.TestCase):
         if not self._has_testclient:
             self.skipTest("fastapi.testclient not available")
 
+    @patch("youtube_ingest.server._cache")
     @patch("youtube_ingest.transcribe.transcribe_timed_chunks")
     @patch("youtube_ingest.transcribe.WhisperClient")
     @patch("youtube_ingest.audio.split_audio")
@@ -125,6 +126,7 @@ class ServerProcessTest(unittest.TestCase):
         mock_split,
         mock_client,
         mock_transcribe,
+        mock_cache,
     ):
         from youtube_ingest.server import app
         from fastapi.testclient import TestClient
@@ -145,6 +147,7 @@ class ServerProcessTest(unittest.TestCase):
                 "translation": "",
             }
         ]
+        mock_cache.get_cues.return_value = None
 
         response = TestClient(app).post("/api/subtitle/process", json={
             "url": "https://www.youtube.com/watch?v=whisper123",
@@ -164,6 +167,41 @@ class ServerProcessTest(unittest.TestCase):
             language="en",
             chunk_seconds=600,
         )
+        mock_cache.put_cues.assert_called_once()
+
+    def test_process_endpoint_whisper_uses_cached_timed_cues(self):
+        from youtube_ingest.server import app
+        from fastapi.testclient import TestClient
+
+        cached_cues = [{
+            "start": 1250.0,
+            "end": 4750.0,
+            "text": "Cached Whisper transcript",
+            "translation": "",
+        }]
+        metadata = {
+            "id": "whisper-cache-123",
+            "title": "No Captions",
+            "subtitles": {},
+            "automatic_captions": {},
+        }
+
+        with patch("youtube_ingest.server.fetch_metadata", return_value=metadata), \
+             patch("youtube_ingest.server._cache") as mock_cache, \
+             patch("youtube_ingest.server._download_audio") as mock_download:
+            mock_cache.get_cues.return_value = cached_cues
+            response = TestClient(app).post("/api/subtitle/process", json={
+                "url": "https://www.youtube.com/watch?v=whisper-cache-123",
+                "languages": ["en"],
+                "whisper_enabled": True,
+                "whisper_language": "en",
+            })
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["source"], "whisper")
+        self.assertEqual(data["cues"], cached_cues)
+        mock_download.assert_not_called()
 
     @patch("youtube_ingest.server._cache")
     @patch("youtube_ingest.server._fetch_json3_subtitle")

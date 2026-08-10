@@ -287,6 +287,7 @@ async function load(pageUrl) {
 
     showStatus(track ? "正在处理并流式翻译字幕…" : "没有字幕，正在使用 Whisper 转写…");
     let totalCues = 0;
+    let restoredCues = 0;
     let streamDone = false;
     const translated = new Set();
 
@@ -295,7 +296,16 @@ async function load(pageUrl) {
 
       if (event.type === "meta") {
         totalCues = Number(event.total_cues) || 0;
-        showStatus(totalCues ? `字幕已获取，正在翻译 0/${totalCues}…` : "正在翻译字幕…");
+        restoredCues = Math.min(
+          totalCues,
+          Math.max(0, Number(event.completed_cues) || 0),
+        );
+        if (restoredCues > 0) {
+          const action = restoredCues >= totalCues ? "" : "，正在补译剩余字幕…";
+          showStatus(`已恢复缓存 ${restoredCues}/${totalCues}${action}`);
+        } else {
+          showStatus(totalCues ? `字幕已获取，正在翻译 0/${totalCues}…` : "正在翻译字幕…");
+        }
         return;
       }
 
@@ -314,8 +324,13 @@ async function load(pageUrl) {
           ci = idxOf(videoEl.currentTime * 1000);
           refresh();
         }
-        if (event.type === "cue" && (translated.size === 1 || translated.size % 10 === 0)) {
-          showStatus(`字幕翻译中 ${translated.size}/${totalCues || subtitles.length}…`);
+        const completed = Math.max(restoredCues, translated.size);
+        if (event.type === "cue" && !event.cached && (
+          completed === restoredCues + 1
+          || completed % 10 === 0
+          || completed === totalCues
+        )) {
+          showStatus(`字幕翻译中 ${completed}/${totalCues || subtitles.length}…`);
         }
         return;
       }

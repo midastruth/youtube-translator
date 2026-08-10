@@ -8,6 +8,7 @@ Run with:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -15,6 +16,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any, AsyncGenerator
 
@@ -51,6 +53,38 @@ _cache = SubtitleCache(
     ttl_seconds=float(os.getenv("CACHE_TTL_SECONDS", "86400")),
 )
 _active_sse_jobs: set[str] = set()
+_whisper_locks_guard = threading.Lock()
+_whisper_locks: dict[str, threading.Lock] = {}
+_WHISPER_CACHE_VERSION = "whisper-timed-v1"
+
+
+def _whisper_cache_profile(
+    language: str | None,
+    base_url: str | None,
+    model: str | None,
+) -> str:
+    """Build a stable cache key without exposing provider URLs in filenames."""
+    effective_language = language or "auto"
+    effective_base_url = (
+        base_url
+        or os.getenv("WHISPER_BASE_URL")
+        or "https://api.groq.com/openai/v1"
+    ).rstrip("/")
+    effective_model = model or os.getenv("WHISPER_MODEL") or "whisper-large-v3"
+    material = "\n".join((
+        _WHISPER_CACHE_VERSION,
+        effective_language,
+        effective_base_url,
+        effective_model,
+    ))
+    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+    safe_language = re.sub(r"[^A-Za-z0-9._-]+", "_", effective_language)
+    return f"whisper-{safe_language}-{digest}"
+
+
+def _whisper_lock(key: str) -> threading.Lock:
+    with _whisper_locks_guard:
+        return _whisper_locks.setdefault(key, threading.Lock())
 
 
 # ── yt-dlp helpers ─────────────────────────────────────────────────────
@@ -225,38 +259,76 @@ def _process_subtitle_sync(
 
     if selected is None and whisper_enabled:
         # ── Whisper fallback ──
-        logger.info("No subtitle track — falling back to Whisper transcription")
-        try:
-            with tempfile.TemporaryDirectory() as tmpdir:
-                audio_path = _download_audio(url, Path(tmpdir))
-                chunks_dir = Path(tmpdir) / "chunks"
-                chunks = split_audio(audio_path, chunks_dir, chunk_seconds=600)
-                client = WhisperClient(
-                    api_key=whisper_api_key,
-                    base_url=whisper_base_url,
-                    model=whisper_model,
-                )
-                cues = transcribe_timed_chunks(
-                    chunks,
-                    client,
-                    language=whisper_language,
-                    chunk_seconds=600,
-                )
+        cache_profile = _whisper_cache_profile(
+            whisper_language, whisper_base_url, whisper_model,
+        )
 
-            if not cues:
-                raise HTTPException(status_code=500, detail="Whisper returned no timed transcript")
-
+        def cached_result() -> tuple[dict, list[dict]] | None:
+            cached_cues = _cache.get_cues(
+                video_id, cache_profile, _WHISPER_CACHE_VERSION, None,
+            )
+            if not cached_cues:
+                return None
             logger.info(
-                "Whisper produced %d timed cues spanning %.1fs",
-                len(cues), cues[-1]["end"] / 1000.0,
+                "Whisper timed cue cache hit for %s (%d cues)",
+                video_id, len(cached_cues),
             )
             return {
                 "video_id": video_id, "title": title,
                 "from_lang": whisper_language or "auto",
                 "source": "whisper",
-            }, cues
-        except IngestError as exc:
-            raise HTTPException(status_code=500, detail=f"Whisper fallback failed: {exc}")
+            }, cached_cues
+
+        cached = cached_result()
+        if cached:
+            return cached
+
+        # A refresh can start a second thread while the first transcription is
+        # still running. Serialize the same video/profile and re-check inside
+        # the lock so only one request downloads and transcribes the audio.
+        lock_key = f"{video_id}:{cache_profile}"
+        with _whisper_lock(lock_key):
+            cached = cached_result()
+            if cached:
+                return cached
+
+            logger.info("No subtitle track — falling back to Whisper transcription")
+            try:
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    audio_path = _download_audio(url, Path(tmpdir))
+                    chunks_dir = Path(tmpdir) / "chunks"
+                    chunks = split_audio(audio_path, chunks_dir, chunk_seconds=600)
+                    client = WhisperClient(
+                        api_key=whisper_api_key,
+                        base_url=whisper_base_url,
+                        model=whisper_model,
+                    )
+                    cues = transcribe_timed_chunks(
+                        chunks,
+                        client,
+                        language=whisper_language,
+                        chunk_seconds=600,
+                    )
+
+                if not cues:
+                    raise HTTPException(
+                        status_code=500, detail="Whisper returned no timed transcript",
+                    )
+
+                _cache.put_cues(
+                    video_id, cache_profile, _WHISPER_CACHE_VERSION, None, cues,
+                )
+                logger.info(
+                    "Whisper produced and cached %d timed cues spanning %.1fs",
+                    len(cues), cues[-1]["end"] / 1000.0,
+                )
+                return {
+                    "video_id": video_id, "title": title,
+                    "from_lang": whisper_language or "auto",
+                    "source": "whisper",
+                }, cues
+            except IngestError as exc:
+                raise HTTPException(status_code=500, detail=f"Whisper fallback failed: {exc}")
 
     lang, source = selected
     logger.info("Selected subtitle: %s (%s)", lang, source)

@@ -139,102 +139,13 @@
   <!-- VTT -->
   <div class="section">
     <div class="section-title">📥 字幕导出</div>
-    <button onclick="downloadVtt()" style="margin-top:0">⬇ 下载 VTT 字幕文件</button>
+    <button id="downloadVttButton" style="margin-top:0">⬇ 下载 VTT 字幕文件</button>
     <div class="hint" style="margin-top:8px">将当前视频字幕导出为 WebVTT 格式（双语）</div>
   </div>
 
-  <button onclick="save()">💾 保存设置</button>
+  <button id="saveButton">💾 保存设置</button>
   <span class="saved" id="savedMsg">✓ 已保存</span>
 
-  <script>
-    const NUM_KEYS = ["fontSizeOrig", "fontSizeTran", "positionY"];
-    const RANGE_KEYS = ["fontSizeOrig", "fontSizeTran", "bgOpacity"];
-
-    function load() {
-      chrome.storage.local.get(["ytsSettings"], (data) => {
-        const s = data.ytsSettings || {};
-        setVal("backendUrl", s.backendUrl || "http://localhost:8787");
-        setVal("languages", s.languages || "en,zh-Hans,zh-Hant,zh");
-        setVal("toLang", s.toLang || "zh-CN");
-        setVal("segmentation", s.segmentation || "rule");
-        setVal("translateApiKey", s.translateApiKey || "");
-        setVal("translateBaseUrl", s.translateBaseUrl || "");
-        setVal("translateModel", s.translateModel || "");
-        setVal("translateWhole", s.translateWhole ? "true" : "false");
-        setVal("whisperEnabled", s.whisperEnabled ? "true" : "false");
-        setVal("whisperApiKey", s.whisperApiKey || "");
-        setVal("whisperBaseUrl", s.whisperBaseUrl || "");
-        setVal("whisperModel", s.whisperModel || "");
-        setVal("whisperLanguage", s.whisperLanguage || "");
-        setVal("isBilingual", s.isBilingual !== false ? "true" : "false");
-        setVal("fontSizeOrig", s.fontSizeOrig || 22);
-        setVal("fontSizeTran", s.fontSizeTran || 18);
-        setVal("origColor", s.origColor || "#ffffff");
-        setVal("tranColor", s.tranColor || "#ffff00");
-        setVal("bgOpacity", Math.round((s.bgOpacity ?? 0.6) * 100));
-        RANGE_KEYS.forEach(k => updateRangeLabel(k));
-      });
-    }
-
-    function setVal(id, val) {
-      const el = document.getElementById(id);
-      if (!el) return;
-      if (el.type === "checkbox") el.checked = val;
-      else el.value = val;
-    }
-
-    function getVal(id) {
-      const el = document.getElementById(id);
-      return el.type === "checkbox" ? el.checked : el.value;
-    }
-
-    function updateRangeLabel(id) {
-      const v = getVal(id);
-      const span = document.getElementById(id + "Val");
-      if (!span) return;
-      if (id === "bgOpacity") span.textContent = v + "%";
-      else span.textContent = v + "px";
-    }
-
-    // live range preview
-    document.getElementById("fontSizeOrig").addEventListener("input", () => updateRangeLabel("fontSizeOrig"));
-    document.getElementById("fontSizeTran").addEventListener("input", () => updateRangeLabel("fontSizeTran"));
-    document.getElementById("bgOpacity").addEventListener("input", () => updateRangeLabel("bgOpacity"));
-
-    function downloadVtt() {
-      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-        if (tabs[0]) chrome.tabs.sendMessage(tabs[0].id, { action: "downloadVtt" });
-      });
-    }
-
-    function save() {
-      const settings = {};
-      for (const id of ["backendUrl","languages","toLang","segmentation",
-                         "translateApiKey","translateBaseUrl","translateModel",
-                         "origColor","tranColor"]) {
-        settings[id] = getVal(id).trim();
-      }
-      settings.translateWhole = getVal("translateWhole") === "true";
-      settings.whisperEnabled = getVal("whisperEnabled") === "true";
-      settings.whisperApiKey = getVal("whisperApiKey").trim();
-      settings.whisperBaseUrl = getVal("whisperBaseUrl").trim();
-      settings.whisperModel = getVal("whisperModel").trim();
-      settings.whisperLanguage = getVal("whisperLanguage").trim();
-      settings.isBilingual = getVal("isBilingual") === "true";
-      settings.bgOpacity = parseInt(getVal("bgOpacity")) / 100;
-      settings.autoTranslate = true;
-      for (const k of NUM_KEYS) settings[k] = parseInt(getVal(k)) || 22;
-      settings.positionY = settings.positionY || 12;
-
-      chrome.storage.local.set({ ytsSettings: settings }, () => {
-        const msg = document.getElementById("savedMsg");
-        msg.classList.remove("show");
-        void msg.offsetWidth;
-        msg.classList.add("show");
-      });
-    }
-
-    load();
-  </script>
+  <script src="options.js"></script>
 </body>
 </html>

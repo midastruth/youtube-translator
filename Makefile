@@ -28,12 +28,12 @@ docker-build:
 # ── 安装 ─────────────────────────────────────────────────────────────
 
 install:
-	cd backend && python -m venv .venv
+	cd backend && python3 -m venv .venv
 	cd backend && .venv/bin/pip install -e .
-	cd extension && pnpm install
+	@echo "minimal-extension is static; no frontend dependencies to install"
 
 build-extension:
-	cd extension && pnpm build
+	@echo "minimal-extension/public is ready to load directly in Chrome"
 
 # ── 清理 ─────────────────────────────────────────────────────────────
 

@@ -22,6 +22,7 @@ from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnec
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 from .cache import SubtitleCache
 from .errors import IngestError
@@ -331,7 +332,7 @@ async def get_tracks(
     """List available subtitle tracks for a YouTube video."""
     try:
         lang_list = [l.strip() for l in languages.split(",") if l.strip()]
-        metadata = fetch_metadata(url)
+        metadata = await run_in_threadpool(fetch_metadata, url)
         video_id = str(metadata.get("id") or "unknown")
         title = str(metadata.get("title") or video_id)
 
@@ -357,7 +358,8 @@ async def get_tracks(
 async def process_subtitle(req: SubtitleRequest):
     """Fetch subtitle, segment, and optionally translate."""
     try:
-        meta, cues = _process_subtitle_sync(
+        meta, cues = await run_in_threadpool(
+            _process_subtitle_sync,
             url=req.url,
             languages=req.languages,
             allow_automatic=req.allow_automatic,
@@ -414,7 +416,8 @@ async def process_subtitle_stream(req: SubtitleRequest):
     The client can render cues incrementally as translations arrive.
     """
     try:
-        meta, cues = _process_subtitle_sync(
+        meta, cues = await run_in_threadpool(
+            _process_subtitle_sync,
             url=req.url,
             languages=req.languages,
             allow_automatic=req.allow_automatic,
@@ -497,7 +500,8 @@ async def ws_subtitle_process(ws: WebSocket):
         return
 
     try:
-        meta, cues = _process_subtitle_sync(
+        meta, cues = await run_in_threadpool(
+            _process_subtitle_sync,
             url=req.url,
             languages=req.languages,
             allow_automatic=req.allow_automatic,

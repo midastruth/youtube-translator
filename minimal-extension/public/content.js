@@ -4,6 +4,7 @@ const CID = "yts-overlay";
 
 let videoEl = null, subtitles = [], ci = -1;
 let observer = null, settings = {};
+let loadedVideoId = "", loadGeneration = 0;
 
 const DEF = {
   backendUrl: "http://localhost:8787",
@@ -30,7 +31,7 @@ document.head.appendChild(styleEl);
 function syncStyle() {
   const bg = `rgba(0,0,0,${settings.bgOpacity ?? 0.6})`;
   styleEl.textContent = `
-    #${CID} { position:absolute; bottom:${settings.positionY||12}%; left:50%; transform:translateX(-50%); text-align:center; z-index:99; pointer-events:auto; max-width:85%; cursor:grab; user-select:none; }
+    #${CID} { position:absolute; bottom:${settings.positionY ?? 12}%; left:50%; transform:translateX(-50%); text-align:center; z-index:99; pointer-events:auto; max-width:85%; cursor:grab; user-select:none; }
     #${CID}.drag { cursor:grabbing; }
     #${CID} .bg { display:none; padding:6px 14px; border-radius:8px; background:${bg}; }
     #${CID} .orig { display:none; color:${settings.origColor||"#fff"}; font-size:${settings.fontSizeOrig||22}px; font-weight:600; line-height:1.4; text-shadow:1px 1px 2px #000; pointer-events:none; }
@@ -41,9 +42,13 @@ function syncStyle() {
 // ── API ────────────────────────────────────────────────────
 
 async function apiPost(path, body) {
-  const url = `${settings.backendUrl || DEF.backendUrl}${path}`;
+  const baseUrl = (settings.backendUrl || DEF.backendUrl).replace(/\/+$/, "");
+  const url = `${baseUrl}${path}`;
   const r = await fetch(url, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body) });
-  if (!r.ok) throw new Error(`Backend ${r.status}`);
+  if (!r.ok) {
+    const error = await r.json().catch(() => ({}));
+    throw new Error(error.detail || `Backend ${r.status}`);
+  }
   return r.json();
 }
 
@@ -73,11 +78,12 @@ function refresh() {
 
   if (ci >= 0 && subtitles[ci]) {
     const s = subtitles[ci];
+    const hasTranslation = Boolean(s.translation);
+    const bilingual = settings.isBilingual !== false;
     orig.textContent = s.text;
-    orig.style.display = "block";
-    const hasTr = s.translation && settings.isBilingual !== false;
-    tran.textContent = hasTr ? s.translation : "";
-    tran.style.display = hasTr ? "block" : "none";
+    orig.style.display = bilingual || !hasTranslation ? "block" : "none";
+    tran.textContent = hasTranslation ? s.translation : "";
+    tran.style.display = hasTranslation ? "block" : "none";
     bg.style.display = "block";
   } else {
     bg.style.display = "none";
@@ -129,15 +135,23 @@ function idxOf(ms) {
 // ── load ───────────────────────────────────────────────────
 
 async function load(pageUrl) {
+  const generation = ++loadGeneration;
+  subtitles = [];
+  ci = -1;
+  refresh();
   overlay();
   try {
-    const tr = await fetch(
-      `${settings.backendUrl||DEF.backendUrl}/api/subtitle/tracks?url=${encodeURIComponent(pageUrl)}`
-    ).then(r => r.json());
-    if (!tr.tracks?.length) return;
+    const baseUrl = (settings.backendUrl || DEF.backendUrl).replace(/\/+$/, "");
+    const langs = (settings.languages || DEF.languages)
+      .split(",")
+      .map(value => value.trim())
+      .filter(Boolean);
+    const params = new URLSearchParams({ url: pageUrl, languages: langs.join(",") });
+    const tracksResponse = await fetch(`${baseUrl}/api/subtitle/tracks?${params}`);
+    if (!tracksResponse.ok) throw new Error(`Backend ${tracksResponse.status}`);
+    const tr = await tracksResponse.json();
 
     let track = null;
-    const langs = (settings.languages||DEF.languages).split(",").map(s=>s.trim());
     for (const src of ["manual","automatic"]) {
       for (const l of langs) {
         const p = l.split("-")[0].toLowerCase();
@@ -147,13 +161,15 @@ async function load(pageUrl) {
       if (track) break;
     }
     if (!track) track = tr.tracks[0];
-    if (!track) return;
+    if (!track && !settings.whisperEnabled) return;
 
     const body = {
-      url: pageUrl, language: track.language,
-      languages: [track.language], allow_automatic: true,
+      url: pageUrl,
+      languages: track ? [track.language] : langs,
+      allow_automatic: true,
       segmentation: settings.segmentation||"rule",
     };
+    if (track) body.language = track.language;
     if (settings.autoTranslate !== false && settings.toLang) {
       body.translate_to = settings.toLang;
       body.translate_provider = "openai";
@@ -172,7 +188,9 @@ async function load(pageUrl) {
     }
 
     const resp = await apiPost("/api/subtitle/process", body);
+    if (generation !== loadGeneration || settings.enabled === false) return;
     subtitles = (resp.cues||[]).map(c => ({ start:c.start, end:c.end, text:c.text, translation:c.translation||"" }));
+    tick();
   } catch (e) { console.error("[YTS]", e); }
 }
 
@@ -190,7 +208,19 @@ function tick() {
 function findV() {
   if (settings.enabled === false) return;
   const v = document.querySelector("video");
-  if (v && v !== videoEl) { videoEl = v; bindVideo(); const vid = videoId(); if (vid) load(`https://www.youtube.com/watch?v=${vid}`); }
+  const vid = videoId();
+  if (!v || !vid) return;
+
+  const videoChanged = v !== videoEl;
+  const idChanged = vid !== loadedVideoId;
+  if (videoChanged) {
+    videoEl = v;
+    bindVideo();
+  }
+  if (videoChanged || idChanged) {
+    loadedVideoId = vid;
+    load(`https://www.youtube.com/watch?v=${vid}`);
+  }
 }
 function videoId() { try { return new URL(location.href).searchParams.get("v")||""; } catch { return ""; } }
 
@@ -252,14 +282,15 @@ function injectToggle() {
     btn.innerHTML = settings.enabled !== false ? ICON_ON : ICON_OFF;
     btn.title = settings.enabled !== false ? "关闭字幕翻译" : "开启字幕翻译";
     if (settings.enabled === false) {
+      loadGeneration += 1;
       subtitles = []; ci = -1; refresh();
       const el = document.getElementById(CID);
       if (el) el.style.display = "none";
     } else {
       const el = document.getElementById(CID);
       if (el) el.style.display = "";
-      const vid = videoId();
-      if (vid) load(`https://www.youtube.com/watch?v=${vid}`);
+      loadedVideoId = "";
+      findV();
     }
     chrome.storage.local.get(["ytsSettings"], d => {
       const s = d.ytsSettings || {};
@@ -301,6 +332,8 @@ chrome.storage.local.get(["ytsSettings"], d => {
   observer.observe(document.body, { childList:true, subtree:true });
 
   window.addEventListener("yt-navigate-finish", () => {
+    loadedVideoId = "";
+    loadGeneration += 1;
     subtitles = []; ci = -1; refresh();
     setTimeout(() => { injectToggle(); findV(); }, 1000);
   });
@@ -311,10 +344,12 @@ chrome.storage.onChanged.addListener(changes => {
     settings = { ...DEF, ...(changes.ytsSettings.newValue||{}) };
     syncStyle();
     if (settings.enabled === false) {
+      loadGeneration += 1;
       subtitles = []; ci = -1; refresh();
       const el = document.getElementById(CID); if (el) el.style.display = "none";
     } else {
       const el = document.getElementById(CID); if (el) el.style.display = "";
+      loadedVideoId = "";
       subtitles = []; ci = -1; refresh(); findV();
     }
   }

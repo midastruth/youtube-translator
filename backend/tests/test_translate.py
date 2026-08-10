@@ -190,6 +190,10 @@ class TranslateWholeTest(unittest.TestCase):
         self.assertIn("[$0] Hello world.", prompt)
         self.assertIn("[$1] This is a test.", prompt)
 
+    def test_whole_prompt_requires_output_markers(self):
+        self.assertIn("Preserve each input marker exactly", _WHOLE_TRANSLATE_SYSTEM_PROMPT)
+        self.assertIn("[$12] translated text", _WHOLE_TRANSLATE_SYSTEM_PROMPT)
+
     def test_parse_numbered_format(self):
         response = """[$0] 你好世界。
 [$1] 这是一个测试。"""

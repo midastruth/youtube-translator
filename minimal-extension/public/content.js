@@ -14,7 +14,7 @@ const DEF = {
   toLang: "zh-CN",
   segmentation: "rule",
   translateApiKey: "", translateBaseUrl: "", translateModel: "",
-  translateWhole: false, autoTranslate: true, enabled: true,
+  translateWhole: false, autoTranslate: true, enabled: false,
   // Whisper fallback (no subtitle track → transcribe audio)
   whisperEnabled: false, whisperApiKey: "", whisperBaseUrl: "", whisperModel: "", whisperLanguage: "",
   // display
@@ -109,10 +109,15 @@ function overlay() {
     bg.appendChild(orig); bg.appendChild(tran);
     el.appendChild(status);
     el.appendChild(bg);
-    const m = document.querySelector("#movie_player .html5-video-container");
-    if (m) m.appendChild(el);
     drag(el);
   }
+  // YouTube frequently rebuilds the video container during navigation,
+  // quality changes, fullscreen transitions, and ad playback. Always ensure
+  // the overlay is mounted in the current container, not a detached old one.
+  const mount = videoEl?.closest?.(".html5-video-container")
+    || document.querySelector("#movie_player .html5-video-container")
+    || document.querySelector("#movie_player");
+  if (mount && el.parentElement !== mount) mount.appendChild(el);
   return el;
 }
 
@@ -141,9 +146,10 @@ function clearStatus() {
 }
 
 function refresh() {
-  const bg = document.querySelector(`#${CID} .bg`);
-  const orig = document.querySelector(`#${CID} .orig`);
-  const tran = document.querySelector(`#${CID} .tran`);
+  const root = overlay();
+  const bg = root?.querySelector(".bg");
+  const orig = root?.querySelector(".orig");
+  const tran = root?.querySelector(".tran");
   if (!orig || !tran || !bg) return;
 
   if (ci >= 0 && subtitles[ci]) {
@@ -339,7 +345,10 @@ function bindVideo() {
 function tick() {
   if (!videoEl) return;
   const i = idxOf(videoEl.currentTime * 1000);
-  if (i !== ci) { ci = i; refresh(); }
+  ci = i;
+  // Refresh even when the cue index did not change: the player may have
+  // replaced the overlay container since the previous timeupdate event.
+  refresh();
 }
 function findV() {
   if (settings.enabled === false) return;
@@ -408,7 +417,7 @@ function injectToggle() {
   const btn = document.createElement("button");
   btn.id = "yts-toggle";
   btn.className = "ytp-button";
-  btn.title = "双语字幕翻译";
+  btn.title = settings.enabled !== false ? "关闭字幕翻译" : "开启字幕翻译";
   btn.setAttribute("aria-label", "双语字幕翻译");
   btn.innerHTML = settings.enabled !== false ? ICON_ON : ICON_OFF;
 
@@ -427,12 +436,8 @@ function injectToggle() {
       const el = document.getElementById(CID);
       if (el) el.style.display = "";
       loadedVideoId = "";
+      findV();
     }
-    chrome.storage.local.get(["ytsSettings"], d => {
-      const s = d.ytsSettings || {};
-      s.enabled = settings.enabled;
-      chrome.storage.local.set({ ytsSettings: s });
-    });
   });
 
   wrapper.appendChild(btn);
@@ -460,11 +465,16 @@ function updateToggleIcon(btn) {
 }
 
 chrome.storage.local.get(["ytsSettings"], d => {
-  settings = { ...DEF, ...(d.ytsSettings||{}) };
+  // Enabling translation is intentionally page-local. Every fresh page load
+  // starts off, preventing an automatic API request before the user opts in.
+  settings = { ...DEF, ...(d.ytsSettings||{}), enabled:false };
   syncStyle(); findV();
   injectToggle();
 
-  observer = new MutationObserver(() => findV());
+  observer = new MutationObserver(() => {
+    findV();
+    if (settings.enabled !== false && (subtitles.length || statusTimer)) refresh();
+  });
   observer.observe(document.body, { childList:true, subtree:true });
 
   window.addEventListener("yt-navigate-finish", () => {
@@ -478,7 +488,8 @@ chrome.storage.local.get(["ytsSettings"], d => {
 
 chrome.storage.onChanged.addListener(changes => {
   if (changes.ytsSettings) {
-    settings = { ...DEF, ...(changes.ytsSettings.newValue||{}) };
+    const enabled = settings.enabled;
+    settings = { ...DEF, ...(changes.ytsSettings.newValue||{}), enabled };
     syncStyle();
     if (settings.enabled === false) {
       cancelActiveLoad();

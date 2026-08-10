@@ -284,6 +284,7 @@ async def translate_subtitles(
     concurrency: int = 3,
     timeout: float = 30.0,
     whole: bool = False,
+    whole_fallback_to_batch: bool = True,
 ) -> list[dict]:
     """Translate a list of subtitle cues.
 
@@ -309,7 +310,8 @@ async def translate_subtitles(
     return await _translate_whole(subtitles, from_lang, to_lang,
                                   provider=provider, api_key=api_key,
                                   base_url=base_url, model=model,
-                                  timeout=timeout)
+                                  timeout=timeout,
+                                  fallback_to_batch=whole_fallback_to_batch)
 
 
 # ── whole-transcript translation ───────────────────────────────────────
@@ -324,9 +326,10 @@ Rules:
 3. Maintain consistent terminology throughout (same word → same translation).
 4. Preserve speaker markers: if a line starts with ">> ", keep ">> " in the output.
 5. Keep each translated line roughly the same length as the original (subtitle constraint).
-6. Return ONLY the translations, one per line, in the SAME order.
-7. Each output line MUST correspond to exactly one input line.
-8. Do NOT add numbering, prefixes, quotes, or any extra text."""
+6. Return exactly one translated line for every input line, in the SAME order.
+7. Preserve each input marker exactly: input "[$12] text" must become
+   "[$12] translated text".
+8. Do NOT add headers, explanations, code fences, or any extra text."""
 
 
 def _build_whole_prompt(subtitles: list[dict]) -> str:
@@ -388,6 +391,7 @@ async def _translate_whole(
     base_url: str | None = None,
     model: str | None = None,
     timeout: float = 120.0,
+    fallback_to_batch: bool = True,
 ) -> list[dict]:
     """Translate all subtitles in a single API call.
 
@@ -458,9 +462,15 @@ async def _translate_whole(
     valid_count = sum(1 for t in translations if t)
     if valid_count < len(subtitles) * 0.5:
         logger.warning(
-            "Whole-transcript parse only got %d/%d translations, falling back to batch",
+            "Whole-transcript parse only got %d/%d translations",
             valid_count, len(subtitles),
         )
+        if not fallback_to_batch:
+            raise TranslateError(
+                f"Whole-transcript response contained only {valid_count}/"
+                f"{len(subtitles)} parseable translations"
+            )
+        logger.warning("Falling back to per-cue batch translation")
         texts = [s["text"] for s in subtitles]
         batch_translations = await translate_batch(
             texts, from_lang, to_lang,

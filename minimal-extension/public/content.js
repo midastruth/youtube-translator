@@ -335,7 +335,12 @@ async function load(pageUrl) {
         return;
       }
 
-      if (event.type === "error") throw new Error(event.detail || "字幕流处理失败");
+      if (event.type === "error") {
+        const streamError = new Error(event.detail || "字幕流处理失败");
+        streamError.code = event.code || "stream_error";
+        streamError.hideAfterMs = Math.max(0, Number(event.hide_after_ms) || 0);
+        throw streamError;
+      }
       if (event.type === "done") {
         streamDone = true;
         const failed = Number(event.failed_cues) || 0;
@@ -356,8 +361,10 @@ async function load(pageUrl) {
     const baseUrl = (settings.backendUrl || DEF.backendUrl).replace(/\/+$/, "");
     const message = e instanceof TypeError
       ? `无法连接后端 ${baseUrl}，请先启动服务`
-      : `字幕加载失败：${e.message || e}`;
-    showStatus(message, "error");
+      : e?.code === "translation_already_running"
+        ? e.message
+        : `字幕加载失败：${e.message || e}`;
+    showStatus(message, "error", Math.max(0, Number(e?.hideAfterMs) || 0));
     console.error("[YTS]", e);
   } finally {
     if (loadAbortController === controller) loadAbortController = null;

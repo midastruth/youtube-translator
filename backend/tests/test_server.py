@@ -520,6 +520,32 @@ class ServerSSETest(unittest.TestCase):
                 mock_translate.await_args.kwargs["whole_fallback_to_batch"]
             )
 
+    @patch("youtube_ingest.server._cache")
+    @patch("youtube_ingest.server.run_in_threadpool", new_callable=AsyncMock)
+    def test_stream_duplicate_job_returns_temporary_error(self, mock_process, mock_cache):
+        from youtube_ingest.server import SubtitleRequest, _active_sse_jobs
+
+        mock_process.return_value = ({
+            "video_id": "duplicate123", "title": "Test",
+            "from_lang": "en", "source": "manual",
+        }, [
+            {"start": 0, "end": 500, "text": "Hello.", "translation": ""},
+        ])
+        mock_cache.get_cues.return_value = None
+        job_key = "duplicate123:en:rule:zh-CN"
+        _active_sse_jobs.add(job_key)
+        try:
+            _, body = self.collect_stream(SubtitleRequest(
+                url="https://www.youtube.com/watch?v=duplicate123",
+                languages=["en"], segmentation="rule", translate_to="zh-CN",
+            ))
+        finally:
+            _active_sse_jobs.discard(job_key)
+
+        self.assertIn('"code": "translation_already_running"', body)
+        self.assertIn("该视频已有翻译任务正在运行，请稍后重试", body)
+        self.assertIn('"hide_after_ms": 30000', body)
+
 
 class ServerCacheAdminTest(unittest.TestCase):
     @classmethod

@@ -582,7 +582,7 @@ async def process_subtitle_stream(req: SubtitleRequest):
         semaphore = asyncio.Semaphore(3)
         job_key = ":".join(str(part) for part in cache_args)
         if job_key in _active_sse_jobs:
-            yield f"data: {json.dumps({'type': 'error', 'detail': '该视频的翻译任务已在另一个页面运行，请关闭重复页面后重试'}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'error', 'code': 'translation_already_running', 'detail': '该视频已有翻译任务正在运行，请稍后重试', 'hide_after_ms': 30000}, ensure_ascii=False)}\n\n"
             return
 
         async def translate_chunk(indices: list[int]) -> tuple[list[int], list[dict] | None]:

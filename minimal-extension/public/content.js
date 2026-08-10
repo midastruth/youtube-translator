@@ -340,7 +340,7 @@ async function load(pageUrl) {
         streamDone = true;
         const failed = Number(event.failed_cues) || 0;
         if (failed > 0) {
-          showStatus(`已完成，${failed} 条翻译失败；刷新可继续`, "error");
+          showStatus(`已完成，${failed} 条翻译失败；刷新可继续`, "error", 30000);
         } else {
           showStatus(`字幕翻译完成（${totalCues || subtitles.length} 条）`, "success", 3000);
         }

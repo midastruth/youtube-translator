@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass, field
 
@@ -282,19 +283,194 @@ async def translate_subtitles(
     model: str | None = None,
     concurrency: int = 3,
     timeout: float = 30.0,
+    whole: bool = False,
 ) -> list[dict]:
-    """Translate a list of subtitle cues (each has 'text').
+    """Translate a list of subtitle cues.
 
-    Returns the same list with 'translation' filled in.
+    If whole=True: sends the entire transcript at once, gets all translations
+    back in one API call. The model sees full context → consistent terminology,
+    proper pronoun resolution, natural flow.
+
+    If whole=False (default): translates each cue independently in parallel.
     """
-    texts = [s["text"] for s in subtitles]
-    translations = await translate_batch(
-        texts, from_lang, to_lang,
-        provider=provider, api_key=api_key,
-        base_url=base_url, model=model,
-        concurrency=concurrency, timeout=timeout,
+    if not whole:
+        texts = [s["text"] for s in subtitles]
+        translations = await translate_batch(
+            texts, from_lang, to_lang,
+            provider=provider, api_key=api_key,
+            base_url=base_url, model=model,
+            concurrency=concurrency, timeout=timeout,
+        )
+        return [{**sub, "translation": tr} for sub, tr in zip(subtitles, translations)]
+
+    if not subtitles:
+        return []
+
+    return await _translate_whole(subtitles, from_lang, to_lang,
+                                  provider=provider, api_key=api_key,
+                                  base_url=base_url, model=model,
+                                  timeout=timeout)
+
+
+# ── whole-transcript translation ───────────────────────────────────────
+
+_WHOLE_TRANSLATE_SYSTEM_PROMPT = """\
+You are a professional subtitle translator. Your task is to translate an entire
+subtitle transcript line by line.
+
+Rules:
+1. Translate each line from {from_lang} to {to_lang}.
+2. Keep translations natural and conversational — this is spoken language.
+3. Maintain consistent terminology throughout (same word → same translation).
+4. Preserve speaker markers: if a line starts with ">> ", keep ">> " in the output.
+5. Keep each translated line roughly the same length as the original (subtitle constraint).
+6. Return ONLY the translations, one per line, in the SAME order.
+7. Each output line MUST correspond to exactly one input line.
+8. Do NOT add numbering, prefixes, quotes, or any extra text."""
+
+
+def _build_whole_prompt(subtitles: list[dict]) -> str:
+    """Build the user prompt: numbered lines for the model to translate."""
+    lines = []
+    for i, sub in enumerate(subtitles):
+        lines.append(f"[${i}] {sub['text']}")
+    return "\n".join(lines)
+
+
+def _parse_whole_response(response_text: str, count: int) -> list[str]:
+    """Parse the model's line-by-line translation back into individual strings.
+
+    Handles multiple common formats the model might produce:
+    - [N] translated text
+    - plain lines (one per input)
+    - numbered lines like "1. translation"
+    """
+    raw_lines = response_text.strip().split("\n")
+
+    # Strategy 1: try [N] prefix matching
+    translations: dict[int, str] = {}
+    for line in raw_lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        m = re.match(r"^\[?\$?(\d+)\]?\s*[\.:]?\s*", stripped)
+        if m:
+            idx = int(m.group(1))
+            if idx < count:
+                translations[idx] = stripped[m.end():].strip()
+
+    if len(translations) >= count:
+        return [translations.get(i, "") for i in range(count)]
+
+    # Strategy 2: filter out empty/header lines, match by count
+    non_empty = [l.strip() for l in raw_lines if l.strip()]
+    # Remove common header lines
+    cleaned = [l for l in non_empty
+               if not l.startswith(("Here", "Below", "Translation", "---", "==="))]
+
+    if len(cleaned) >= count:
+        return cleaned[:count]
+
+    # Strategy 3: partial match — fill what we have, leave rest empty
+    result: list[str] = []
+    for i in range(count):
+        result.append(translations.get(i, ""))
+    return result
+
+
+async def _translate_whole(
+    subtitles: list[dict],
+    from_lang: str,
+    to_lang: str,
+    *,
+    provider: str = "openai",
+    api_key: str | None = None,
+    base_url: str | None = None,
+    model: str | None = None,
+    timeout: float = 120.0,
+) -> list[dict]:
+    """Translate all subtitles in a single API call.
+
+    The model receives the entire transcript with numbered lines and returns
+    one translation per line. This gives the model full context for consistent
+    terminology and natural flow.
+    """
+
+    if provider != "openai":
+        texts = [s["text"] for s in subtitles]
+        translations = await translate_batch(
+            texts, from_lang, to_lang,
+            provider=provider, api_key=api_key,
+            base_url=base_url, model=model,
+            timeout=timeout,
+        )
+        return [{**sub, "translation": tr} for sub, tr in zip(subtitles, translations)]
+
+    api_key = api_key or os.getenv("OPENAI_API_KEY") or os.getenv("TRANSLATE_API_KEY")
+    base_url = (base_url or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1").rstrip("/")
+
+    if not api_key:
+        raise TranslateError("OPENAI_API_KEY or TRANSLATE_API_KEY is required")
+
+    system_prompt = _WHOLE_TRANSLATE_SYSTEM_PROMPT.format(
+        from_lang=from_lang, to_lang=to_lang
     )
+    user_prompt = _build_whole_prompt(subtitles)
+
+    # Estimate tokens: ~1.3 tokens per char for CJK, ~0.75 for Latin
+    est_tokens = len(user_prompt) * 1.0
+    max_tokens = min(16384, max(2048, int(est_tokens * 2.5)))
+
+    logger.info(
+        "Whole-transcript translate: %d cues, ~%d chars → max_tokens=%d",
+        len(subtitles), len(user_prompt), max_tokens,
+    )
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(
+            f"{base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={
+                "model": model or "gpt-3.5-turbo",
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "temperature": 0.1,
+                "max_tokens": max_tokens,
+            },
+        )
+        if resp.status_code >= 400:
+            error_msg = ""
+            try:
+                error_msg = resp.json().get("error", {}).get("message", "")
+            except Exception:
+                error_msg = resp.text[:200]
+            raise TranslateError(f"OpenAI API ({resp.status_code}): {error_msg}")
+
+        data = resp.json()
+        full_response = data["choices"][0]["message"]["content"].strip()
+
+    # Parse line-by-line translations
+    translations = _parse_whole_response(full_response, len(subtitles))
+
+    # Fallback: if parsing failed badly, retry with batch mode
+    valid_count = sum(1 for t in translations if t)
+    if valid_count < len(subtitles) * 0.5:
+        logger.warning(
+            "Whole-transcript parse only got %d/%d translations, falling back to batch",
+            valid_count, len(subtitles),
+        )
+        texts = [s["text"] for s in subtitles]
+        batch_translations = await translate_batch(
+            texts, from_lang, to_lang,
+            provider=provider, api_key=api_key,
+            base_url=base_url, model=model,
+            timeout=timeout,
+        )
+        return [{**sub, "translation": tr} for sub, tr in zip(subtitles, batch_translations)]
+
     result: list[dict] = []
     for sub, tr in zip(subtitles, translations):
-        result.append({**sub, "translation": tr})
+        result.append({**sub, "translation": tr or "[Translation failed]"})
     return result

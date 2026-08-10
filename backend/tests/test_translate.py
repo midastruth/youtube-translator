@@ -14,6 +14,9 @@ from youtube_ingest.translate import (
     translate_single,
     translate_stream,
     translate_subtitles,
+    _build_whole_prompt,
+    _parse_whole_response,
+    _WHOLE_TRANSLATE_SYSTEM_PROMPT,
 )
 
 
@@ -173,6 +176,119 @@ class TranslateStreamTest(unittest.TestCase):
             with self.assertRaises(TranslateError) as ctx:
                 asyncio.get_event_loop().run_until_complete(collect())
             self.assertIn("401", str(ctx.exception))
+
+
+class TranslateWholeTest(unittest.TestCase):
+    """Test the whole-transcript (全文一次性翻译) path."""
+
+    def test_build_whole_prompt(self):
+        subs = [
+            {"start": 0, "end": 500, "text": "Hello world."},
+            {"start": 600, "end": 1200, "text": "This is a test."},
+        ]
+        prompt = _build_whole_prompt(subs)
+        self.assertIn("[$0] Hello world.", prompt)
+        self.assertIn("[$1] This is a test.", prompt)
+
+    def test_parse_numbered_format(self):
+        response = """[$0] 你好世界。
+[$1] 这是一个测试。"""
+        result = _parse_whole_response(response, 2)
+        self.assertEqual(result, ["你好世界。", "这是一个测试。"])
+
+    def test_parse_plain_format(self):
+        response = """你好世界。
+这是一个测试。"""
+        result = _parse_whole_response(response, 2)
+        self.assertEqual(result, ["你好世界。", "这是一个测试。"])
+
+    def test_parse_partial_match_fills_rest(self):
+        response = "[$0] 只有第一句"
+        result = _parse_whole_response(response, 3)
+        self.assertEqual(result, ["只有第一句", "", ""])
+
+    def test_parse_empty(self):
+        result = _parse_whole_response("", 5)
+        self.assertEqual(len(result), 5)
+        self.assertTrue(all(t == "" for t in result))
+
+    def test_translate_subtitles_whole_flag(self):
+        """whole=True triggers _translate_whole path."""
+        class FakeClient:
+            def __init__(self, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): pass
+
+            async def post(self, url, **kw):
+                class FakeResp:
+                    status_code = 200
+                    def json(self):
+                        return {"choices": [{"message": {
+                            "content": "[$0] 你好\n[$1] 世界"
+                        }}]}
+                return FakeResp()
+
+        subs = [
+            {"start": 0, "end": 500, "text": "Hello"},
+            {"start": 600, "end": 1200, "text": "world"},
+        ]
+
+        with patch("youtube_ingest.translate.httpx.AsyncClient", new=FakeClient), \
+             patch.dict(os.environ, {"OPENAI_API_KEY": "sk"}):
+            result = asyncio.get_event_loop().run_until_complete(
+                translate_subtitles(subs, "en", "zh-CN", provider="openai", whole=True)
+            )
+            self.assertEqual(len(result), 2)
+            self.assertEqual(result[0]["translation"], "你好")
+            self.assertEqual(result[1]["translation"], "世界")
+            self.assertEqual(result[0]["text"], "Hello")
+
+    def test_translate_subtitles_whole_false_still_batch(self):
+        """whole=False (default) uses batch mode."""
+        from youtube_ingest.translate import TRANSLATE_PROVIDERS
+
+        @staticmethod
+        async def fake(text, from_lang, to_lang, **kw):
+            return f"TR[{text}]"
+
+        TRANSLATE_PROVIDERS["_t_"] = fake
+        try:
+            subs = [
+                {"start": 0, "end": 500, "text": "A"},
+                {"start": 600, "end": 1200, "text": "B"},
+            ]
+            result = asyncio.get_event_loop().run_until_complete(
+                translate_subtitles(subs, "en", "zh-CN", provider="_t_", whole=False)
+            )
+            self.assertEqual(result[0]["translation"], "TR[A]")
+            self.assertEqual(result[1]["translation"], "TR[B]")
+        finally:
+            TRANSLATE_PROVIDERS.pop("_t_", None)
+
+    def test_translate_subtitles_empty(self):
+        result = asyncio.get_event_loop().run_until_complete(
+            translate_subtitles([], "en", "zh-CN", provider="x", api_key="k", whole=True)
+        )
+        self.assertEqual(result, [])
+
+    def test_parse_with_header_text(self):
+        response = """Here are the translations:
+
+你好世界。
+这是一个测试。
+谢谢。"""
+        result = _parse_whole_response(response, 3)
+        self.assertEqual(result, ["你好世界。", "这是一个测试。", "谢谢。"])
+
+    def test_parse_more_lines_than_expected(self):
+        response = """[$0] 零
+[$1] 一
+[$2] 二
+[$3] 三"""
+        result = _parse_whole_response(response, 2)
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0], "零")
+        self.assertEqual(result[1], "一")
 
 
 if __name__ == "__main__":

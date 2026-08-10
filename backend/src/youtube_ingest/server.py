@@ -129,6 +129,7 @@ class SubtitleRequest(BaseModel):
     translate_api_key: str | None = None
     translate_base_url: str | None = None
     translate_model: str | None = None
+    translate_whole: bool = False  # True = 全文一次性翻译，保证术语/上下文一致
 
 
 class SubtitleCue(BaseModel):
@@ -309,6 +310,7 @@ async def process_subtitle(req: SubtitleRequest):
                     api_key=req.translate_api_key,
                     base_url=req.translate_base_url,
                     model=req.translate_model,
+                    whole=req.translate_whole,
                 )
             except Exception as exc:
                 logger.warning("Translation failed, returning untranslated cues: %s", exc)

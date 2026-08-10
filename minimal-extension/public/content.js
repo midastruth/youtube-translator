@@ -7,6 +7,7 @@ let observer = null, settings = {};
 let loadedVideoId = "", loadGeneration = 0;
 let statusTimer = null;
 let loadAbortController = null;
+let renderFrame = null;
 
 const DEF = {
   backendUrl: "http://localhost:8787",
@@ -33,7 +34,7 @@ document.head.appendChild(styleEl);
 function syncStyle() {
   const bg = `rgba(0,0,0,${settings.bgOpacity ?? 0.6})`;
   styleEl.textContent = `
-    #${CID} { position:absolute; bottom:${settings.positionY ?? 12}%; left:50%; transform:translateX(-50%); text-align:center; z-index:99; pointer-events:auto; max-width:85%; cursor:grab; user-select:none; }
+    #${CID} { position:absolute; bottom:${settings.positionY ?? 12}%; left:50%; transform:translateX(-50%); text-align:center; z-index:2147483646; pointer-events:auto; max-width:85%; cursor:grab; user-select:none; visibility:visible; opacity:1; }
     #${CID}.drag { cursor:grabbing; }
     #${CID} .bg { display:none; padding:6px 14px; border-radius:8px; background:${bg}; }
     #${CID} .orig { display:none; color:${settings.origColor||"#fff"}; font-size:${settings.fontSizeOrig||22}px; font-weight:600; line-height:1.4; text-shadow:1px 1px 2px #000; pointer-events:none; }
@@ -111,14 +112,26 @@ function overlay() {
     el.appendChild(bg);
     drag(el);
   }
-  // YouTube frequently rebuilds the video container during navigation,
-  // quality changes, fullscreen transitions, and ad playback. Always ensure
-  // the overlay is mounted in the current container, not a detached old one.
-  const mount = videoEl?.closest?.(".html5-video-container")
-    || document.querySelector("#movie_player .html5-video-container")
-    || document.querySelector("#movie_player");
+  // The player root survives video-container rebuilds and is the same stable
+  // positioning context used by YouTube's controls and caption windows.
+  const mount = document.querySelector("#movie_player")
+    || videoEl?.closest?.(".html5-video-player")
+    || videoEl?.closest?.(".html5-video-container");
   if (mount && el.parentElement !== mount) mount.appendChild(el);
   return el;
+}
+
+function scheduleRefresh() {
+  if (renderFrame !== null) return;
+  renderFrame = requestAnimationFrame(() => {
+    renderFrame = null;
+    refresh();
+  });
+}
+
+function setText(element, value) {
+  const text = String(value ?? "");
+  if (element.textContent !== text) element.textContent = text;
 }
 
 function showStatus(message, type = "info", hideAfter = 0) {
@@ -127,7 +140,7 @@ function showStatus(message, type = "info", hideAfter = 0) {
   if (!status) return;
   if (statusTimer) clearTimeout(statusTimer);
   statusTimer = null;
-  status.textContent = message;
+  setText(status, message);
   status.className = `status ${type}`;
   status.style.display = "block";
   if (hideAfter > 0) {
@@ -156,9 +169,9 @@ function refresh() {
     const s = subtitles[ci];
     const hasTranslation = Boolean(s.translation);
     const bilingual = settings.isBilingual !== false;
-    orig.textContent = s.text;
+    setText(orig, s.text);
     orig.style.display = bilingual || !hasTranslation ? "block" : "none";
-    tran.textContent = hasTranslation ? s.translation : "";
+    setText(tran, hasTranslation ? s.translation : "");
     tran.style.display = hasTranslation ? "block" : "none";
     bg.style.display = "block";
   } else {
@@ -338,9 +351,10 @@ async function load(pageUrl) {
 
 // ── events ─────────────────────────────────────────────────
 
-function bindVideo() {
+function bindVideo(nextVideo) {
   videoEl?.removeEventListener("timeupdate", tick);
-  videoEl?.addEventListener("timeupdate", tick);
+  videoEl = nextVideo;
+  videoEl.addEventListener("timeupdate", tick);
 }
 function tick() {
   if (!videoEl) return;
@@ -348,7 +362,7 @@ function tick() {
   ci = i;
   // Refresh even when the cue index did not change: the player may have
   // replaced the overlay container since the previous timeupdate event.
-  refresh();
+  scheduleRefresh();
 }
 function findV() {
   if (settings.enabled === false) return;
@@ -358,10 +372,7 @@ function findV() {
 
   const videoChanged = v !== videoEl;
   const idChanged = vid !== loadedVideoId;
-  if (videoChanged) {
-    videoEl = v;
-    bindVideo();
-  }
+  if (videoChanged) bindVideo(v);
   if (videoChanged || idChanged) {
     loadedVideoId = vid;
     load(`https://www.youtube.com/watch?v=${vid}`);
@@ -471,9 +482,16 @@ chrome.storage.local.get(["ytsSettings"], d => {
   syncStyle(); findV();
   injectToggle();
 
-  observer = new MutationObserver(() => {
+  observer = new MutationObserver(records => {
+    const root = document.getElementById(CID);
+    // Rendering text inside our own overlay creates child-list mutations.
+    // Ignore those records so refresh() cannot recursively trigger itself.
+    const hasExternalMutation = records.some(record => (
+      !root || (record.target !== root && !root.contains(record.target))
+    ));
+    if (!hasExternalMutation) return;
     findV();
-    if (settings.enabled !== false && (subtitles.length || statusTimer)) refresh();
+    if (settings.enabled !== false && (subtitles.length || statusTimer)) scheduleRefresh();
   });
   observer.observe(document.body, { childList:true, subtree:true });
 

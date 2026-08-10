@@ -11,7 +11,7 @@ const DEF = {
   toLang: "zh-CN",
   segmentation: "rule",
   translateApiKey: "", translateBaseUrl: "", translateModel: "",
-  translateWhole: false, autoTranslate: true,
+  translateWhole: false, autoTranslate: true, enabled: true,
   // Whisper fallback (no subtitle track → transcribe audio)
   whisperEnabled: false, whisperApiKey: "", whisperBaseUrl: "", whisperModel: "", whisperLanguage: "",
   // display
@@ -188,6 +188,7 @@ function tick() {
   if (i !== ci) { ci = i; refresh(); }
 }
 function findV() {
+  if (settings.enabled === false) return;
   const v = document.querySelector("video");
   if (v && v !== videoEl) { videoEl = v; bindVideo(); const vid = videoId(); if (vid) load(`https://www.youtube.com/watch?v=${vid}`); }
 }
@@ -224,22 +225,86 @@ chrome.runtime.onMessage.addListener((msg, _, send) => {
 
 // ── boot ───────────────────────────────────────────────────
 
+function injectToggle() {
+  if (document.getElementById("yts-toggle")) return;
+
+  // try to find YouTube's right-side control group
+  const target = document.querySelector(".ytp-right-controls");
+  if (!target) return;
+
+  const btn = document.createElement("button");
+  btn.id = "yts-toggle";
+  btn.className = "ytp-button";
+  btn.title = "字幕翻译 开/关";
+  btn.innerHTML = `<svg viewBox="0 0 24 24" width="24" height="24" fill="${settings.enabled !== false ? '#3ea6ff' : '#aaa'}"><path d="M2 3h4l2 4H5l-1 7h2l1 7h13l2-7h-2l-1-7h-3l2-4h4l-2 18H4L2 3z"/><circle cx="12" cy="14" r="4"/></svg>`;
+  btn.style.cssText = "cursor:pointer;background:none;border:none;padding:0 6px;display:flex;align-items:center";
+
+  btn.addEventListener("click", () => {
+    settings.enabled = settings.enabled === false ? true : false;
+    updateToggleIcon(btn);
+    if (settings.enabled === false) {
+      // hide subtitles
+      subtitles = []; ci = -1; refresh();
+      const el = document.getElementById(CID);
+      if (el) el.style.display = "none";
+    } else {
+      const el = document.getElementById(CID);
+      if (el) el.style.display = "";
+      const vid = videoId();
+      if (vid) load(`https://www.youtube.com/watch?v=${vid}`);
+    }
+    // persist
+    chrome.storage.local.get(["ytsSettings"], d => {
+      const s = d.ytsSettings || {};
+      s.enabled = settings.enabled;
+      chrome.storage.local.set({ ytsSettings: s });
+    });
+  });
+
+  target.insertBefore(btn, target.firstChild);
+
+  // re-inject on YouTube SPA navigation (controls get rebuilt)
+  const mo = new MutationObserver(() => {
+    if (!document.getElementById("yts-toggle")) {
+      const t = document.querySelector(".ytp-right-controls");
+      if (t) { t.insertBefore(btn, t.firstChild); }
+    }
+  });
+  // watch the control bar for rebuilds
+  const bar = document.querySelector(".ytp-chrome-bottom");
+  if (bar) mo.observe(bar, { childList: true, subtree: true });
+}
+
+function updateToggleIcon(btn) {
+  const on = settings.enabled !== false;
+  btn.innerHTML = `<svg viewBox="0 0 24 24" width="24" height="24" fill="${on ? '#3ea6ff' : '#aaa'}"><path d="M2 3h4l2 4H5l-1 7h2l1 7h13l2-7h-2l-1-7h-3l2-4h4l-2 18H4L2 3z"/><circle cx="12" cy="14" r="4"/></svg>`;
+  btn.title = on ? "关闭字幕翻译" : "开启字幕翻译";
+}
+
 chrome.storage.local.get(["ytsSettings"], d => {
   settings = { ...DEF, ...(d.ytsSettings||{}) };
   syncStyle(); findV();
+  injectToggle();
 
   observer = new MutationObserver(() => findV());
   observer.observe(document.body, { childList:true, subtree:true });
 
   window.addEventListener("yt-navigate-finish", () => {
     subtitles = []; ci = -1; refresh();
-    setTimeout(findV, 1000);
+    setTimeout(() => { injectToggle(); findV(); }, 1000);
   });
 });
 
 chrome.storage.onChanged.addListener(changes => {
   if (changes.ytsSettings) {
     settings = { ...DEF, ...(changes.ytsSettings.newValue||{}) };
-    syncStyle(); subtitles = []; ci = -1; refresh(); findV();
+    syncStyle();
+    if (settings.enabled === false) {
+      subtitles = []; ci = -1; refresh();
+      const el = document.getElementById(CID); if (el) el.style.display = "none";
+    } else {
+      const el = document.getElementById(CID); if (el) el.style.display = "";
+      subtitles = []; ci = -1; refresh(); findV();
+    }
   }
 });

@@ -4,10 +4,9 @@ services:
   backend:
     build: ./backend
     ports:
-      - "${PORT:-8787}:8787"
+      - "${PORT:-8791}:8787"
     volumes:
       - ./backend/cache:/app/cache
-      - ./backend/.env:/app/.env:ro
     environment:
       - HOST=0.0.0.0
       - PORT=8787

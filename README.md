@@ -1,11 +1,11 @@
 # YouTube Translator
 
-双语字幕翻译系统 — 包含后端服务 + 浏览器扩展。
+YouTube 双语字幕翻译系统 — 后端服务 + 轻量浏览器扩展。
 
 ```
 youtube-translator/
-├── backend/          Python FastAPI 后端 (youtube-ingest)
-├── extension/        浏览器扩展 (kiss-translator)
+├── backend/             Python FastAPI 后端 (youtube-ingest)
+├── minimal-extension/   轻量浏览器扩展
 ├── docker-compose.yml
 ├── Makefile
 └── README.md
@@ -14,8 +14,8 @@ youtube-translator/
 ## 架构
 
 ```
-浏览器 (kiss-translator 扩展)
-  │  backendUrl = "http://localhost:8787"
+浏览器 (minimal-extension)
+  │  调后端 API
   ▼
 后端 (youtube-ingest)
   │  yt-dlp → json3 → 断句 → 翻译
@@ -41,23 +41,20 @@ youtube-ingest-server
 docker compose up -d
 ```
 
-### 2. 加载浏览器扩展
+### 2. 加载扩展
 
 1. 打开 Chrome → `chrome://extensions`
 2. 开启「开发者模式」
-3. 「加载已解压的扩展程序」→ 选择 `extension/` 目录
-4. 在扩展设置里找到字幕设置，填入 `backendUrl: "http://localhost:8787"`
+3. 「加载已解压的扩展程序」→ 选择 `minimal-extension/public/`
+4. 在扩展设置里配置后端地址，默认 `http://localhost:8787`
 
 ### 3. 打开 YouTube
 
-打开任意 YouTube 视频 → 字幕自动以双语显示。
+打开任意 YouTube 视频 → 双语字幕自动显示。
 
 ## 开发
 
 ```bash
 # 后端测试
 cd backend && PYTHONPATH=src python -m unittest discover -s tests -v
-
-# 扩展构建
-cd extension && pnpm install && pnpm build
 ```

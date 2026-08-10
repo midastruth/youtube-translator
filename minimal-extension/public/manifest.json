@@ -1,10 +1,20 @@
 {
   "manifest_version": 3,
   "name": "YouTube Subtitle Translator",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "YouTube 双语字幕翻译 — 后端版",
-  "permissions": ["storage"],
+  "permissions": ["storage", "activeTab"],
   "host_permissions": ["https://www.youtube.com/*"],
+  "action": {
+    "default_title": "导出当前字幕为 VTT",
+    "default_icon": {
+      "48": "icon48.png",
+      "128": "icon128.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
   "content_scripts": [{
     "matches": ["https://www.youtube.com/*"],
     "js": ["content.js"],

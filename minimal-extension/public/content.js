@@ -383,9 +383,16 @@ function videoId() { try { return new URL(location.href).searchParams.get("v")||
 // ── download VTT ───────────────────────────────────────────
 
 function downloadVtt() {
-  if (!subtitles.length) return;
+  const exportable = subtitles.filter(s => (
+    s && Number.isFinite(Number(s.start)) && Number.isFinite(Number(s.end)) && s.text
+  ));
+  if (!exportable.length) {
+    const error = "还没有可导出的字幕，请先开启翻译并等待字幕加载";
+    showStatus(error, "error", 4000);
+    return { ok:false, error };
+  }
   const lines = ["WEBVTT",""];
-  subtitles.forEach((s,i) => {
+  exportable.forEach((s,i) => {
     const st = msVtt(s.start), en = msVtt(s.end);
     lines.push(`${i+1}`, `${st} --> ${en}`, s.text);
     if (s.translation) lines.push(s.translation);
@@ -393,8 +400,11 @@ function downloadVtt() {
   });
   const b = new Blob([lines.join("\n")], { type:"text/vtt;charset=utf-8" });
   const u = URL.createObjectURL(b);
-  const a = document.createElement("a"); a.href = u; a.download = `subtitles_${Date.now()}.vtt`; a.click();
-  URL.revokeObjectURL(u);
+  const filename = `youtube_${videoId() || "subtitles"}_${Date.now()}.vtt`;
+  const a = document.createElement("a"); a.href = u; a.download = filename; a.click();
+  setTimeout(() => URL.revokeObjectURL(u), 1000);
+  showStatus(`已导出 ${exportable.length} 条字幕`, "success", 2500);
+  return { ok:true, count:exportable.length, filename };
 }
 function msVtt(ms) {
   const s = ms/1000;
@@ -405,7 +415,7 @@ function msVtt(ms) {
 // ── messages ───────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((msg, _, send) => {
-  if (msg.action === "downloadVtt") { downloadVtt(); send({ok:true}); }
+  if (msg.action === "downloadVtt") send(downloadVtt());
   else if (msg.action === "toggleBilingual") { settings.isBilingual = !settings.isBilingual; refresh(); send({isBilingual:settings.isBilingual}); }
 });
 

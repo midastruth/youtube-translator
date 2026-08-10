@@ -12,6 +12,9 @@ const DEF = {
   segmentation: "rule",
   translateApiKey: "", translateBaseUrl: "", translateModel: "",
   translateWhole: false, autoTranslate: true,
+  // Whisper fallback (no subtitle track → transcribe audio)
+  whisperEnabled: false, whisperApiKey: "", whisperBaseUrl: "", whisperModel: "", whisperLanguage: "",
+  // display
   isBilingual: true,
   fontSizeOrig: 22, fontSizeTran: 18,
   positionY: 12, origColor: "#ffffff", tranColor: "#ffff00",
@@ -159,6 +162,15 @@ async function load(pageUrl) {
       if (settings.translateModel) body.translate_model = settings.translateModel;
       if (settings.translateWhole) body.translate_whole = true;
     }
+
+    if (settings.whisperEnabled) {
+      body.whisper_enabled = true;
+      if (settings.whisperApiKey) body.whisper_api_key = settings.whisperApiKey;
+      if (settings.whisperBaseUrl) body.whisper_base_url = settings.whisperBaseUrl;
+      if (settings.whisperModel) body.whisper_model = settings.whisperModel;
+      if (settings.whisperLanguage) body.whisper_language = settings.whisperLanguage;
+    }
+
     const resp = await apiPost("/api/subtitle/process", body);
     subtitles = (resp.cues||[]).map(c => ({ start:c.start, end:c.end, text:c.text, translation:c.translation||"" }));
   } catch (e) { console.error("[YTS]", e); }

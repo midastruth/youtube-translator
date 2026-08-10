@@ -69,6 +69,30 @@
     </select>
   </div>
 
+  <!-- Whisper -->
+  <div class="section">
+    <div class="section-title">🎙 Whisper 音频转写（无字幕时兜底）</div>
+    
+    <label>启用 Whisper 兜底</label>
+    <select id="whisperEnabled">
+      <option value="false">否</option>
+      <option value="true">是 — 无字幕时自动转音频</option>
+    </select>
+
+    <label>Whisper API Key (Groq / OpenAI)</label>
+    <input type="password" id="whisperApiKey" placeholder="gsk_...">
+    <div class="hint">Groq 免费额度：api.groq.com</div>
+
+    <label>Whisper API 地址</label>
+    <input type="text" id="whisperBaseUrl" placeholder="https://api.groq.com/openai/v1">
+
+    <label>Whisper 模型</label>
+    <input type="text" id="whisperModel" placeholder="whisper-large-v3">
+
+    <label>音频语言提示 (ISO-639, 如 zh / en，可选)</label>
+    <input type="text" id="whisperLanguage" placeholder="auto">
+  </div>
+
   <!-- Display -->
   <div class="section">
     <div class="section-title">🎨 字幕显示</div>
@@ -137,6 +161,11 @@
         setVal("translateBaseUrl", s.translateBaseUrl || "");
         setVal("translateModel", s.translateModel || "");
         setVal("translateWhole", s.translateWhole ? "true" : "false");
+        setVal("whisperEnabled", s.whisperEnabled ? "true" : "false");
+        setVal("whisperApiKey", s.whisperApiKey || "");
+        setVal("whisperBaseUrl", s.whisperBaseUrl || "");
+        setVal("whisperModel", s.whisperModel || "");
+        setVal("whisperLanguage", s.whisperLanguage || "");
         setVal("isBilingual", s.isBilingual !== false ? "true" : "false");
         setVal("fontSizeOrig", s.fontSizeOrig || 22);
         setVal("fontSizeTran", s.fontSizeTran || 18);
@@ -186,6 +215,11 @@
         settings[id] = getVal(id).trim();
       }
       settings.translateWhole = getVal("translateWhole") === "true";
+      settings.whisperEnabled = getVal("whisperEnabled") === "true";
+      settings.whisperApiKey = getVal("whisperApiKey").trim();
+      settings.whisperBaseUrl = getVal("whisperBaseUrl").trim();
+      settings.whisperModel = getVal("whisperModel").trim();
+      settings.whisperLanguage = getVal("whisperLanguage").trim();
       settings.isBilingual = getVal("isBilingual") === "true";
       settings.bgOpacity = parseInt(getVal("bgOpacity")) / 100;
       settings.autoTranslate = true;

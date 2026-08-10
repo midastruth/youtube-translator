@@ -130,6 +130,12 @@ class SubtitleRequest(BaseModel):
     translate_base_url: str | None = None
     translate_model: str | None = None
     translate_whole: bool = False  # True = 全文一次性翻译，保证术语/上下文一致
+    # Whisper 兜底 — 无字幕时自动转音频
+    whisper_enabled: bool = False
+    whisper_api_key: str | None = None
+    whisper_base_url: str | None = None
+    whisper_model: str | None = None
+    whisper_language: str | None = None  # 传给 Whisper 的 ISO-639 语言提示
 
 
 class SubtitleCue(BaseModel):
@@ -186,11 +192,23 @@ def _process_subtitle_sync(
     languages: list[str],
     allow_automatic: bool,
     segmentation: str,
+    whisper_enabled: bool = False,
+    whisper_api_key: str | None = None,
+    whisper_base_url: str | None = None,
+    whisper_model: str | None = None,
+    whisper_language: str | None = None,
 ) -> tuple[dict, list[dict]]:
     """Shared sync portion: fetch metadata, pick track, download & segment.
 
+    When whisper_enabled=True and no subtitle track is found, falls back to
+    downloading audio and transcribing via Whisper.
+
     Returns (meta_dict, cues_list).
     """
+    import tempfile
+    from .audio import split_audio
+    from .transcribe import WhisperClient, transcribe_chunks, merge_transcripts
+
     # Metadata
     metadata = fetch_metadata(url)
     video_id = str(metadata.get("id") or "unknown")
@@ -198,8 +216,54 @@ def _process_subtitle_sync(
 
     # Select track
     selected = choose_subtitle(metadata, languages, allow_automatic)
-    if selected is None:
+
+    if selected is None and not whisper_enabled:
         raise HTTPException(status_code=404, detail="No matching subtitle track found")
+
+    if selected is None and whisper_enabled:
+        # ── Whisper fallback ──
+        logger.info("No subtitle track — falling back to Whisper transcription")
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                audio_path = _download_audio(url, Path(tmpdir))
+                chunks_dir = Path(tmpdir) / "chunks"
+                chunks = split_audio(audio_path, chunks_dir, chunk_seconds=600)
+                client = WhisperClient(
+                    api_key=whisper_api_key,
+                    base_url=whisper_base_url,
+                    model=whisper_model,
+                )
+                transcript_dir = Path(tmpdir) / "transcripts"
+                transcript_parts = transcribe_chunks(
+                    chunks, transcript_dir, client, language=whisper_language,
+                )
+                merged_path = Path(tmpdir) / "merged.txt"
+                merge_transcripts(transcript_parts, merged_path)
+                full_text = merged_path.read_text(encoding="utf-8").strip()
+
+            if not full_text:
+                raise HTTPException(status_code=500, detail="Whisper returned empty transcript")
+
+            # Build simple cues from Whisper output (no word-level timestamps)
+            lines = [l.strip() for l in full_text.split("\n") if l.strip()]
+            cues = []
+            for i, line in enumerate(lines):
+                cues.append({
+                    "start": i * 5000.0,  # approx 5s per cue — rough estimate
+                    "end": (i + 1) * 5000.0,
+                    "text": line,
+                    "translation": "",
+                })
+
+            logger.info("Whisper produced %d cues", len(cues))
+            return {
+                "video_id": video_id, "title": title,
+                "from_lang": whisper_language or "auto",
+                "source": "whisper",
+            }, cues
+        except IngestError as exc:
+            raise HTTPException(status_code=500, detail=f"Whisper fallback failed: {exc}")
+
     lang, source = selected
     logger.info("Selected subtitle: %s (%s)", lang, source)
 
@@ -298,6 +362,11 @@ async def process_subtitle(req: SubtitleRequest):
             languages=req.languages,
             allow_automatic=req.allow_automatic,
             segmentation=req.segmentation,
+            whisper_enabled=req.whisper_enabled,
+            whisper_api_key=req.whisper_api_key,
+            whisper_base_url=req.whisper_base_url,
+            whisper_model=req.whisper_model,
+            whisper_language=req.whisper_language,
         )
 
         # Translate if requested
@@ -350,6 +419,11 @@ async def process_subtitle_stream(req: SubtitleRequest):
             languages=req.languages,
             allow_automatic=req.allow_automatic,
             segmentation=req.segmentation,
+            whisper_enabled=req.whisper_enabled,
+            whisper_api_key=req.whisper_api_key,
+            whisper_base_url=req.whisper_base_url,
+            whisper_model=req.whisper_model,
+            whisper_language=req.whisper_language,
         )
     except HTTPException as exc:
         raise
@@ -428,6 +502,11 @@ async def ws_subtitle_process(ws: WebSocket):
             languages=req.languages,
             allow_automatic=req.allow_automatic,
             segmentation=req.segmentation,
+            whisper_enabled=req.whisper_enabled,
+            whisper_api_key=req.whisper_api_key,
+            whisper_base_url=req.whisper_base_url,
+            whisper_model=req.whisper_model,
+            whisper_language=req.whisper_language,
         )
     except Exception as exc:
         await ws.send_json({"type": "error", "detail": str(exc)})

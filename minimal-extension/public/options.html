@@ -101,6 +101,12 @@
       <input type="color" id="tranColor" value="#ffff00">
     </div>
 
+    <div class="row">
+      <label>背景暗度</label>
+      <input type="range" id="bgOpacity" min="0" max="100" value="60" style="width:calc(100% - 60px)">
+      <span class="val" id="bgOpacityVal">60%</span>
+    </div>
+
     <div class="hint" style="margin-top:12px">
       💡 字幕框可<span style="color:#3ea6ff">鼠标拖拽</span>调整位置，位置自动保存
     </div>
@@ -118,6 +124,7 @@
 
   <script>
     const NUM_KEYS = ["fontSizeOrig", "fontSizeTran", "positionY"];
+    const RANGE_KEYS = ["fontSizeOrig", "fontSizeTran", "bgOpacity"];
 
     function load() {
       chrome.storage.local.get(["ytsSettings"], (data) => {
@@ -135,8 +142,8 @@
         setVal("fontSizeTran", s.fontSizeTran || 18);
         setVal("origColor", s.origColor || "#ffffff");
         setVal("tranColor", s.tranColor || "#ffff00");
-        updateRangeLabel("fontSizeOrig");
-        updateRangeLabel("fontSizeTran");
+        setVal("bgOpacity", Math.round((s.bgOpacity ?? 0.6) * 100));
+        RANGE_KEYS.forEach(k => updateRangeLabel(k));
       });
     }
 
@@ -155,12 +162,15 @@
     function updateRangeLabel(id) {
       const v = getVal(id);
       const span = document.getElementById(id + "Val");
-      if (span) span.textContent = v + "px";
+      if (!span) return;
+      if (id === "bgOpacity") span.textContent = v + "%";
+      else span.textContent = v + "px";
     }
 
     // live range preview
     document.getElementById("fontSizeOrig").addEventListener("input", () => updateRangeLabel("fontSizeOrig"));
     document.getElementById("fontSizeTran").addEventListener("input", () => updateRangeLabel("fontSizeTran"));
+    document.getElementById("bgOpacity").addEventListener("input", () => updateRangeLabel("bgOpacity"));
 
     function downloadVtt() {
       chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
@@ -177,6 +187,7 @@
       }
       settings.translateWhole = getVal("translateWhole") === "true";
       settings.isBilingual = getVal("isBilingual") === "true";
+      settings.bgOpacity = parseInt(getVal("bgOpacity")) / 100;
       settings.autoTranslate = true;
       for (const k of NUM_KEYS) settings[k] = parseInt(getVal(k)) || 22;
       settings.positionY = settings.positionY || 12;

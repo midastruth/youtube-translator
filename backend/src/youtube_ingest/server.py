@@ -279,16 +279,35 @@ def _process_subtitle_sync(
 
     # Download json3
     json3_text = _cache.get_json3(video_id, lang)
+    loaded_from_cache = json3_text is not None
+    should_cache_json3 = not loaded_from_cache
     if json3_text is None:
         json3_text = _fetch_json3_subtitle(url, lang)
         if json3_text is None:
             raise HTTPException(status_code=500, detail="Failed to download subtitle")
-        _cache.put_json3(video_id, lang, json3_text)
 
     try:
-        json3_data = json.loads(json3_text)
+        json3_data = json.loads(json3_text.lstrip("\ufeff"))
     except json.JSONDecodeError:
-        raise HTTPException(status_code=500, detail="Invalid subtitle JSON")
+        if not loaded_from_cache:
+            raise HTTPException(status_code=500, detail="Invalid subtitle JSON")
+
+        # A partial write or an old yt-dlp response must not poison this video
+        # until the cache TTL expires. Re-download once and replace it only
+        # after validating the response.
+        logger.warning("Invalid cached subtitle JSON for %s/%s; re-downloading", video_id, lang)
+        json3_text = _fetch_json3_subtitle(url, lang)
+        should_cache_json3 = True
+        if json3_text is None:
+            raise HTTPException(status_code=500, detail="Failed to download subtitle")
+        try:
+            json3_data = json.loads(json3_text.lstrip("\ufeff"))
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=500, detail="Invalid subtitle JSON")
+
+    # Cache only validated subtitle data.
+    if should_cache_json3:
+        _cache.put_json3(video_id, lang, json3_text)
 
     raw_events = json3_data.get("events") or []
 

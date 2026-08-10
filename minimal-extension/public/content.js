@@ -5,6 +5,7 @@ const CID = "yts-overlay";
 let videoEl = null, subtitles = [], ci = -1;
 let observer = null, settings = {};
 let loadedVideoId = "", loadGeneration = 0;
+let statusTimer = null;
 
 const DEF = {
   backendUrl: "http://localhost:8787",
@@ -36,6 +37,9 @@ function syncStyle() {
     #${CID} .bg { display:none; padding:6px 14px; border-radius:8px; background:${bg}; }
     #${CID} .orig { display:none; color:${settings.origColor||"#fff"}; font-size:${settings.fontSizeOrig||22}px; font-weight:600; line-height:1.4; text-shadow:1px 1px 2px #000; pointer-events:none; }
     #${CID} .tran { display:none; color:${settings.tranColor||"#ff0"}; font-size:${settings.fontSizeTran||18}px; font-weight:500; line-height:1.4; text-shadow:1px 1px 2px #000; pointer-events:none; }
+    #${CID} .status { display:none; margin:0 auto 8px; width:max-content; max-width:80vw; padding:7px 12px; border-radius:6px; background:rgba(0,0,0,.82); color:#fff; font-size:14px; line-height:1.35; text-shadow:none; pointer-events:none; }
+    #${CID} .status.success { color:#7ee787; }
+    #${CID} .status.error { color:#ff8b8b; }
   `;
 }
 
@@ -61,13 +65,39 @@ function overlay() {
     const bg = document.createElement("div"); bg.className = "bg";
     const orig = document.createElement("div"); orig.className = "orig";
     const tran = document.createElement("div"); tran.className = "tran";
+    const status = document.createElement("div"); status.className = "status";
     bg.appendChild(orig); bg.appendChild(tran);
+    el.appendChild(status);
     el.appendChild(bg);
     const m = document.querySelector("#movie_player .html5-video-container");
     if (m) m.appendChild(el);
     drag(el);
   }
   return el;
+}
+
+function showStatus(message, type = "info", hideAfter = 0) {
+  const el = overlay();
+  const status = el?.querySelector(".status");
+  if (!status) return;
+  if (statusTimer) clearTimeout(statusTimer);
+  statusTimer = null;
+  status.textContent = message;
+  status.className = `status ${type}`;
+  status.style.display = "block";
+  if (hideAfter > 0) {
+    statusTimer = setTimeout(() => {
+      status.style.display = "none";
+      statusTimer = null;
+    }, hideAfter);
+  }
+}
+
+function clearStatus() {
+  if (statusTimer) clearTimeout(statusTimer);
+  statusTimer = null;
+  const status = document.querySelector(`#${CID} .status`);
+  if (status) status.style.display = "none";
 }
 
 function refresh() {
@@ -140,6 +170,7 @@ async function load(pageUrl) {
   ci = -1;
   refresh();
   overlay();
+  showStatus("正在连接字幕后端…");
   try {
     const baseUrl = (settings.backendUrl || DEF.backendUrl).replace(/\/+$/, "");
     const langs = (settings.languages || DEF.languages)
@@ -161,7 +192,10 @@ async function load(pageUrl) {
       if (track) break;
     }
     if (!track) track = tr.tracks[0];
-    if (!track && !settings.whisperEnabled) return;
+    if (!track && !settings.whisperEnabled) {
+      showStatus("没有找到匹配字幕，可在设置中启用 Whisper", "error");
+      return;
+    }
 
     const body = {
       url: pageUrl,
@@ -187,11 +221,25 @@ async function load(pageUrl) {
       if (settings.whisperLanguage) body.whisper_language = settings.whisperLanguage;
     }
 
+    showStatus(track ? "正在处理并翻译字幕…" : "没有字幕，正在使用 Whisper 转写…");
     const resp = await apiPost("/api/subtitle/process", body);
     if (generation !== loadGeneration || settings.enabled === false) return;
     subtitles = (resp.cues||[]).map(c => ({ start:c.start, end:c.end, text:c.text, translation:c.translation||"" }));
+    if (!subtitles.length) {
+      showStatus("后端没有返回可显示的字幕", "error");
+      return;
+    }
+    showStatus(`字幕已加载（${subtitles.length} 条）`, "success", 2500);
     tick();
-  } catch (e) { console.error("[YTS]", e); }
+  } catch (e) {
+    if (generation !== loadGeneration) return;
+    const baseUrl = (settings.backendUrl || DEF.backendUrl).replace(/\/+$/, "");
+    const message = e instanceof TypeError
+      ? `无法连接后端 ${baseUrl}，请先启动服务`
+      : `字幕加载失败：${e.message || e}`;
+    showStatus(message, "error");
+    console.error("[YTS]", e);
+  }
 }
 
 // ── events ─────────────────────────────────────────────────
@@ -283,6 +331,7 @@ function injectToggle() {
     btn.title = settings.enabled !== false ? "关闭字幕翻译" : "开启字幕翻译";
     if (settings.enabled === false) {
       loadGeneration += 1;
+      clearStatus();
       subtitles = []; ci = -1; refresh();
       const el = document.getElementById(CID);
       if (el) el.style.display = "none";
@@ -334,6 +383,7 @@ chrome.storage.local.get(["ytsSettings"], d => {
   window.addEventListener("yt-navigate-finish", () => {
     loadedVideoId = "";
     loadGeneration += 1;
+    clearStatus();
     subtitles = []; ci = -1; refresh();
     setTimeout(() => { injectToggle(); findV(); }, 1000);
   });
@@ -345,6 +395,7 @@ chrome.storage.onChanged.addListener(changes => {
     syncStyle();
     if (settings.enabled === false) {
       loadGeneration += 1;
+      clearStatus();
       subtitles = []; ci = -1; refresh();
       const el = document.getElementById(CID); if (el) el.style.display = "none";
     } else {

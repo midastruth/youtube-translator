@@ -221,6 +221,42 @@ class ServerProcessTest(unittest.TestCase):
     @patch("youtube_ingest.server._cache")
     @patch("youtube_ingest.server._fetch_json3_subtitle")
     @patch("youtube_ingest.server.fetch_metadata")
+    def test_process_endpoint_recovers_invalid_json3_cache(
+        self, mock_fetch, mock_json3, mock_cache,
+    ):
+        from youtube_ingest.server import app
+        from fastapi.testclient import TestClient
+
+        mock_fetch.return_value = {
+            "id": "test123",
+            "title": "Test",
+            "subtitles": {"en": [{}]},
+            "automatic_captions": {},
+        }
+        mock_cache.get_cues.return_value = None
+        mock_cache.get_json3.return_value = "not-json"
+        valid_json3 = json.dumps({
+            "events": [
+                {"tStartMs": 0, "dDurationMs": 500,
+                 "segs": [{"utf8": "Recovered.", "tOffsetMs": 0}]},
+            ]
+        })
+        mock_json3.return_value = valid_json3
+
+        client = TestClient(app)
+        resp = client.post("/api/subtitle/process", json={
+            "url": "https://www.youtube.com/watch?v=test123",
+            "languages": ["en"],
+        })
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["cues"][0]["text"], "Recovered.")
+        mock_json3.assert_called_once()
+        mock_cache.put_json3.assert_called_once_with("test123", "en", valid_json3)
+
+    @patch("youtube_ingest.server._cache")
+    @patch("youtube_ingest.server._fetch_json3_subtitle")
+    @patch("youtube_ingest.server.fetch_metadata")
     def test_process_endpoint_no_subtitle_available(self, mock_fetch, mock_json3, mock_cache):
         from youtube_ingest.server import app
         from fastapi.testclient import TestClient

@@ -54,8 +54,9 @@ function downloadVtt() {
 
 function saveSettings() {
   chrome.storage.local.get(["ytsSettings"], (data) => {
-    // Keep state controlled from the player, notably enabled and positionY.
+    // Keep page-controlled display state such as positionY.
     const settings = { ...(data.ytsSettings || {}) };
+    delete settings.enabled;
     for (const id of [
       "backendUrl", "languages", "toLang", "segmentation",
       "translateApiKey", "translateBaseUrl", "translateModel",

@@ -426,6 +426,9 @@ class ServerSSETest(unittest.TestCase):
             self.assertIn("你好。", body)
             self.assertIn('"failed_cues": 0', body)
             self.assertTrue(mock_translate.await_args.kwargs["whole"])
+            self.assertTrue(
+                mock_translate.await_args.kwargs["whole_fallback_to_batch"]
+            )
 
 
 class ServerCacheAdminTest(unittest.TestCase):

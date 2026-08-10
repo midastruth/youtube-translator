@@ -50,6 +50,7 @@ _cache = SubtitleCache(
     cache_dir=Path(os.getenv("CACHE_DIR", Path.cwd() / "cache")),
     ttl_seconds=float(os.getenv("CACHE_TTL_SECONDS", "86400")),
 )
+_active_sse_jobs: set[str] = set()
 
 
 # ── yt-dlp helpers ─────────────────────────────────────────────────────
@@ -507,12 +508,19 @@ async def process_subtitle_stream(req: SubtitleRequest):
         # extension saved translate_whole=false. Per-cue translation of hundreds
         # of cues is too slow and expensive for an interactive stream.
         use_context_chunks = req.translate_whole or total >= 100
-        chunk_size = 40 if use_context_chunks else 12
+        # DeepSeek reliably preserves the one-marker-per-cue contract with
+        # small context windows. Larger 40-cue responses were frequently
+        # partial, which left the currently playing opening cues untranslated.
+        chunk_size = 10 if use_context_chunks else 12
         chunks = [
             pending_indices[start:start + chunk_size]
             for start in range(0, len(pending_indices), chunk_size)
         ]
         semaphore = asyncio.Semaphore(3)
+        job_key = ":".join(str(part) for part in cache_args)
+        if job_key in _active_sse_jobs:
+            yield f"data: {json.dumps({'type': 'error', 'detail': '该视频的翻译任务已在另一个页面运行，请关闭重复页面后重试'}, ensure_ascii=False)}\n\n"
+            return
 
         async def translate_chunk(indices: list[int]) -> tuple[list[int], list[dict] | None]:
             async with semaphore:
@@ -530,6 +538,10 @@ async def process_subtitle_stream(req: SubtitleRequest):
                             concurrency=3,
                             timeout=60.0,
                             whole=use_context_chunks,
+                            # DeepSeek occasionally ignores line markers even
+                            # for a 10-cue chunk. Bound the fallback to this
+                            # small chunk so every cue still gets translated.
+                            whole_fallback_to_batch=True,
                         )
                         return indices, translated
                     except Exception as exc:
@@ -541,9 +553,11 @@ async def process_subtitle_stream(req: SubtitleRequest):
                             await asyncio.sleep(1)
                 return indices, None
 
-        tasks = {asyncio.create_task(translate_chunk(indices)) for indices in chunks}
+        tasks: set[asyncio.Task] = set()
         failed: set[int] = set()
+        _active_sse_jobs.add(job_key)
         try:
+            tasks = {asyncio.create_task(translate_chunk(indices)) for indices in chunks}
             while tasks:
                 done, tasks = await asyncio.wait(
                     tasks, timeout=10.0, return_when=asyncio.FIRST_COMPLETED,
@@ -574,6 +588,7 @@ async def process_subtitle_stream(req: SubtitleRequest):
                 task.cancel()
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
+            _active_sse_jobs.discard(job_key)
 
         yield f"data: {json.dumps({'type': 'done', 'total_cues': total, 'failed_cues': len(failed)}, ensure_ascii=False)}\n\n"
 

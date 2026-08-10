@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "YouTube Subtitle Translator",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "YouTube 双语字幕翻译 — 后端版",
   "permissions": ["storage"],
   "host_permissions": ["https://www.youtube.com/*"],

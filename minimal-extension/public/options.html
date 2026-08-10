@@ -8,39 +8,44 @@
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #111; color: #eee; padding: 24px; max-width: 640px; margin: 0 auto; }
     h1 { font-size: 20px; margin-bottom: 24px; color: #fff; }
-    label { display: block; font-size: 13px; color: #999; margin-bottom: 4px; margin-top: 16px; }
+    h2 { font-size: 14px; color: #3ea6ff; margin-bottom: 4px; }
+    label { display: block; font-size: 13px; color: #999; margin-bottom: 4px; margin-top: 14px; }
     input, select { width: 100%; padding: 10px 12px; border: 1px solid #333; border-radius: 6px; background: #1a1a1a; color: #eee; font-size: 14px; }
     input:focus, select:focus { border-color: #3ea6ff; outline: none; }
     input::placeholder { color: #555; }
+    input[type="range"] { width: calc(100% - 60px); padding: 0; accent-color: #3ea6ff; }
     button { padding: 12px 28px; background: #3ea6ff; color: #111; border: none; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; margin-top: 24px; }
     button:hover { background: #5db8ff; }
     .hint { font-size: 12px; color: #666; margin-top: 2px; }
-    .section { border: 1px solid #333; border-radius: 8px; padding: 16px; margin-top: 20px; }
-    .section-title { font-size: 14px; font-weight: 600; color: #3ea6ff; margin-bottom: 12px; }
+    .section { border: 1px solid #333; border-radius: 8px; padding: 20px; margin-top: 20px; }
+    .section-title { font-size: 14px; font-weight: 600; color: #3ea6ff; margin-bottom: 14px; }
     .saved { color: #0f0; font-size: 13px; margin-left: 12px; opacity: 0; transition: opacity 0.3s; }
     .saved.show { opacity: 1; }
+    .row { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+    .row label { margin-top: 0; min-width: 80px; }
+    .row .val { min-width: 40px; text-align: right; font-size: 13px; color: #3ea6ff; }
+    .row input[type="color"] { width: 40px; height: 36px; padding: 2px; border-radius: 4px; cursor: pointer; }
+    .row select { width: auto; flex: 1; }
   </style>
 </head>
 <body>
   <h1>⚡ YouTube Subtitle Translator</h1>
 
+  <!-- Backend -->
   <div class="section">
     <div class="section-title">🖥 后端服务</div>
     <label>后端地址</label>
     <input type="text" id="backendUrl" placeholder="http://localhost:8787">
-    <div class="hint">youtube-ingest 服务地址。留空使用默认 localhost:8787</div>
+    <div class="hint">youtube-ingest 服务地址</div>
   </div>
 
+  <!-- Subtitle source -->
   <div class="section">
-    <div class="section-title">🎬 字幕设置</div>
-
+    <div class="section-title">🎬 字幕来源</div>
     <label>原文字幕语言（逗号分隔，按优先级）</label>
     <input type="text" id="languages" placeholder="en, zh-Hans, zh-Hant, zh">
-    <div class="hint">优先匹配人工字幕，后自动字幕</div>
-
     <label>目标翻译语言</label>
     <input type="text" id="toLang" placeholder="zh-CN">
-
     <label>断句模式</label>
     <select id="segmentation">
       <option value="rule">规则断句（标点+停顿）</option>
@@ -48,66 +53,143 @@
     </select>
   </div>
 
+  <!-- Translation API -->
   <div class="section">
     <div class="section-title">🔑 翻译 API（可选，留空用服务端 .env）</div>
-
     <label>OpenAI API Key</label>
     <input type="password" id="translateApiKey" placeholder="sk-...">
-    <div class="hint">或留空，由后端 .env 配置</div>
-
     <label>API 地址</label>
     <input type="text" id="translateBaseUrl" placeholder="https://api.openai.com/v1">
-
     <label>翻译模型</label>
     <input type="text" id="translateModel" placeholder="gpt-4o">
-
     <label>全文一次翻译</label>
     <select id="translateWhole">
-      <option value="false">否 — 逐句并行翻译（快）</option>
-      <option value="true">是 — 全文一次翻译（术语统一）</option>
+      <option value="false">否 — 逐句并行（快）</option>
+      <option value="true">是 — 全文一次（术语统一）</option>
     </select>
+  </div>
+
+  <!-- Display -->
+  <div class="section">
+    <div class="section-title">🎨 字幕显示</div>
+
+    <label>显示模式</label>
+    <select id="isBilingual">
+      <option value="true">双语（原文 + 译文）</option>
+      <option value="false">仅译文</option>
+    </select>
+
+    <div class="row">
+      <label>原文大小</label>
+      <input type="range" id="fontSizeOrig" min="14" max="48" value="22">
+      <span class="val" id="fontSizeOrigVal">22px</span>
+    </div>
+
+    <div class="row">
+      <label>译文大小</label>
+      <input type="range" id="fontSizeTran" min="12" max="40" value="18">
+      <span class="val" id="fontSizeTranVal">18px</span>
+    </div>
+
+    <div class="row">
+      <label>原文颜色</label>
+      <input type="color" id="origColor" value="#ffffff">
+    </div>
+
+    <div class="row">
+      <label>译文颜色</label>
+      <input type="color" id="tranColor" value="#ffff00">
+    </div>
+
+    <div class="hint" style="margin-top:12px">
+      💡 字幕框可<span style="color:#3ea6ff">鼠标拖拽</span>调整位置，位置自动保存
+    </div>
+  </div>
+
+  <!-- VTT -->
+  <div class="section">
+    <div class="section-title">📥 字幕导出</div>
+    <button onclick="downloadVtt()" style="margin-top:0">⬇ 下载 VTT 字幕文件</button>
+    <div class="hint" style="margin-top:8px">将当前视频字幕导出为 WebVTT 格式（双语）</div>
   </div>
 
   <button onclick="save()">💾 保存设置</button>
   <span class="saved" id="savedMsg">✓ 已保存</span>
 
   <script>
-    const fields = [
-      "backendUrl", "languages", "toLang", "segmentation",
-      "translateApiKey", "translateBaseUrl", "translateModel",
-    ];
+    const NUM_KEYS = ["fontSizeOrig", "fontSizeTran", "positionY"];
 
-    chrome.storage.local.get(["ytsSettings"], (data) => {
-      const s = data.ytsSettings || {};
-      document.getElementById("backendUrl").value = s.backendUrl || "http://localhost:8787";
-      document.getElementById("languages").value = s.languages || "en,zh-Hans,zh-Hant,zh";
-      document.getElementById("toLang").value = s.toLang || "zh-CN";
-      document.getElementById("segmentation").value = s.segmentation || "rule";
-      document.getElementById("translateApiKey").value = s.translateApiKey || "";
-      document.getElementById("translateBaseUrl").value = s.translateBaseUrl || "";
-      document.getElementById("translateModel").value = s.translateModel || "";
-      document.getElementById("translateWhole").value = s.translateWhole ? "true" : "false";
-    });
+    function load() {
+      chrome.storage.local.get(["ytsSettings"], (data) => {
+        const s = data.ytsSettings || {};
+        setVal("backendUrl", s.backendUrl || "http://localhost:8787");
+        setVal("languages", s.languages || "en,zh-Hans,zh-Hant,zh");
+        setVal("toLang", s.toLang || "zh-CN");
+        setVal("segmentation", s.segmentation || "rule");
+        setVal("translateApiKey", s.translateApiKey || "");
+        setVal("translateBaseUrl", s.translateBaseUrl || "");
+        setVal("translateModel", s.translateModel || "");
+        setVal("translateWhole", s.translateWhole ? "true" : "false");
+        setVal("isBilingual", s.isBilingual !== false ? "true" : "false");
+        setVal("fontSizeOrig", s.fontSizeOrig || 22);
+        setVal("fontSizeTran", s.fontSizeTran || 18);
+        setVal("origColor", s.origColor || "#ffffff");
+        setVal("tranColor", s.tranColor || "#ffff00");
+        updateRangeLabel("fontSizeOrig");
+        updateRangeLabel("fontSizeTran");
+      });
+    }
+
+    function setVal(id, val) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      if (el.type === "checkbox") el.checked = val;
+      else el.value = val;
+    }
+
+    function getVal(id) {
+      const el = document.getElementById(id);
+      return el.type === "checkbox" ? el.checked : el.value;
+    }
+
+    function updateRangeLabel(id) {
+      const v = getVal(id);
+      const span = document.getElementById(id + "Val");
+      if (span) span.textContent = v + "px";
+    }
+
+    // live range preview
+    document.getElementById("fontSizeOrig").addEventListener("input", () => updateRangeLabel("fontSizeOrig"));
+    document.getElementById("fontSizeTran").addEventListener("input", () => updateRangeLabel("fontSizeTran"));
+
+    function downloadVtt() {
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        if (tabs[0]) chrome.tabs.sendMessage(tabs[0].id, { action: "downloadVtt" });
+      });
+    }
 
     function save() {
-      const settings = {
-        backendUrl: document.getElementById("backendUrl").value.trim(),
-        languages: document.getElementById("languages").value.trim(),
-        toLang: document.getElementById("toLang").value.trim(),
-        segmentation: document.getElementById("segmentation").value,
-        translateApiKey: document.getElementById("translateApiKey").value.trim(),
-        translateBaseUrl: document.getElementById("translateBaseUrl").value.trim(),
-        translateModel: document.getElementById("translateModel").value.trim(),
-        translateWhole: document.getElementById("translateWhole").value === "true",
-        autoTranslate: true,
-      };
+      const settings = {};
+      for (const id of ["backendUrl","languages","toLang","segmentation",
+                         "translateApiKey","translateBaseUrl","translateModel",
+                         "origColor","tranColor"]) {
+        settings[id] = getVal(id).trim();
+      }
+      settings.translateWhole = getVal("translateWhole") === "true";
+      settings.isBilingual = getVal("isBilingual") === "true";
+      settings.autoTranslate = true;
+      for (const k of NUM_KEYS) settings[k] = parseInt(getVal(k)) || 22;
+      settings.positionY = settings.positionY || 12;
+
       chrome.storage.local.set({ ytsSettings: settings }, () => {
         const msg = document.getElementById("savedMsg");
         msg.classList.remove("show");
-        void msg.offsetWidth; // reflow
+        void msg.offsetWidth;
         msg.classList.add("show");
       });
     }
+
+    load();
   </script>
 </body>
 </html>

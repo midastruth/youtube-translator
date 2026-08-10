@@ -113,6 +113,58 @@ class ServerProcessTest(unittest.TestCase):
         if not self._has_testclient:
             self.skipTest("fastapi.testclient not available")
 
+    @patch("youtube_ingest.transcribe.transcribe_timed_chunks")
+    @patch("youtube_ingest.transcribe.WhisperClient")
+    @patch("youtube_ingest.audio.split_audio")
+    @patch("youtube_ingest.server._download_audio")
+    @patch("youtube_ingest.server.fetch_metadata")
+    def test_process_endpoint_whisper_uses_timed_cues(
+        self,
+        mock_fetch,
+        mock_download,
+        mock_split,
+        mock_client,
+        mock_transcribe,
+    ):
+        from youtube_ingest.server import app
+        from fastapi.testclient import TestClient
+
+        mock_fetch.return_value = {
+            "id": "whisper123",
+            "title": "No Captions",
+            "subtitles": {},
+            "automatic_captions": {},
+        }
+        mock_download.return_value = Path("/tmp/audio.mp3")
+        mock_split.return_value = [Path("/tmp/chunk_001.mp3")]
+        mock_transcribe.return_value = [
+            {
+                "start": 1250.0,
+                "end": 4750.0,
+                "text": "Timed transcript",
+                "translation": "",
+            }
+        ]
+
+        response = TestClient(app).post("/api/subtitle/process", json={
+            "url": "https://www.youtube.com/watch?v=whisper123",
+            "languages": ["en"],
+            "whisper_enabled": True,
+            "whisper_language": "en",
+        })
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["source"], "whisper")
+        self.assertEqual(data["cues"][0]["start"], 1250.0)
+        self.assertEqual(data["cues"][0]["end"], 4750.0)
+        mock_transcribe.assert_called_once_with(
+            mock_split.return_value,
+            mock_client.return_value,
+            language="en",
+            chunk_seconds=600,
+        )
+
     @patch("youtube_ingest.server._cache")
     @patch("youtube_ingest.server._fetch_json3_subtitle")
     @patch("youtube_ingest.server.fetch_metadata")

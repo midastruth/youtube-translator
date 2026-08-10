@@ -189,6 +189,36 @@ class TranscribeTest(unittest.TestCase):
             self.assertEqual(result, "Hello world")
 
     @patch("httpx.post")
+    def test_transcribe_timed_success(self, mock_post):
+        from youtube_ingest.transcribe import WhisperClient
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "text": "Hello world",
+            "language": "en",
+            "duration": 4.5,
+            "segments": [
+                {"start": 0.25, "end": 2.0, "text": " Hello"},
+                {"start": 2.0, "end": 4.5, "text": "world "},
+            ],
+        }
+        mock_resp.raise_for_status.return_value = None
+        mock_post.return_value = mock_resp
+
+        client = WhisperClient(api_key="test-key")
+        with tempfile.TemporaryDirectory() as tmp:
+            audio_path = Path(tmp) / "audio.mp3"
+            audio_path.write_bytes(b"fake audio")
+            result = client.transcribe_timed(audio_path, language="en")
+
+        self.assertEqual(result["language"], "en")
+        self.assertEqual(result["segments"][0], {
+            "start": 0.25, "end": 2.0, "text": "Hello",
+        })
+        request_data = mock_post.call_args.kwargs["data"]
+        self.assertEqual(request_data["response_format"], "verbose_json")
+        self.assertEqual(request_data["timestamp_granularities[]"], "segment")
+
+    @patch("httpx.post")
     def test_transcribe_empty_response(self, mock_post):
         from youtube_ingest.transcribe import WhisperClient
         mock_resp = MagicMock()
@@ -260,6 +290,41 @@ class TranscribeTest(unittest.TestCase):
             result = transcribe_chunks(chunks, transcripts_dir, client, language="en")
             self.assertEqual(len(result), 2)
             self.assertEqual(client.transcribe.call_count, 2)
+
+    def test_transcribe_timed_chunks_applies_chunk_offsets(self):
+        from youtube_ingest.transcribe import transcribe_timed_chunks
+        client = MagicMock()
+        client.transcribe_timed.side_effect = [
+            {"text": "A", "segments": [{"start": 1.0, "end": 3.0, "text": "A"}]},
+            {"text": "B", "segments": [{"start": 2.0, "end": 5.0, "text": "B"}]},
+        ]
+        chunks = [Path("chunk_001.mp3"), Path("chunk_002.mp3")]
+
+        cues = transcribe_timed_chunks(chunks, client, language="en", chunk_seconds=600)
+
+        self.assertEqual(cues[0]["start"], 1000.0)
+        self.assertEqual(cues[0]["end"], 3000.0)
+        self.assertEqual(cues[1]["start"], 602000.0)
+        self.assertEqual(cues[1]["end"], 605000.0)
+        self.assertEqual(cues[1]["translation"], "")
+
+    def test_transcribe_timed_chunks_plain_text_fallback_spans_duration(self):
+        from youtube_ingest.transcribe import transcribe_timed_chunks
+        client = MagicMock()
+        client.transcribe_timed.return_value = {
+            "text": "First sentence. Second sentence!",
+            "segments": [],
+            "duration": 20.0,
+        }
+
+        cues = transcribe_timed_chunks(
+            [Path("chunk_001.mp3")], client, chunk_seconds=600,
+        )
+
+        self.assertEqual(len(cues), 2)
+        self.assertEqual(cues[0]["start"], 0.0)
+        self.assertEqual(cues[-1]["end"], 20000.0)
+        self.assertEqual(cues[0]["text"], "First sentence.")
 
     def test_merge_transcripts(self):
         from youtube_ingest.transcribe import merge_transcripts

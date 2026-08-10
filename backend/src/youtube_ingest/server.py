@@ -210,7 +210,7 @@ def _process_subtitle_sync(
     """
     import tempfile
     from .audio import split_audio
-    from .transcribe import WhisperClient, transcribe_chunks, merge_transcripts
+    from .transcribe import WhisperClient, transcribe_timed_chunks
 
     # Metadata
     metadata = fetch_metadata(url)
@@ -236,29 +236,20 @@ def _process_subtitle_sync(
                     base_url=whisper_base_url,
                     model=whisper_model,
                 )
-                transcript_dir = Path(tmpdir) / "transcripts"
-                transcript_parts = transcribe_chunks(
-                    chunks, transcript_dir, client, language=whisper_language,
+                cues = transcribe_timed_chunks(
+                    chunks,
+                    client,
+                    language=whisper_language,
+                    chunk_seconds=600,
                 )
-                merged_path = Path(tmpdir) / "merged.txt"
-                merge_transcripts(transcript_parts, merged_path)
-                full_text = merged_path.read_text(encoding="utf-8").strip()
 
-            if not full_text:
-                raise HTTPException(status_code=500, detail="Whisper returned empty transcript")
+            if not cues:
+                raise HTTPException(status_code=500, detail="Whisper returned no timed transcript")
 
-            # Build simple cues from Whisper output (no word-level timestamps)
-            lines = [l.strip() for l in full_text.split("\n") if l.strip()]
-            cues = []
-            for i, line in enumerate(lines):
-                cues.append({
-                    "start": i * 5000.0,  # approx 5s per cue — rough estimate
-                    "end": (i + 1) * 5000.0,
-                    "text": line,
-                    "translation": "",
-                })
-
-            logger.info("Whisper produced %d cues", len(cues))
+            logger.info(
+                "Whisper produced %d timed cues spanning %.1fs",
+                len(cues), cues[-1]["end"] / 1000.0,
+            )
             return {
                 "video_id": video_id, "title": title,
                 "from_lang": whisper_language or "auto",

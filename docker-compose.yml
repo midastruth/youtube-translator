@@ -1,0 +1,28 @@
+version: "3.9"
+
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "${PORT:-8787}:8787"
+    volumes:
+      - ./backend/cache:/app/cache
+      - ./backend/.env:/app/.env:ro
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8787
+      - CACHE_DIR=/app/cache
+      - CACHE_TTL_SECONDS=${CACHE_TTL_SECONDS:-86400}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-}
+      - TRANSLATE_API_KEY=${TRANSLATE_API_KEY:-}
+      - DEEPL_API_KEY=${DEEPL_API_KEY:-}
+      - WHISPER_API_KEY=${WHISPER_API_KEY:-}
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8787/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

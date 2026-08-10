@@ -1,0 +1,17 @@
+# Dependencies
+backend/.venv/
+backend/cache/
+backend/__pycache__/
+backend/*.py[cod]
+backend/.pytest_cache/
+backend/output/
+
+extension/node_modules/
+extension/build/
+extension/dist/
+extension/.pnpm-store/
+
+# Secrets
+.env
+backend/.env
+extension/.env

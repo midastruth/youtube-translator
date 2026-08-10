@@ -1,0 +1,416 @@
+import { act } from "react";
+import { createRoot } from "react-dom/client";
+import { Simulate } from "react-dom/test-utils";
+import Apis from "./Apis";
+import {
+  OPT_TRANS_OPENAI,
+  OPT_TRANS_GEMINI,
+  OPT_TRANS_GEMINI_2,
+} from "../../config";
+import { fetchModelCatalog } from "../../libs/modelList";
+
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+HTMLElement.prototype.scrollTo = jest.fn();
+
+jest.mock("../../hooks/I18n", () => ({
+  useI18n: () => (key, fallback) => fallback || key,
+}));
+
+jest.mock("../../hooks/Api", () => ({
+  useApiList: jest.fn(),
+  useApiItem: jest.fn(),
+}));
+
+jest.mock("../../hooks/Prompt", () => ({
+  usePromptList: () => ({ prompts: [] }),
+}));
+
+jest.mock("../../hooks/Confirm", () => ({
+  useConfirm: () => jest.fn(),
+}));
+
+jest.mock("../../hooks/Alert", () => ({
+  useAlert: () => ({
+    success: jest.fn(),
+    error: jest.fn(),
+  }),
+}));
+
+jest.mock("../../hooks/Setting", () => ({
+  useSetting: () => ({
+    setting: { prompts: [], subtitleSetting: {}, uiLang: "zh" },
+  }),
+}));
+
+jest.mock("../../apis", () => ({
+  apiTranslate: jest.fn(),
+}));
+
+jest.mock("../../libs/modelList", () => ({
+  fetchModelCatalog: jest.fn(),
+}));
+
+jest.mock("./ReusableAutocomplete", () => {
+  return function MockReusableAutocomplete({
+    name,
+    label,
+    value,
+    options = [],
+    onChange,
+    onFocus,
+    textFieldProps = {},
+  }) {
+    return (
+      <label>
+        {label}
+        <input
+          name={name}
+          value={value || ""}
+          onChange={onChange}
+          onFocus={onFocus}
+          data-options={options.join(",")}
+          aria-invalid={textFieldProps.error ? "true" : "false"}
+        />
+        {textFieldProps.helperText ? (
+          <span>{textFieldProps.helperText}</span>
+        ) : null}
+      </label>
+    );
+  };
+});
+
+const { useApiList, useApiItem } = require("../../hooks/Api");
+
+function createApi(overrides = {}) {
+  return {
+    apiSlug: "OpenAI",
+    apiName: "OpenAI",
+    apiType: OPT_TRANS_OPENAI,
+    url: "https://api.openai.com/v1/chat/completions",
+    key: "sk-test",
+    model: "gpt-4",
+    modelListUrl: "https://api.openai.com/v1/models",
+    sortOrder: 0,
+    httpTimeout: 30,
+    ...overrides,
+  };
+}
+
+async function flushEffects() {
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
+
+async function renderApis(api = createApi(), update = jest.fn()) {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+
+  useApiList.mockReturnValue({
+    transApis: [api],
+    addApi: jest.fn(),
+    deleteApi: jest.fn(),
+    deleteApis: jest.fn(),
+    pinApis: jest.fn(),
+    disableApis: jest.fn(),
+    enableApis: jest.fn(),
+    copyApi: jest.fn(),
+    alphaSortApis: jest.fn(),
+    reorderApis: jest.fn(),
+  });
+  useApiItem.mockReturnValue({
+    api,
+    update,
+    reset: jest.fn(),
+  });
+
+  await act(async () => {
+    root.render(<Apis />);
+  });
+  await flushEffects();
+
+  return {
+    container,
+    update,
+    unmount: () => {
+      act(() => root.unmount());
+      container.remove();
+    },
+  };
+}
+
+function getInput(container, name) {
+  const input = container.querySelector(`input[name="${name}"]`);
+  if (!input) {
+    throw new Error(`Unable to find input named ${name}`);
+  }
+  return input;
+}
+
+function getSaveButton(container) {
+  return Array.from(container.querySelectorAll("button")).find(
+    (button) => button.textContent === "save"
+  );
+}
+
+describe("Apis model list", () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+    document.body.innerHTML = "";
+  });
+
+  test("loads model list once when model input is focused", async () => {
+    fetchModelCatalog.mockResolvedValue({
+      models: ["gpt-4o", "gpt-4.1"],
+      thinkingCapabilities: {},
+    });
+    const view = await renderApis();
+    const modelInput = getInput(view.container, "model");
+
+    await act(async () => {
+      Simulate.focus(modelInput);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      Simulate.focus(modelInput);
+      await Promise.resolve();
+    });
+
+    expect(fetchModelCatalog).toHaveBeenCalledTimes(1);
+    expect(fetchModelCatalog).toHaveBeenCalledWith({
+      apiType: OPT_TRANS_OPENAI,
+      modelListUrl: "https://api.openai.com/v1/models",
+      key: "sk-test",
+      httpTimeout: 30,
+    });
+    expect(modelInput.getAttribute("data-options")).toContain("gpt-4o");
+
+    view.unmount();
+  });
+
+  test("saves OpenRouter reasoning metadata for the selected model", async () => {
+    fetchModelCatalog.mockResolvedValue({
+      models: ["provider/mandatory-model"],
+      thinkingCapabilities: {
+        "provider/mandatory-model": {
+          model: "provider/mandatory-model",
+          supportedEfforts: ["high", "low"],
+          mandatory: true,
+        },
+      },
+    });
+    const update = jest.fn();
+    const view = await renderApis(
+      createApi({
+        apiSlug: "OpenRouter",
+        apiName: "OpenRouter",
+        apiType: "OpenRouter",
+        model: "provider/mandatory-model",
+        modelListUrl: "https://openrouter.ai/api/v1/models",
+        thinkingMode: "disabled",
+      }),
+      update
+    );
+    const modelInput = getInput(view.container, "model");
+
+    await act(async () => {
+      Simulate.focus(modelInput);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(view.container.textContent).toContain(
+      "gemini_thinking_minimum_helper"
+    );
+
+    await act(async () => {
+      Simulate.click(getSaveButton(view.container));
+    });
+    expect(update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        thinkingCapabilities: {
+          model: "provider/mandatory-model",
+          supportedEfforts: ["high", "low"],
+          mandatory: true,
+        },
+      })
+    );
+
+    view.unmount();
+  });
+
+  test("does not load model list without url or key", async () => {
+    const view = await renderApis(createApi({ key: "" }));
+    const modelInput = getInput(view.container, "model");
+
+    await act(async () => {
+      Simulate.focus(modelInput);
+      await Promise.resolve();
+    });
+
+    expect(fetchModelCatalog).not.toHaveBeenCalled();
+
+    view.unmount();
+  });
+
+  test("keeps manual model input saveable", async () => {
+    const update = jest.fn();
+    const view = await renderApis(createApi(), update);
+    const modelInput = getInput(view.container, "model");
+
+    await act(async () => {
+      Simulate.change(modelInput, {
+        target: {
+          name: "model",
+          value: "manual-model",
+        },
+      });
+    });
+
+    const saveButton = getSaveButton(view.container);
+    await act(async () => {
+      Simulate.click(saveButton);
+    });
+
+    expect(update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: "manual-model",
+      })
+    );
+
+    view.unmount();
+  });
+
+  test("shows fetch failure without clearing model", async () => {
+    fetchModelCatalog.mockRejectedValue(new Error("network failed"));
+    const view = await renderApis();
+    const modelInput = getInput(view.container, "model");
+
+    await act(async () => {
+      Simulate.focus(modelInput);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(modelInput.value).toBe("gpt-4");
+    expect(modelInput.getAttribute("aria-invalid")).toBe("true");
+    expect(view.container.textContent).toContain("model_list_fetch_failed");
+
+    view.unmount();
+  });
+
+  test("resets model list error when url or key changes", async () => {
+    fetchModelCatalog.mockRejectedValue(new Error("network failed"));
+    const view = await renderApis();
+    const modelInput = getInput(view.container, "model");
+    const modelListUrlInput = getInput(view.container, "modelListUrl");
+
+    await act(async () => {
+      Simulate.focus(modelInput);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(modelInput.getAttribute("aria-invalid")).toBe("true");
+    expect(view.container.textContent).toContain("model_list_fetch_failed");
+
+    await act(async () => {
+      Simulate.change(modelListUrlInput, {
+        target: {
+          name: "modelListUrl",
+          value: "https://api.openai.com/v1/models?fixed=1",
+        },
+      });
+      await Promise.resolve();
+    });
+
+    expect(modelInput.getAttribute("aria-invalid")).toBe("false");
+    expect(view.container.textContent).not.toContain("model_list_fetch_failed");
+
+    view.unmount();
+  });
+});
+
+describe("Apis batch concurrency", () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+    document.body.innerHTML = "";
+  });
+
+  test("disables batch concurrency at one when context is enabled", async () => {
+    const view = await renderApis(
+      createApi({
+        useBatchFetch: true,
+        batchConcurrency: 4,
+        useContext: true,
+      })
+    );
+    const concurrencyInput = getInput(view.container, "batchConcurrency");
+
+    expect(concurrencyInput.value).toBe("1");
+    expect(concurrencyInput.disabled).toBe(true);
+    expect(view.container.textContent).toContain(
+      "batch_concurrency_context_hint"
+    );
+
+    view.unmount();
+  });
+});
+
+describe("Apis temperature input", () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+    document.body.innerHTML = "";
+  });
+
+  test("renders temperature input for OpenAI but hides it for Gemini and Gemini2", async () => {
+    const openaiView = await renderApis(
+      createApi({ apiType: OPT_TRANS_OPENAI })
+    );
+    expect(
+      openaiView.container.querySelector('input[name="temperature"]')
+    ).not.toBeNull();
+    openaiView.unmount();
+
+    const geminiView = await renderApis(
+      createApi({ apiType: OPT_TRANS_GEMINI })
+    );
+    expect(
+      geminiView.container.querySelector('input[name="temperature"]')
+    ).toBeNull();
+    geminiView.unmount();
+
+    const gemini2View = await renderApis(
+      createApi({ apiType: OPT_TRANS_GEMINI_2 })
+    );
+    expect(
+      gemini2View.container.querySelector('input[name="temperature"]')
+    ).toBeNull();
+    gemini2View.unmount();
+  });
+});
+
+describe("Apis Gemini thinking efforts", () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+    document.body.innerHTML = "";
+  });
+
+  test("falls back to the default selection for an unsupported saved effort", async () => {
+    const view = await renderApis(
+      createApi({
+        apiSlug: OPT_TRANS_GEMINI,
+        apiType: OPT_TRANS_GEMINI,
+        model: "gemini-3-pro-preview",
+        thinkingMode: "enabled",
+        thinkingEffort: "medium",
+      })
+    );
+    const effortInput = getInput(view.container, "thinkingEffort");
+    expect(effortInput.value).toBe("_default");
+
+    view.unmount();
+  });
+});

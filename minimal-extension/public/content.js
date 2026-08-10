@@ -225,25 +225,33 @@ chrome.runtime.onMessage.addListener((msg, _, send) => {
 
 // ── boot ───────────────────────────────────────────────────
 
+// Google Translate SVG icons
+const ICON_ON = `<svg viewBox="0 0 24 24" width="20" height="20"><path d="M22.401 4.818h-9.927L10.927 0H1.599C.72 0 .002.719.002 1.599v16.275c0 .878.72 1.597 1.597 1.597h10L13.072 24H22.4c.878 0 1.597-.707 1.597-1.572V6.39c0-.865-.72-1.572-1.597-1.572zm-15.66 8.68c-2.07 0-3.75-1.68-3.75-3.75 0-2.07 1.68-3.75 3.75-3.75 1.012 0 1.86.375 2.512.976l-.99.952a2.194 2.194 0 0 0-1.522-.584c-1.305 0-2.363 1.08-2.363 2.409S5.436 12.16 6.74 12.16c1.507 0 2.13-1.08 2.19-1.808l-2.188-.002V9.066h3.51c.05.23.09.457.09.764 0 2.147-1.434 3.669-3.602 3.669zm16.757 8.93c0 .59-.492 1.072-1.097 1.072h-8.875l3.649-4.03h.005l-.74-2.302.006-.005s.568-.488 1.277-1.24c.712.771 1.63 1.699 2.818 2.805l.771-.772c-1.272-1.154-2.204-2.07-2.89-2.805.919-1.087 1.852-2.455 2.049-3.707h2.034v.002h.002v-.94h-4.532v-1.52h-1.471v1.52H14.3l-1.672-5.21.006.022h9.767c.605 0 1.097.48 1.097 1.072v16.038zm-6.484-7.311c-.536.548-.943.873-.943.873l-.008.004-1.46-4.548h4.764c-.307 1.084-.988 2.108-1.651 2.904-1.176-1.392-1.18-1.844-1.18-1.844h-1.222s.05.678 1.7 2.61z" fill="#fff"/></svg>`;
+const ICON_OFF = `<svg viewBox="0 0 24 24" width="20" height="20"><path d="M22.401 4.818h-9.927L10.927 0H1.599C.72 0 .002.719.002 1.599v16.275c0 .878.72 1.597 1.597 1.597h10L13.072 24H22.4c.878 0 1.597-.707 1.597-1.572V6.39c0-.865-.72-1.572-1.597-1.572zm-15.66 8.68c-2.07 0-3.75-1.68-3.75-3.75 0-2.07 1.68-3.75 3.75-3.75 1.012 0 1.86.375 2.512.976l-.99.952a2.194 2.194 0 0 0-1.522-.584c-1.305 0-2.363 1.08-2.363 2.409S5.436 12.16 6.74 12.16c1.507 0 2.13-1.08 2.19-1.808l-2.188-.002V9.066h3.51c.05.23.09.457.09.764 0 2.147-1.434 3.669-3.602 3.669zm16.757 8.93c0 .59-.492 1.072-1.097 1.072h-8.875l3.649-4.03h.005l-.74-2.302.006-.005s.568-.488 1.277-1.24c.712.771 1.63 1.699 2.818 2.805l.771-.772c-1.272-1.154-2.204-2.07-2.89-2.805.919-1.087 1.852-2.455 2.049-3.707h2.034v.002h.002v-.94h-4.532v-1.52h-1.471v1.52H14.3l-1.672-5.21.006.022h9.767c.605 0 1.097.48 1.097 1.072v16.038zm-6.484-7.311c-.536.548-.943.873-.943.873l-.008.004-1.46-4.548h4.764c-.307 1.084-.988 2.108-1.651 2.904-1.176-1.392-1.18-1.844-1.18-1.844h-1.222s.05.678 1.7 2.61z" fill="#717171"/></svg>`;
+
 function injectToggle() {
   if (document.getElementById("yts-toggle")) return;
-
-  // try to find YouTube's right-side control group
   const target = document.querySelector(".ytp-right-controls");
   if (!target) return;
+
+  // wrap in div like kiss-translator does
+  const wrapper = document.createElement("span");
+  wrapper.className = "yts-toggle-wrap";
+  wrapper.style.cssText = "height:100%;display:inline-block;position:relative";
 
   const btn = document.createElement("button");
   btn.id = "yts-toggle";
   btn.className = "ytp-button";
-  btn.title = "字幕翻译 开/关";
-  btn.innerHTML = `<svg viewBox="0 0 24 24" width="24" height="24" fill="${settings.enabled !== false ? '#3ea6ff' : '#aaa'}"><path d="M2 3h4l2 4H5l-1 7h2l1 7h13l2-7h-2l-1-7h-3l2-4h4l-2 18H4L2 3z"/><circle cx="12" cy="14" r="4"/></svg>`;
-  btn.style.cssText = "cursor:pointer;background:none;border:none;padding:0 6px;display:flex;align-items:center";
+  btn.title = "双语字幕翻译";
+  btn.setAttribute("aria-label", "双语字幕翻译");
+  btn.innerHTML = settings.enabled !== false ? ICON_ON : ICON_OFF;
 
-  btn.addEventListener("click", () => {
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
     settings.enabled = settings.enabled === false ? true : false;
-    updateToggleIcon(btn);
+    btn.innerHTML = settings.enabled !== false ? ICON_ON : ICON_OFF;
+    btn.title = settings.enabled !== false ? "关闭字幕翻译" : "开启字幕翻译";
     if (settings.enabled === false) {
-      // hide subtitles
       subtitles = []; ci = -1; refresh();
       const el = document.getElementById(CID);
       if (el) el.style.display = "none";
@@ -253,7 +261,6 @@ function injectToggle() {
       const vid = videoId();
       if (vid) load(`https://www.youtube.com/watch?v=${vid}`);
     }
-    // persist
     chrome.storage.local.get(["ytsSettings"], d => {
       const s = d.ytsSettings || {};
       s.enabled = settings.enabled;
@@ -261,18 +268,22 @@ function injectToggle() {
     });
   });
 
-  target.insertBefore(btn, target.firstChild);
+  wrapper.appendChild(btn);
+  target.insertBefore(wrapper, target.firstChild);
 
-  // re-inject on YouTube SPA navigation (controls get rebuilt)
-  const mo = new MutationObserver(() => {
-    if (!document.getElementById("yts-toggle")) {
-      const t = document.querySelector(".ytp-right-controls");
-      if (t) { t.insertBefore(btn, t.firstChild); }
-    }
-  });
-  // watch the control bar for rebuilds
+  // re-inject on toolbar rebuild
   const bar = document.querySelector(".ytp-chrome-bottom");
-  if (bar) mo.observe(bar, { childList: true, subtree: true });
+  if (bar) {
+    const mo = new MutationObserver(() => {
+      if (!document.getElementById("yts-toggle")) {
+        const t = document.querySelector(".ytp-right-controls");
+        if (t && !t.querySelector(".yts-toggle-wrap")) {
+          t.insertBefore(wrapper, t.firstChild);
+        }
+      }
+    });
+    mo.observe(bar, { childList: true, subtree: true });
+  }
 }
 
 function updateToggleIcon(btn) {

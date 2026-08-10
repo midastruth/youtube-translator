@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>YouTube Subtitle Translator — 设置</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #111; color: #eee; padding: 24px; max-width: 640px; margin: 0 auto; }
+    h1 { font-size: 20px; margin-bottom: 24px; color: #fff; }
+    label { display: block; font-size: 13px; color: #999; margin-bottom: 4px; margin-top: 16px; }
+    input, select { width: 100%; padding: 10px 12px; border: 1px solid #333; border-radius: 6px; background: #1a1a1a; color: #eee; font-size: 14px; }
+    input:focus, select:focus { border-color: #3ea6ff; outline: none; }
+    input::placeholder { color: #555; }
+    button { padding: 12px 28px; background: #3ea6ff; color: #111; border: none; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; margin-top: 24px; }
+    button:hover { background: #5db8ff; }
+    .hint { font-size: 12px; color: #666; margin-top: 2px; }
+    .section { border: 1px solid #333; border-radius: 8px; padding: 16px; margin-top: 20px; }
+    .section-title { font-size: 14px; font-weight: 600; color: #3ea6ff; margin-bottom: 12px; }
+    .saved { color: #0f0; font-size: 13px; margin-left: 12px; opacity: 0; transition: opacity 0.3s; }
+    .saved.show { opacity: 1; }
+  </style>
+</head>
+<body>
+  <h1>⚡ YouTube Subtitle Translator</h1>
+
+  <div class="section">
+    <div class="section-title">🖥 后端服务</div>
+    <label>后端地址</label>
+    <input type="text" id="backendUrl" placeholder="http://localhost:8787">
+    <div class="hint">youtube-ingest 服务地址。留空使用默认 localhost:8787</div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">🎬 字幕设置</div>
+
+    <label>原文字幕语言（逗号分隔，按优先级）</label>
+    <input type="text" id="languages" placeholder="en, zh-Hans, zh-Hant, zh">
+    <div class="hint">优先匹配人工字幕，后自动字幕</div>
+
+    <label>目标翻译语言</label>
+    <input type="text" id="toLang" placeholder="zh-CN">
+
+    <label>断句模式</label>
+    <select id="segmentation">
+      <option value="rule">规则断句（标点+停顿）</option>
+      <option value="statistical">统计断句（Z-Score 智能）</option>
+    </select>
+  </div>
+
+  <div class="section">
+    <div class="section-title">🔑 翻译 API（可选，留空用服务端 .env）</div>
+
+    <label>OpenAI API Key</label>
+    <input type="password" id="translateApiKey" placeholder="sk-...">
+    <div class="hint">或留空，由后端 .env 配置</div>
+
+    <label>API 地址</label>
+    <input type="text" id="translateBaseUrl" placeholder="https://api.openai.com/v1">
+
+    <label>翻译模型</label>
+    <input type="text" id="translateModel" placeholder="gpt-4o">
+
+    <label>全文一次翻译</label>
+    <select id="translateWhole">
+      <option value="false">否 — 逐句并行翻译（快）</option>
+      <option value="true">是 — 全文一次翻译（术语统一）</option>
+    </select>
+  </div>
+
+  <button onclick="save()">💾 保存设置</button>
+  <span class="saved" id="savedMsg">✓ 已保存</span>
+
+  <script>
+    const fields = [
+      "backendUrl", "languages", "toLang", "segmentation",
+      "translateApiKey", "translateBaseUrl", "translateModel",
+    ];
+
+    chrome.storage.local.get(["ytsSettings"], (data) => {
+      const s = data.ytsSettings || {};
+      document.getElementById("backendUrl").value = s.backendUrl || "http://localhost:8787";
+      document.getElementById("languages").value = s.languages || "en,zh-Hans,zh-Hant,zh";
+      document.getElementById("toLang").value = s.toLang || "zh-CN";
+      document.getElementById("segmentation").value = s.segmentation || "rule";
+      document.getElementById("translateApiKey").value = s.translateApiKey || "";
+      document.getElementById("translateBaseUrl").value = s.translateBaseUrl || "";
+      document.getElementById("translateModel").value = s.translateModel || "";
+      document.getElementById("translateWhole").value = s.translateWhole ? "true" : "false";
+    });
+
+    function save() {
+      const settings = {
+        backendUrl: document.getElementById("backendUrl").value.trim(),
+        languages: document.getElementById("languages").value.trim(),
+        toLang: document.getElementById("toLang").value.trim(),
+        segmentation: document.getElementById("segmentation").value,
+        translateApiKey: document.getElementById("translateApiKey").value.trim(),
+        translateBaseUrl: document.getElementById("translateBaseUrl").value.trim(),
+        translateModel: document.getElementById("translateModel").value.trim(),
+        translateWhole: document.getElementById("translateWhole").value === "true",
+        autoTranslate: true,
+      };
+      chrome.storage.local.set({ ytsSettings: settings }, () => {
+        const msg = document.getElementById("savedMsg");
+        msg.classList.remove("show");
+        void msg.offsetWidth; // reflow
+        msg.classList.add("show");
+      });
+    }
+  </script>
+</body>
+</html>

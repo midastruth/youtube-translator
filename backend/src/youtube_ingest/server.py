@@ -19,6 +19,7 @@ import tempfile
 import threading
 from pathlib import Path
 from typing import Any, AsyncGenerator
+from urllib.parse import parse_qs, urlparse
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
@@ -48,14 +49,42 @@ logger = logging.getLogger("youtube-ingest-server")
 
 # ── cache ──────────────────────────────────────────────────────────────
 
+_legacy_cache_ttl = (os.getenv("CACHE_TTL_SECONDS") or "").strip()
+_cache_options: dict[str, Any] = {
+    "max_bytes": int(os.getenv("CACHE_MAX_BYTES", str(5 * 1024 * 1024 * 1024))),
+    "maintenance_interval_seconds": float(
+        os.getenv("CACHE_MAINTENANCE_INTERVAL_SECONDS", "86400")
+    ),
+}
+if _legacy_cache_ttl:
+    # Preserve deployments that intentionally configured the old single TTL.
+    _cache_options["ttl_seconds"] = float(_legacy_cache_ttl)
+else:
+    _cache_options.update({
+        "metadata_ttl_seconds": float(
+            os.getenv("CACHE_METADATA_TTL_SECONDS", "86400")
+        ),
+        "json3_ttl_seconds": float(
+            os.getenv("CACHE_JSON3_TTL_SECONDS", str(30 * 86400))
+        ),
+        # Zero means retained until version invalidation or LRU eviction.
+        "cues_ttl_seconds": float(os.getenv("CACHE_CUES_TTL_SECONDS", "0")),
+        "translation_ttl_seconds": float(
+            os.getenv("CACHE_TRANSLATION_TTL_SECONDS", "0")
+        ),
+        "whisper_ttl_seconds": float(os.getenv("CACHE_WHISPER_TTL_SECONDS", "0")),
+    })
+
 _cache = SubtitleCache(
     cache_dir=Path(os.getenv("CACHE_DIR", Path.cwd() / "cache")),
-    ttl_seconds=float(os.getenv("CACHE_TTL_SECONDS", "86400")),
+    **_cache_options,
 )
 _active_sse_jobs: set[str] = set()
 _whisper_locks_guard = threading.Lock()
 _whisper_locks: dict[str, threading.Lock] = {}
+_SEGMENTATION_CACHE_VERSION = "segment-v1"
 _WHISPER_CACHE_VERSION = "whisper-timed-v1"
+_TRANSLATION_CACHE_VERSION = "translation-v2"
 
 
 def _whisper_cache_profile(
@@ -85,6 +114,116 @@ def _whisper_cache_profile(
 def _whisper_lock(key: str) -> threading.Lock:
     with _whisper_locks_guard:
         return _whisper_locks.setdefault(key, threading.Lock())
+
+
+def _metadata_cache_key(url: str) -> str:
+    """Use the YouTube video id when possible, with a stable URL fallback."""
+    parsed = urlparse(url)
+    host = parsed.netloc.lower().split(":", 1)[0]
+    video_id = ""
+    if host in {"youtu.be", "www.youtu.be"}:
+        video_id = parsed.path.strip("/").split("/", 1)[0]
+    elif host.endswith("youtube.com"):
+        if parsed.path.rstrip("/") == "/watch":
+            video_id = (parse_qs(parsed.query).get("v") or [""])[0]
+        else:
+            parts = [part for part in parsed.path.split("/") if part]
+            if len(parts) >= 2 and parts[0] in {"embed", "live", "shorts"}:
+                video_id = parts[1]
+    if re.fullmatch(r"[A-Za-z0-9_-]{6,64}", video_id):
+        return video_id
+    digest = hashlib.sha256(url.strip().encode("utf-8")).hexdigest()[:24]
+    return f"url-{digest}"
+
+
+def _fetch_metadata_cached(url: str) -> dict[str, Any]:
+    cache_key = _metadata_cache_key(url)
+    cached = _cache.get_metadata(cache_key)
+    if isinstance(cached, dict):
+        return cached
+    metadata = fetch_metadata(url)
+    _cache.put_metadata(cache_key, metadata)
+    return metadata
+
+
+def _translation_cache_profile(
+    cues: list[dict],
+    *,
+    provider: str,
+    base_url: str | None,
+    model: str | None,
+    strategy: str,
+) -> str:
+    """Version translations by their inputs without storing provider URLs."""
+    effective_provider = provider.lower().strip()
+    if effective_provider == "openai":
+        effective_base_url = (
+            base_url
+            or os.getenv("OPENAI_BASE_URL")
+            or "https://api.openai.com/v1"
+        ).rstrip("/")
+        effective_model = model or "gpt-3.5-turbo"
+    elif effective_provider == "deepl":
+        effective_base_url = "https://api-free.deepl.com/v2"
+        effective_model = model or "default"
+    else:
+        effective_base_url = (base_url or "default").rstrip("/")
+        effective_model = model or "default"
+
+    source_cues = [
+        {
+            "start": cue.get("start"),
+            "end": cue.get("end"),
+            "text": cue.get("text", ""),
+        }
+        for cue in cues
+    ]
+    material = json.dumps(
+        {
+            "version": _TRANSLATION_CACHE_VERSION,
+            "provider": effective_provider,
+            "endpoint": effective_base_url,
+            "model": effective_model,
+            "strategy": strategy,
+            "source_cues": source_cues,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
+    return f"{_TRANSLATION_CACHE_VERSION}-{digest}"
+
+
+def _cached_translation(
+    *,
+    video_id: str,
+    from_lang: str,
+    segmentation: str,
+    to_lang: str,
+    cues: list[dict],
+    provider: str,
+    base_url: str | None,
+    model: str | None,
+    strategy: str,
+) -> tuple[str, list[dict]]:
+    """Return a profile and source cues merged with valid cached translations."""
+    profile = _translation_cache_profile(
+        cues,
+        provider=provider,
+        base_url=base_url,
+        model=model,
+        strategy=strategy,
+    )
+    working = [dict(cue) for cue in cues]
+    cached = _cache.get_translation(
+        video_id, from_lang, segmentation, to_lang, profile,
+    )
+    if isinstance(cached, list) and len(cached) == len(working):
+        for index, cached_cue in enumerate(cached):
+            if cached_cue.get("text") == working[index].get("text"):
+                working[index]["translation"] = cached_cue.get("translation", "")
+    return profile, working
 
 
 # ── yt-dlp helpers ─────────────────────────────────────────────────────
@@ -247,7 +386,7 @@ def _process_subtitle_sync(
     from .transcribe import WhisperClient, transcribe_timed_chunks
 
     # Metadata
-    metadata = fetch_metadata(url)
+    metadata = _fetch_metadata_cached(url)
     video_id = str(metadata.get("id") or "unknown")
     title = str(metadata.get("title") or video_id)
 
@@ -265,7 +404,11 @@ def _process_subtitle_sync(
 
         def cached_result() -> tuple[dict, list[dict]] | None:
             cached_cues = _cache.get_cues(
-                video_id, cache_profile, _WHISPER_CACHE_VERSION, None,
+                video_id,
+                cache_profile,
+                _WHISPER_CACHE_VERSION,
+                None,
+                kind="whisper",
             )
             if not cached_cues:
                 return None
@@ -316,7 +459,12 @@ def _process_subtitle_sync(
                     )
 
                 _cache.put_cues(
-                    video_id, cache_profile, _WHISPER_CACHE_VERSION, None, cues,
+                    video_id,
+                    cache_profile,
+                    _WHISPER_CACHE_VERSION,
+                    None,
+                    cues,
+                    kind="whisper",
                 )
                 logger.info(
                     "Whisper produced and cached %d timed cues spanning %.1fs",
@@ -334,7 +482,13 @@ def _process_subtitle_sync(
     logger.info("Selected subtitle: %s (%s)", lang, source)
 
     # Try cache for processed cues first (without translation)
-    cached = _cache.get_cues(video_id, lang, segmentation, None)
+    cached = _cache.get_cues(
+        video_id,
+        lang,
+        segmentation,
+        None,
+        profile=_SEGMENTATION_CACHE_VERSION,
+    )
     if cached:
         logger.info("Cache hit for %s/%s/%s", video_id, lang, segmentation)
         return {
@@ -393,7 +547,14 @@ def _process_subtitle_sync(
     logger.info("Segmented into %d cues (mode=%s)", len(cues), segmentation)
 
     # Cache
-    _cache.put_cues(video_id, lang, segmentation, None, cues)
+    _cache.put_cues(
+        video_id,
+        lang,
+        segmentation,
+        None,
+        cues,
+        profile=_SEGMENTATION_CACHE_VERSION,
+    )
 
     return {
         "video_id": video_id, "title": title,
@@ -416,7 +577,7 @@ async def get_tracks(
     """List available subtitle tracks for a YouTube video."""
     try:
         lang_list = [l.strip() for l in languages.split(",") if l.strip()]
-        metadata = await run_in_threadpool(fetch_metadata, url)
+        metadata = await run_in_threadpool(_fetch_metadata_cached, url)
         video_id = str(metadata.get("id") or "unknown")
         title = str(metadata.get("title") or video_id)
 
@@ -458,17 +619,44 @@ async def process_subtitle(req: SubtitleRequest):
         # Translate if requested
         to_lang = req.translate_to
         if to_lang and cues:
-            try:
-                cues = await translate_subtitles(
-                    cues, from_lang=meta["from_lang"], to_lang=to_lang,
-                    provider=req.translate_provider,
-                    api_key=req.translate_api_key,
-                    base_url=req.translate_base_url,
-                    model=req.translate_model,
-                    whole=req.translate_whole,
-                )
-            except Exception as exc:
-                logger.warning("Translation failed, returning untranslated cues: %s", exc)
+            strategy = "rest-whole-v1" if req.translate_whole else "rest-batch-v1"
+            profile, cached_cues = _cached_translation(
+                video_id=meta["video_id"],
+                from_lang=meta["from_lang"],
+                segmentation=req.segmentation,
+                to_lang=to_lang,
+                cues=cues,
+                provider=req.translate_provider,
+                base_url=req.translate_base_url,
+                model=req.translate_model,
+                strategy=strategy,
+            )
+            if all(
+                str(cue.get("translation") or "").strip()
+                not in ("", "[Translation failed]")
+                for cue in cached_cues
+            ):
+                cues = cached_cues
+            else:
+                try:
+                    cues = await translate_subtitles(
+                        cues, from_lang=meta["from_lang"], to_lang=to_lang,
+                        provider=req.translate_provider,
+                        api_key=req.translate_api_key,
+                        base_url=req.translate_base_url,
+                        model=req.translate_model,
+                        whole=req.translate_whole,
+                    )
+                    _cache.put_translation(
+                        meta["video_id"],
+                        meta["from_lang"],
+                        req.segmentation,
+                        to_lang,
+                        profile,
+                        cues,
+                    )
+                except Exception as exc:
+                    logger.warning("Translation failed, returning untranslated cues: %s", exc)
 
         return SubtitleResponse(
             video_id=meta["video_id"],
@@ -538,15 +726,22 @@ async def process_subtitle_stream(req: SubtitleRequest):
     # Cloudflare's proxy timeout. Completed chunks are cached so reconnects resume.
     async def _event_stream():
         total = len(cues)
-        cache_args = (
-            meta["video_id"], meta["from_lang"], req.segmentation, to_lang,
+        # Long videos always use context chunks, even when an older extension
+        # sends translate_whole=false.
+        use_context_chunks = req.translate_whole or total >= 100
+        chunk_size = 10 if use_context_chunks else 12
+        strategy = f"sse-{'context' if use_context_chunks else 'batch'}-{chunk_size}-v1"
+        profile, working = _cached_translation(
+            video_id=meta["video_id"],
+            from_lang=meta["from_lang"],
+            segmentation=req.segmentation,
+            to_lang=to_lang,
+            cues=cues,
+            provider=req.translate_provider,
+            base_url=req.translate_base_url,
+            model=req.translate_model,
+            strategy=strategy,
         )
-        working = [dict(cue) for cue in cues]
-        cached = _cache.get_cues(*cache_args)
-        if cached and len(cached) == total:
-            for idx, cached_cue in enumerate(cached):
-                if cached_cue.get("text") == working[idx].get("text"):
-                    working[idx]["translation"] = cached_cue.get("translation", "")
 
         def is_complete(cue: dict) -> bool:
             translation = str(cue.get("translation") or "").strip()
@@ -565,22 +760,12 @@ async def process_subtitle_stream(req: SubtitleRequest):
             yield f"data: {json.dumps({'type': 'done', 'total_cues': total, 'failed_cues': 0})}\n\n"
             return
 
-        # Context-aware chunks keep terminology coherent while ensuring each API
-        # call remains comfortably below provider and proxy time limits.
-        # Automatically use context chunks for long videos even if an older
-        # extension saved translate_whole=false. Per-cue translation of hundreds
-        # of cues is too slow and expensive for an interactive stream.
-        use_context_chunks = req.translate_whole or total >= 100
-        # DeepSeek reliably preserves the one-marker-per-cue contract with
-        # small context windows. Larger 40-cue responses were frequently
-        # partial, which left the currently playing opening cues untranslated.
-        chunk_size = 10 if use_context_chunks else 12
         chunks = [
             pending_indices[start:start + chunk_size]
             for start in range(0, len(pending_indices), chunk_size)
         ]
         semaphore = asyncio.Semaphore(3)
-        job_key = ":".join(str(part) for part in cache_args)
+        job_key = f"{meta['video_id']}:{profile}"
         if job_key in _active_sse_jobs:
             yield f"data: {json.dumps({'type': 'error', 'code': 'translation_already_running', 'detail': '该视频已有翻译任务正在运行，请稍后重试', 'hide_after_ms': 30000}, ensure_ascii=False)}\n\n"
             return
@@ -645,7 +830,14 @@ async def process_subtitle_stream(req: SubtitleRequest):
                         yield f"data: {json.dumps({'type': 'cue', 'index': idx, **working[idx]}, ensure_ascii=False)}\n\n"
 
                     # A partial cache makes a reconnect resume only unfinished cues.
-                    _cache.put_cues(*cache_args, working)
+                    _cache.put_translation(
+                        meta["video_id"],
+                        meta["from_lang"],
+                        req.segmentation,
+                        to_lang,
+                        profile,
+                        working,
+                    )
         finally:
             for task in tasks:
                 task.cancel()
@@ -706,8 +898,23 @@ async def ws_subtitle_process(ws: WebSocket):
     })
 
     if to_lang and cues:
-        for idx, cue in enumerate(cues):
+        profile, working = _cached_translation(
+            video_id=meta["video_id"],
+            from_lang=meta["from_lang"],
+            segmentation=req.segmentation,
+            to_lang=to_lang,
+            cues=cues,
+            provider=req.translate_provider,
+            base_url=req.translate_base_url,
+            model=req.translate_model,
+            strategy="websocket-stream-v1",
+        )
+        for idx, cue in enumerate(working):
             text = cue["text"]
+            cached_value = str(cue.get("translation") or "").strip()
+            if cached_value and cached_value != "[Translation failed]":
+                await ws.send_json({"type": "cue", "index": idx, **cue, "cached": True})
+                continue
             if not text.strip():
                 await ws.send_json({"type": "cue", "index": idx, **cue})
                 continue
@@ -730,6 +937,14 @@ async def ws_subtitle_process(ws: WebSocket):
                     })
 
                 cue["translation"] = "".join(translation_parts)
+                _cache.put_translation(
+                    meta["video_id"],
+                    meta["from_lang"],
+                    req.segmentation,
+                    to_lang,
+                    profile,
+                    working,
+                )
             except Exception as exc:
                 logger.warning("WS translate failed for cue %d: %s", idx, exc)
                 cue["translation"] = "[Translation failed]"
@@ -761,6 +976,13 @@ async def clear_cache(video_id: str):
 async def purge_cache():
     """Purge all expired cache entries."""
     removed = _cache.purge_expired()
+    return {"removed": removed}
+
+
+@app.delete("/api/cache")
+async def clear_all_cache():
+    """Clear every cache entry."""
+    removed = _cache.clear_all()
     return {"removed": removed}
 
 

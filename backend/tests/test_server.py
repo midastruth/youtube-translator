@@ -532,7 +532,15 @@ class ServerSSETest(unittest.TestCase):
             {"start": 0, "end": 500, "text": "Hello.", "translation": ""},
         ])
         mock_cache.get_cues.return_value = None
-        job_key = "duplicate123:en:rule:zh-CN"
+        from youtube_ingest.server import _translation_cache_profile
+        profile = _translation_cache_profile(
+            mock_process.return_value[1],
+            provider="openai",
+            base_url=None,
+            model=None,
+            strategy="sse-batch-12-v1",
+        )
+        job_key = f"duplicate123:{profile}"
         _active_sse_jobs.add(job_key)
         try:
             _, body = self.collect_stream(SubtitleRequest(
@@ -582,6 +590,18 @@ class ServerCacheAdminTest(unittest.TestCase):
         resp = client.post("/api/cache/purge")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json()["removed"], 12)
+
+    @patch("youtube_ingest.server._cache")
+    def test_clear_all_cache(self, mock_cache):
+        from youtube_ingest.server import app
+        from fastapi.testclient import TestClient
+
+        mock_cache.clear_all.return_value = 8
+        client = TestClient(app)
+        resp = client.delete("/api/cache")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["removed"], 8)
+        mock_cache.clear_all.assert_called_once_with()
 
 
 class ServerErrorHandlingTest(unittest.TestCase):
@@ -667,6 +687,104 @@ class ServerResponseModelTest(unittest.TestCase):
         h = HealthResponse()
         self.assertEqual(h.status, "ok")
         self.assertEqual(h.version, "0.2.0")
+
+
+class ServerCacheProfileTest(unittest.TestCase):
+    def test_youtube_url_variants_share_video_cache_key(self):
+        from youtube_ingest.server import _metadata_cache_key
+
+        expected = "abc123XYZ_-"
+        self.assertEqual(
+            _metadata_cache_key(f"https://www.youtube.com/watch?v={expected}&t=5"),
+            expected,
+        )
+        self.assertEqual(
+            _metadata_cache_key(f"https://youtu.be/{expected}?si=test"),
+            expected,
+        )
+        self.assertEqual(
+            _metadata_cache_key(f"https://www.youtube.com/shorts/{expected}"),
+            expected,
+        )
+
+    def test_translation_profile_changes_with_translation_inputs(self):
+        from youtube_ingest.server import _translation_cache_profile
+
+        cues = [{"start": 0, "end": 500, "text": "Hello"}]
+
+        def profile(**overrides):
+            options = {
+                "provider": "openai",
+                "base_url": "https://api.example/v1",
+                "model": "model-a",
+                "strategy": "sse-context-10-v1",
+            }
+            options.update(overrides)
+            return _translation_cache_profile(cues, **options)
+
+        baseline = profile()
+        self.assertNotEqual(baseline, profile(model="model-b"))
+        self.assertNotEqual(baseline, profile(provider="deepl"))
+        self.assertNotEqual(baseline, profile(base_url="https://other.example/v1"))
+        self.assertNotEqual(baseline, profile(strategy="rest-whole-v1"))
+        self.assertNotEqual(
+            baseline,
+            _translation_cache_profile(
+                [{"start": 0, "end": 500, "text": "Changed"}],
+                provider="openai",
+                base_url="https://api.example/v1",
+                model="model-a",
+                strategy="sse-context-10-v1",
+            ),
+        )
+
+    @patch("youtube_ingest.server._cache")
+    @patch("youtube_ingest.server.fetch_metadata")
+    def test_metadata_cache_avoids_second_fetch(self, mock_fetch, mock_cache):
+        from youtube_ingest.server import _fetch_metadata_cached
+
+        metadata = {"id": "abc123XYZ_-", "title": "Test"}
+        mock_cache.get_metadata.side_effect = [None, metadata]
+        mock_fetch.return_value = metadata
+        url = "https://www.youtube.com/watch?v=abc123XYZ_-"
+
+        self.assertEqual(_fetch_metadata_cached(url), metadata)
+        self.assertEqual(_fetch_metadata_cached(url), metadata)
+
+        mock_fetch.assert_called_once_with(url)
+        mock_cache.put_metadata.assert_called_once_with("abc123XYZ_-", metadata)
+
+    @patch("youtube_ingest.server._cache")
+    @patch("youtube_ingest.server.run_in_threadpool", new_callable=AsyncMock)
+    def test_rest_translation_cache_hit_skips_provider(
+        self, mock_process, mock_cache,
+    ):
+        from youtube_ingest.server import SubtitleRequest, process_subtitle
+
+        source = {"start": 0, "end": 500, "text": "Hello", "translation": ""}
+        translated = {**source, "translation": "你好"}
+        mock_process.return_value = ({
+            "video_id": "abc123XYZ_-",
+            "title": "Test",
+            "from_lang": "en",
+            "source": "manual",
+        }, [source])
+        mock_cache.get_translation.return_value = [translated]
+
+        with patch(
+            "youtube_ingest.server.translate_subtitles", new_callable=AsyncMock,
+        ) as mock_translate:
+            response = asyncio.run(process_subtitle(SubtitleRequest(
+                url="https://www.youtube.com/watch?v=abc123XYZ_-",
+                languages=["en"],
+                segmentation="rule",
+                translate_to="zh-CN",
+                translate_provider="openai",
+                translate_model="model-a",
+            )))
+
+        self.assertEqual(response.cues[0].translation, "你好")
+        mock_translate.assert_not_awaited()
 
 
 if __name__ == "__main__":

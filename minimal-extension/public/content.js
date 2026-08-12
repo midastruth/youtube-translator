@@ -467,8 +467,7 @@ function injectToggle() {
   btn.addEventListener("click", (e) => {
     e.stopPropagation();
     settings.enabled = settings.enabled === false ? true : false;
-    btn.innerHTML = settings.enabled !== false ? ICON_ON : ICON_OFF;
-    btn.title = settings.enabled !== false ? "关闭字幕翻译" : "开启字幕翻译";
+    updateToggleIcon(btn);
     if (settings.enabled === false) {
       cancelActiveLoad();
       clearStatus();
@@ -503,7 +502,7 @@ function injectToggle() {
 
 function updateToggleIcon(btn) {
   const on = settings.enabled !== false;
-  btn.innerHTML = `<svg viewBox="0 0 24 24" width="24" height="24" fill="${on ? '#3ea6ff' : '#aaa'}"><path d="M2 3h4l2 4H5l-1 7h2l1 7h13l2-7h-2l-1-7h-3l2-4h4l-2 18H4L2 3z"/><circle cx="12" cy="14" r="4"/></svg>`;
+  btn.innerHTML = on ? ICON_ON : ICON_OFF;
   btn.title = on ? "关闭字幕翻译" : "开启字幕翻译";
 }
 
@@ -528,10 +527,17 @@ chrome.storage.local.get(["ytsSettings"], d => {
   observer.observe(document.body, { childList:true, subtree:true });
 
   window.addEventListener("yt-navigate-finish", () => {
+    // A YouTube SPA navigation keeps this content script alive. Reset the
+    // page-local toggle explicitly so every newly opened video starts off.
+    settings.enabled = false;
+    const toggle = document.getElementById("yts-toggle");
+    if (toggle) updateToggleIcon(toggle);
     loadedVideoId = "";
     cancelActiveLoad();
     clearStatus();
     subtitles = []; ci = -1; refresh();
+    const el = document.getElementById(CID);
+    if (el) el.style.display = "none";
     setTimeout(() => { injectToggle(); findV(); }, 1000);
   });
 });

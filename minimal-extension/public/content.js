@@ -591,9 +591,25 @@ chrome.storage.local.get(["ytsSettings"], d => {
 
 chrome.storage.onChanged.addListener(changes => {
   if (changes.ytsSettings) {
+    const oldStored = changes.ytsSettings.oldValue || {};
+    const newStored = changes.ytsSettings.newValue || {};
+    const changedKeys = new Set([
+      ...Object.keys(oldStored),
+      ...Object.keys(newStored),
+    ]);
+    const positionOnly = [...changedKeys].every(key => (
+      key === "positionY" || oldStored[key] === newStored[key]
+    ));
     const enabled = settings.enabled;
-    settings = { ...DEF, ...(changes.ytsSettings.newValue||{}), enabled };
+    settings = { ...DEF, ...newStored, enabled };
     syncStyle();
+    // Dragging persists only positionY. Applying that storage update must not
+    // clear and fetch the already loaded subtitles, which causes a visible
+    // flash as soon as the mouse button is released.
+    if (positionOnly) {
+      refresh();
+      return;
+    }
     if (settings.enabled === false) {
       cancelActiveLoad();
       clearStatus();

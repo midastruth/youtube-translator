@@ -25,6 +25,11 @@ const DEF = {
   bgOpacity: 0.6,
 };
 
+// A stream already retries each failed translation chunk twice on the backend.
+// Reconnect a limited number of times so cached successes are kept and only the
+// remaining cues are submitted again, without risking an endless retry loop.
+const AUTO_RETRY_DELAYS = [3000, 6000];
+
 // ── style ──────────────────────────────────────────────────
 
 const styleEl = document.createElement("style");
@@ -89,6 +94,26 @@ async function apiStream(path, body, signal, onEvent) {
     if (done) break;
   }
   if (buffer.trim()) consumeFrame(buffer);
+}
+
+function waitForRetry(delay, signal) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, delay);
+    const onAbort = () => {
+      clearTimeout(timer);
+      const error = new Error("翻译已取消");
+      error.name = "AbortError";
+      reject(error);
+    };
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    signal?.addEventListener("abort", onAbort, { once:true });
+  });
 }
 
 function cancelActiveLoad() {
@@ -289,71 +314,93 @@ async function load(pageUrl) {
     let totalCues = 0;
     let restoredCues = 0;
     let streamDone = false;
+    let failedCues = 0;
     const translated = new Set();
 
-    await apiStream("/api/subtitle/stream", body, controller.signal, event => {
+    for (let attempt = 0; attempt <= AUTO_RETRY_DELAYS.length; attempt += 1) {
+      streamDone = false;
+      failedCues = 0;
+      translated.clear();
+
+      await apiStream("/api/subtitle/stream", body, controller.signal, event => {
+        if (generation !== loadGeneration || settings.enabled === false) return;
+
+        if (event.type === "meta") {
+          totalCues = Number(event.total_cues) || 0;
+          restoredCues = Math.min(
+            totalCues,
+            Math.max(0, Number(event.completed_cues) || 0),
+          );
+          if (restoredCues > 0) {
+            const action = restoredCues >= totalCues ? "" : "，正在补译剩余字幕…";
+            showStatus(`已恢复缓存 ${restoredCues}/${totalCues}${action}`);
+          } else {
+            showStatus(totalCues ? `字幕已获取，正在翻译 0/${totalCues}…` : "正在翻译字幕…");
+          }
+          return;
+        }
+
+        if (["source_cue", "cue_chunk", "cue"].includes(event.type)) {
+          const index = Number(event.index);
+          if (!Number.isInteger(index) || index < 0) return;
+          const previous = subtitles[index] || {};
+          subtitles[index] = {
+            start: event.start ?? previous.start,
+            end: event.end ?? previous.end,
+            text: event.text ?? previous.text ?? "",
+            translation: event.translation ?? previous.translation ?? "",
+          };
+          if (event.type === "cue") translated.add(index);
+          if (videoEl && subtitles.every(Boolean)) {
+            ci = idxOf(videoEl.currentTime * 1000);
+            refresh();
+          }
+          const completed = Math.max(restoredCues, translated.size);
+          if (event.type === "cue" && !event.cached && (
+            completed === restoredCues + 1
+            || completed % 10 === 0
+            || completed === totalCues
+          )) {
+            showStatus(`字幕翻译中 ${completed}/${totalCues || subtitles.length}…`);
+          }
+          return;
+        }
+
+        if (event.type === "error") {
+          const streamError = new Error(event.detail || "字幕流处理失败");
+          streamError.code = event.code || "stream_error";
+          streamError.hideAfterMs = Math.max(0, Number(event.hide_after_ms) || 0);
+          throw streamError;
+        }
+        if (event.type === "done") {
+          streamDone = true;
+          failedCues = Math.max(0, Number(event.failed_cues) || 0);
+        }
+      });
+
       if (generation !== loadGeneration || settings.enabled === false) return;
-
-      if (event.type === "meta") {
-        totalCues = Number(event.total_cues) || 0;
-        restoredCues = Math.min(
-          totalCues,
-          Math.max(0, Number(event.completed_cues) || 0),
-        );
-        if (restoredCues > 0) {
-          const action = restoredCues >= totalCues ? "" : "，正在补译剩余字幕…";
-          showStatus(`已恢复缓存 ${restoredCues}/${totalCues}${action}`);
-        } else {
-          showStatus(totalCues ? `字幕已获取，正在翻译 0/${totalCues}…` : "正在翻译字幕…");
-        }
-        return;
+      if (!streamDone) throw new Error("字幕流提前结束");
+      if (failedCues === 0) {
+        showStatus(`字幕翻译完成（${totalCues || subtitles.length} 条）`, "success", 3000);
+        break;
       }
 
-      if (["source_cue", "cue_chunk", "cue"].includes(event.type)) {
-        const index = Number(event.index);
-        if (!Number.isInteger(index) || index < 0) return;
-        const previous = subtitles[index] || {};
-        subtitles[index] = {
-          start: event.start ?? previous.start,
-          end: event.end ?? previous.end,
-          text: event.text ?? previous.text ?? "",
-          translation: event.translation ?? previous.translation ?? "",
-        };
-        if (event.type === "cue") translated.add(index);
-        if (videoEl && subtitles.every(Boolean)) {
-          ci = idxOf(videoEl.currentTime * 1000);
-          refresh();
-        }
-        const completed = Math.max(restoredCues, translated.size);
-        if (event.type === "cue" && !event.cached && (
-          completed === restoredCues + 1
-          || completed % 10 === 0
-          || completed === totalCues
-        )) {
-          showStatus(`字幕翻译中 ${completed}/${totalCues || subtitles.length}…`);
-        }
-        return;
+      if (attempt === AUTO_RETRY_DELAYS.length) {
+        showStatus(`已完成，${failedCues} 条翻译失败；自动重试已结束`, "error", 30000);
+        break;
       }
 
-      if (event.type === "error") {
-        const streamError = new Error(event.detail || "字幕流处理失败");
-        streamError.code = event.code || "stream_error";
-        streamError.hideAfterMs = Math.max(0, Number(event.hide_after_ms) || 0);
-        throw streamError;
-      }
-      if (event.type === "done") {
-        streamDone = true;
-        const failed = Number(event.failed_cues) || 0;
-        if (failed > 0) {
-          showStatus(`已完成，${failed} 条翻译失败；刷新可继续`, "error", 30000);
-        } else {
-          showStatus(`字幕翻译完成（${totalCues || subtitles.length} 条）`, "success", 3000);
-        }
-      }
-    });
+      const delay = AUTO_RETRY_DELAYS[attempt];
+      showStatus(
+        `${failedCues} 条翻译失败，${delay / 1000} 秒后自动重试（${attempt + 1}/${AUTO_RETRY_DELAYS.length}）…`,
+        "error",
+      );
+      await waitForRetry(delay, controller.signal);
+      if (generation !== loadGeneration || settings.enabled === false) return;
+      showStatus(`正在自动重试 ${failedCues} 条字幕…`);
+    }
 
     if (generation !== loadGeneration || settings.enabled === false) return;
-    if (!streamDone) throw new Error("字幕流提前结束");
     if (!subtitles.length) showStatus("后端没有返回可显示的字幕", "error");
   } catch (e) {
     if (generation !== loadGeneration) return;

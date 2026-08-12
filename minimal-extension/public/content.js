@@ -39,7 +39,9 @@ document.head.appendChild(styleEl);
 function syncStyle() {
   const bg = `rgba(0,0,0,${settings.bgOpacity ?? 0.6})`;
   styleEl.textContent = `
-    #${CID} { position:absolute; bottom:${settings.positionY ?? 12}%; left:50%; transform:translateX(-50%); text-align:center; z-index:2147483646; pointer-events:auto; max-width:85%; cursor:grab; user-select:none; visibility:visible; opacity:1; }
+    #${CID} { --yts-bottom:${settings.positionY ?? 12}%; position:absolute; bottom:var(--yts-bottom); left:50%; transform:translateX(-50%); text-align:center; z-index:59; pointer-events:auto; max-width:85%; cursor:grab; user-select:none; visibility:visible; opacity:1; }
+    .html5-video-player:not(.ytp-autohide) > #${CID} { bottom:max(var(--yts-bottom), 64px); }
+    .html5-video-player.ytp-fullscreen:not(.ytp-autohide) > #${CID} { bottom:max(var(--yts-bottom), 76px); }
     #${CID}.drag { cursor:grabbing; }
     #${CID} .bg { display:none; padding:6px 14px; border-radius:8px; background:${bg}; }
     #${CID} .orig { display:none; color:${settings.origColor||"#fff"}; font-size:${settings.fontSizeOrig||22}px; font-weight:600; line-height:1.4; text-shadow:1px 1px 2px #000; pointer-events:none; }
@@ -48,6 +50,10 @@ function syncStyle() {
     #${CID} .status.success { color:#7ee787; }
     #${CID} .status.error { color:#ff8b8b; }
   `;
+  const currentOverlay = document.getElementById(CID);
+  if (currentOverlay) {
+    currentOverlay.style.setProperty("--yts-bottom", `${settings.positionY ?? 12}%`);
+  }
 }
 
 // ── API ────────────────────────────────────────────────────
@@ -222,7 +228,7 @@ function drag(el) {
     const ph = ct().clientHeight;
     nb = Math.max(0, Math.min(ph - el.offsetHeight, nb));
     settings.positionY = Math.round((nb / ph) * 100);
-    el.style.bottom = settings.positionY + "%";
+    el.style.setProperty("--yts-bottom", settings.positionY + "%");
   });
   document.addEventListener("mouseup", () => {
     if (!down) return; down = false; el.classList.remove("drag");

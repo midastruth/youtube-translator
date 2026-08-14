@@ -1,4 +1,10 @@
+ARG DENO_VERSION=2.8.1
+
+FROM denoland/deno:bin-${DENO_VERSION} AS deno
+
 FROM python:3.11-slim
+
+COPY --from=deno /deno /usr/local/bin/deno
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \

@@ -14,7 +14,6 @@ import logging
 import os
 import re
 import subprocess
-import sys
 import tempfile
 import threading
 from pathlib import Path
@@ -40,7 +39,7 @@ from .translate import (
     translate_stream,
     translate_subtitles,
 )
-from .youtube import choose_subtitle, fetch_metadata
+from .youtube import build_yt_dlp_command, choose_subtitle, fetch_metadata
 
 load_dotenv(dotenv_path=Path.cwd() / ".env")
 
@@ -229,7 +228,7 @@ def _cached_translation(
 # ── yt-dlp helpers ─────────────────────────────────────────────────────
 
 def _run_yt_dlp(args: list[str]) -> str:
-    command = [sys.executable, "-m", "yt_dlp", *args]
+    command = build_yt_dlp_command(args)
     try:
         result = subprocess.run(
             command, check=True, text=True,

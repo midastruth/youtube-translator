@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import json
+import os
 import re
 import subprocess
 import sys
@@ -11,8 +12,29 @@ from typing import Any, Iterable
 from .errors import IngestError
 
 
+def build_yt_dlp_command(args: list[str]) -> list[str]:
+    """Build a yt-dlp command with optional YouTube extraction helpers."""
+    command = [sys.executable, "-m", "yt_dlp"]
+
+    youtube_client = os.getenv("YTDLP_YOUTUBE_CLIENT", "").strip()
+    if youtube_client:
+        command.extend([
+            "--extractor-args",
+            f"youtube:player_client={youtube_client}",
+        ])
+
+    pot_provider_url = os.getenv("YTDLP_POT_PROVIDER_URL", "").strip().rstrip("/")
+    if pot_provider_url:
+        command.extend([
+            "--extractor-args",
+            f"youtubepot-bgutilhttp:base_url={pot_provider_url}",
+        ])
+
+    return [*command, *args]
+
+
 def _run_yt_dlp(args: list[str]) -> str:
-    command = [sys.executable, "-m", "yt_dlp", *args]
+    command = build_yt_dlp_command(args)
     try:
         result = subprocess.run(
             command,

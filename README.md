@@ -41,6 +41,9 @@ youtube-ingest-server
 docker compose up -d
 ```
 
+Docker Compose 会同时启动自动 PO Token Provider，并在后端镜像中启用
+Deno/yt-dlp-ejs，以支持 YouTube 当前的 JavaScript 挑战和字幕令牌要求。
+
 ### 2. 加载扩展
 
 1. 打开 Chrome → `chrome://extensions`

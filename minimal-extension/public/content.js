@@ -274,7 +274,10 @@ async function load(pageUrl) {
     const tracksResponse = await fetch(`${baseUrl}/api/subtitle/tracks?${params}`, {
       signal: controller.signal,
     });
-    if (!tracksResponse.ok) throw new Error(`Backend ${tracksResponse.status}`);
+    if (!tracksResponse.ok) {
+      const error = await tracksResponse.json().catch(() => ({}));
+      throw new Error(error.detail || `Backend ${tracksResponse.status}`);
+    }
     const tr = await tracksResponse.json();
 
     let track = null;

@@ -1,6 +1,16 @@
 services:
+  pot-provider:
+    image: brainicism/bgutil-ytdlp-pot-provider:1.3.1-deno
+    init: true
+    mem_limit: 384m
+    restart: unless-stopped
+    expose:
+      - "4416"
+
   backend:
     build: ./backend
+    depends_on:
+      - pot-provider
     ports:
       - "${PORT:-8787}:8787"
     volumes:
@@ -23,6 +33,8 @@ services:
       - DEEPL_API_KEY=${DEEPL_API_KEY:-}
       - WHISPER_API_KEY=${WHISPER_API_KEY:-}
       - GROQ_API_KEY=${GROQ_API_KEY:-}
+      - YTDLP_POT_PROVIDER_URL=http://pot-provider:4416
+      - YTDLP_YOUTUBE_CLIENT=mweb
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8787/api/health', timeout=5)"]

@@ -1,8 +1,30 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from youtube_ingest.youtube import choose_subtitle, vtt_to_text
+from youtube_ingest.youtube import build_yt_dlp_command, choose_subtitle, vtt_to_text
+
+
+class YtDlpCommandTests(unittest.TestCase):
+    @patch.dict("os.environ", {}, clear=True)
+    def test_helpers_are_optional(self) -> None:
+        command = build_yt_dlp_command(["--version"])
+        self.assertEqual(command[1:], ["-m", "yt_dlp", "--version"])
+        self.assertNotIn("--extractor-args", command)
+
+    @patch.dict("os.environ", {
+        "YTDLP_YOUTUBE_CLIENT": "mweb",
+        "YTDLP_POT_PROVIDER_URL": "http://pot-provider:4416/",
+    }, clear=True)
+    def test_helpers_are_added_to_command(self) -> None:
+        command = build_yt_dlp_command(["--version"])
+        self.assertIn("youtube:player_client=mweb", command)
+        self.assertIn(
+            "youtubepot-bgutilhttp:base_url=http://pot-provider:4416",
+            command,
+        )
+        self.assertEqual(command[-1], "--version")
 
 
 class SubtitleSelectionTests(unittest.TestCase):

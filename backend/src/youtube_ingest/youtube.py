@@ -13,7 +13,13 @@ from .errors import IngestError
 
 
 def build_yt_dlp_command(args: list[str]) -> list[str]:
-    """Build a yt-dlp command with optional YouTube extraction helpers."""
+    """Build a yt-dlp command with optional YouTube extraction helpers.
+
+    YouTube increasingly requires a PO token and a JavaScript runtime for
+    subtitle requests.  Keep these helpers optional so local installations
+    without the provider continue to work, while Docker can enable them via
+    environment variables.
+    """
     command = [sys.executable, "-m", "yt_dlp"]
 
     youtube_client = os.getenv("YTDLP_YOUTUBE_CLIENT", "").strip()

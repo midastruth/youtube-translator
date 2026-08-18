@@ -34,7 +34,7 @@ services:
       - WHISPER_API_KEY=${WHISPER_API_KEY:-}
       - GROQ_API_KEY=${GROQ_API_KEY:-}
       - YTDLP_POT_PROVIDER_URL=http://pot-provider:4416
-      - YTDLP_YOUTUBE_CLIENT=mweb
+      - YTDLP_YOUTUBE_CLIENT=android,mweb
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8787/api/health', timeout=5)"]

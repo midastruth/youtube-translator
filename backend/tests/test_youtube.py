@@ -14,12 +14,12 @@ class YtDlpCommandTests(unittest.TestCase):
         self.assertNotIn("--extractor-args", command)
 
     @patch.dict("os.environ", {
-        "YTDLP_YOUTUBE_CLIENT": "mweb",
+        "YTDLP_YOUTUBE_CLIENT": "android,mweb",
         "YTDLP_POT_PROVIDER_URL": "http://pot-provider:4416/",
     }, clear=True)
     def test_helpers_are_added_to_command(self) -> None:
         command = build_yt_dlp_command(["--version"])
-        self.assertIn("youtube:player_client=mweb", command)
+        self.assertIn("youtube:player_client=android,mweb", command)
         self.assertIn(
             "youtubepot-bgutilhttp:base_url=http://pot-provider:4416",
             command,

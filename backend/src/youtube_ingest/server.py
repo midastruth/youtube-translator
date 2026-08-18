@@ -115,6 +115,21 @@ def _whisper_lock(key: str) -> threading.Lock:
         return _whisper_locks.setdefault(key, threading.Lock())
 
 
+def _metadata_cache_profile() -> str:
+    """Return a cache namespace for the active yt-dlp YouTube settings.
+
+    Subtitle availability can differ by YouTube player client.  Include the
+    client/provider configuration in metadata cache keys so changing from
+    mweb to android,mweb cannot keep serving an old empty track list.
+    """
+    client = os.getenv("YTDLP_YOUTUBE_CLIENT", "").strip()
+    provider = os.getenv("YTDLP_POT_PROVIDER_URL", "").strip().rstrip("/")
+    if not client and not provider:
+        return ""
+    material = f"metadata-v2\n{client}\n{provider}"
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+
+
 def _metadata_cache_key(url: str) -> str:
     """Use the YouTube video id when possible, with a stable URL fallback."""
     parsed = urlparse(url)
@@ -137,6 +152,9 @@ def _metadata_cache_key(url: str) -> str:
 
 def _fetch_metadata_cached(url: str) -> dict[str, Any]:
     cache_key = _metadata_cache_key(url)
+    profile = _metadata_cache_profile()
+    if profile:
+        cache_key = f"{cache_key}-metadata-{profile}"
     cached = _cache.get_metadata(cache_key)
     if isinstance(cached, dict):
         return cached

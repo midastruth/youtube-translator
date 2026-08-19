@@ -23,7 +23,7 @@ from youtube_ingest.translate import (
 class TranslateSingleTest(unittest.TestCase):
     def test_unknown_provider(self):
         with self.assertRaises(TranslateError) as ctx:
-            asyncio.get_event_loop().run_until_complete(
+            asyncio.run(
                 translate_single("Hello", "en", "zh-CN", provider="nonexistent")
             )
         self.assertIn("Unknown translation provider", str(ctx.exception))
@@ -37,7 +37,7 @@ class TranslateErrorTest(unittest.TestCase):
     def test_no_api_key_raises_for_openai(self):
         with patch.dict(os.environ, {}, clear=True):
             with self.assertRaises(TranslateError) as ctx:
-                asyncio.get_event_loop().run_until_complete(
+                asyncio.run(
                     translate_single("Hello", "en", "zh-CN", provider="openai")
                 )
             self.assertIn("TRANSLATE_API_KEY", str(ctx.exception))
@@ -60,7 +60,7 @@ class TranslateBatchTest(unittest.TestCase):
         from youtube_ingest.translate import TRANSLATE_PROVIDERS
         TRANSLATE_PROVIDERS["_t_"] = self._success
         try:
-            r = asyncio.get_event_loop().run_until_complete(
+            r = asyncio.run(
                 translate_batch(["x", "y"], "en", "zh-CN", provider="_t_")
             )
             self.assertEqual(r, ["TR[x]", "TR[y]"])
@@ -71,7 +71,7 @@ class TranslateBatchTest(unittest.TestCase):
         from youtube_ingest.translate import TRANSLATE_PROVIDERS
         TRANSLATE_PROVIDERS["_t_"] = self._partial_fail
         try:
-            r = asyncio.get_event_loop().run_until_complete(
+            r = asyncio.run(
                 translate_batch(["a", "b", "a", "c"], "en", "zh-CN", provider="_t_")
             )
             self.assertEqual(r, [
@@ -84,7 +84,7 @@ class TranslateBatchTest(unittest.TestCase):
         from youtube_ingest.translate import TRANSLATE_PROVIDERS
         TRANSLATE_PROVIDERS["_t_"] = self._success
         try:
-            r = asyncio.get_event_loop().run_until_complete(
+            r = asyncio.run(
                 translate_batch([], "en", "zh-CN", provider="_t_")
             )
             self.assertEqual(r, [])
@@ -99,7 +99,7 @@ class TranslateBatchTest(unittest.TestCase):
                 {"start": 0, "end": 500, "text": "Hello", "translation": ""},
                 {"start": 600, "end": 1200, "text": "world", "translation": ""},
             ]
-            r = asyncio.get_event_loop().run_until_complete(
+            r = asyncio.run(
                 translate_subtitles(subs, "en", "zh-CN", provider="_t_")
             )
             self.assertEqual(r[0]["translation"], "TR[Hello]")
@@ -123,7 +123,7 @@ class TranslateStreamTest(unittest.TestCase):
             async def collect():
                 async for c in translate_stream("Hello", "en", "de", provider="_t_"):
                     chunks.append(c)
-            asyncio.get_event_loop().run_until_complete(collect())
+            asyncio.run(collect())
             self.assertEqual(chunks, ["Hallo"])
         finally:
             TRANSLATE_PROVIDERS.pop("_t_", None)
@@ -151,7 +151,7 @@ class TranslateStreamTest(unittest.TestCase):
             async def collect():
                 async for c in translate_stream("H", "en", "zh-CN", provider="openai"):
                     chunks.append(c)
-            asyncio.get_event_loop().run_until_complete(collect())
+            asyncio.run(collect())
             self.assertEqual(chunks, ["a", "b"])
 
     def test_stream_error(self):
@@ -174,7 +174,7 @@ class TranslateStreamTest(unittest.TestCase):
                 async for _ in translate_stream("H", "en", "zh-CN", provider="openai"):
                     pass
             with self.assertRaises(TranslateError) as ctx:
-                asyncio.get_event_loop().run_until_complete(collect())
+                asyncio.run(collect())
             self.assertIn("401", str(ctx.exception))
 
 
@@ -239,7 +239,7 @@ class TranslateWholeTest(unittest.TestCase):
 
         with patch("youtube_ingest.translate.httpx.AsyncClient", new=FakeClient), \
              patch.dict(os.environ, {"OPENAI_API_KEY": "sk"}):
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 translate_subtitles(subs, "en", "zh-CN", provider="openai", whole=True)
             )
             self.assertEqual(len(result), 2)
@@ -261,7 +261,7 @@ class TranslateWholeTest(unittest.TestCase):
                 {"start": 0, "end": 500, "text": "A"},
                 {"start": 600, "end": 1200, "text": "B"},
             ]
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 translate_subtitles(subs, "en", "zh-CN", provider="_t_", whole=False)
             )
             self.assertEqual(result[0]["translation"], "TR[A]")
@@ -270,7 +270,7 @@ class TranslateWholeTest(unittest.TestCase):
             TRANSLATE_PROVIDERS.pop("_t_", None)
 
     def test_translate_subtitles_empty(self):
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             translate_subtitles([], "en", "zh-CN", provider="x", api_key="k", whole=True)
         )
         self.assertEqual(result, [])

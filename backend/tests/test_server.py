@@ -43,10 +43,12 @@ class ServerEndpointsTest(unittest.TestCase):
         resp = client.get("/api/subtitle/tracks")
         self.assertEqual(resp.status_code, 422)  # missing required param
 
+    @patch("youtube_ingest.server._cache")
     @patch("youtube_ingest.server.fetch_metadata")
-    def test_tracks_endpoint_returns_tracks(self, mock_fetch):
+    def test_tracks_endpoint_returns_tracks(self, mock_fetch, mock_cache):
         from youtube_ingest.server import app
         from fastapi.testclient import TestClient
+        mock_cache.get_metadata.return_value = None
         mock_fetch.return_value = {
             "id": "test123",
             "title": "Test Video",
@@ -68,10 +70,12 @@ class ServerEndpointsTest(unittest.TestCase):
         self.assertIn("manual", {t["source"] for t in en_tracks})
         self.assertIn("manual", {t["source"] for t in zh_tracks})
 
+    @patch("youtube_ingest.server._cache")
     @patch("youtube_ingest.server.fetch_metadata")
-    def test_tracks_endpoint_no_matching_langs(self, mock_fetch):
+    def test_tracks_endpoint_no_matching_langs(self, mock_fetch, mock_cache):
         from youtube_ingest.server import app
         from fastapi.testclient import TestClient
+        mock_cache.get_metadata.return_value = None
         mock_fetch.return_value = {
             "id": "test123",
             "title": "Test",
@@ -88,10 +92,12 @@ class ServerEndpointsTest(unittest.TestCase):
         data = resp.json()
         self.assertEqual(len(data["tracks"]), 0)
 
+    @patch("youtube_ingest.server._cache")
     @patch("youtube_ingest.server.fetch_metadata")
-    def test_tracks_endpoint_ytdlp_error(self, mock_fetch):
+    def test_tracks_endpoint_ytdlp_error(self, mock_fetch, mock_cache):
         from youtube_ingest.server import app
         from fastapi.testclient import TestClient
+        mock_cache.get_metadata.return_value = None
         mock_fetch.side_effect = IngestError("yt-dlp crashed")
 
         client = TestClient(app)

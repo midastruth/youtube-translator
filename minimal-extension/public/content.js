@@ -8,9 +8,10 @@ let loadedVideoId = "", loadGeneration = 0;
 let statusTimer = null;
 let loadAbortController = null;
 let renderFrame = null;
+let browserSubtitleCache = null;
 
 const DEF = {
-  backendUrl: "http://localhost:8787",
+  backendUrl: "http://localhost:8791",
   languages: "en,zh-Hans,zh-Hant,zh",
   toLang: "zh-CN",
   segmentation: "rule",
@@ -127,6 +128,34 @@ function cancelActiveLoad() {
   loadAbortController?.abort();
   loadAbortController = null;
 }
+
+function acceptBrowserSubtitles(event) {
+  const detail = event.detail;
+  if (!detail?.videoId || detail.videoId !== videoId() || !Array.isArray(detail.cues)) return;
+  browserSubtitleCache = detail;
+}
+
+function waitForBrowserSubtitles(id, signal, timeout = 8000) {
+  if (browserSubtitleCache?.videoId === id) return Promise.resolve(browserSubtitleCache);
+  return new Promise(resolve => {
+    let timer;
+    const finish = value => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      window.removeEventListener("yts-browser-subtitles", onEvent);
+      resolve(value || null);
+    };
+    const onAbort = () => finish(null);
+    const onEvent = event => {
+      if (event.detail?.videoId === id) finish(event.detail);
+    };
+    timer = setTimeout(() => finish(browserSubtitleCache?.videoId === id ? browserSubtitleCache : null), timeout);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    window.addEventListener("yts-browser-subtitles", onEvent);
+  });
+}
+
+window.addEventListener("yts-browser-subtitles", acceptBrowserSubtitles);
 
 // ── overlay ────────────────────────────────────────────────
 
@@ -274,11 +303,18 @@ async function load(pageUrl) {
     const tracksResponse = await fetch(`${baseUrl}/api/subtitle/tracks?${params}`, {
       signal: controller.signal,
     });
-    if (!tracksResponse.ok) {
-      const error = await tracksResponse.json().catch(() => ({}));
-      throw new Error(error.detail || `Backend ${tracksResponse.status}`);
+    let tr = { tracks: [] };
+    if (tracksResponse.ok) {
+      tr = await tracksResponse.json();
+    } else {
+      // If yt-dlp is blocked with HTTP 400, give YouTube's own player a
+      // moment to provide the timed-text response captured by bridge.js.
+      await waitForBrowserSubtitles(vidFromUrl(pageUrl), controller.signal);
+      if (!browserSubtitleCache || browserSubtitleCache.videoId !== vidFromUrl(pageUrl)) {
+        const error = await tracksResponse.json().catch(() => ({}));
+        throw new Error(error.detail || `Backend ${tracksResponse.status}`);
+      }
     }
-    const tr = await tracksResponse.json();
 
     let track = null;
     for (const src of ["manual","automatic"]) {
@@ -290,7 +326,7 @@ async function load(pageUrl) {
       if (track) break;
     }
     if (!track) track = tr.tracks[0];
-    if (!track && !settings.whisperEnabled) {
+    if (!track && !settings.whisperEnabled && (!browserSubtitleCache || browserSubtitleCache.videoId !== vidFromUrl(pageUrl))) {
       showStatus("没有找到匹配字幕，可在设置中启用 Whisper", "error");
       return;
     }
@@ -301,6 +337,12 @@ async function load(pageUrl) {
       allow_automatic: true,
       segmentation: settings.segmentation||"rule",
     };
+    if (browserSubtitleCache?.videoId === vidFromUrl(pageUrl)) {
+      body.source_cues = browserSubtitleCache.cues;
+      body.source_video_id = browserSubtitleCache.videoId;
+      body.source_title = browserSubtitleCache.title;
+      body.source_language = browserSubtitleCache.language;
+    }
     if (track) body.language = track.language;
     if (settings.autoTranslate !== false && settings.toLang) {
       body.translate_to = settings.toLang;
@@ -415,11 +457,15 @@ async function load(pageUrl) {
     if (generation !== loadGeneration) return;
     if (e?.name === "AbortError") return;
     const baseUrl = (settings.backendUrl || DEF.backendUrl).replace(/\/+$/, "");
+    const detail = String(e?.message || e || "");
+    const botBlocked = /sign in to confirm|not a bot|confirm you.?re not a bot/i.test(detail);
     const message = e instanceof TypeError
       ? `无法连接后端 ${baseUrl}，请先启动服务`
-      : e?.code === "translation_already_running"
-        ? e.message
-        : `字幕加载失败：${e.message || e}`;
+      : botBlocked
+        ? "字幕加载失败（Backend 400）：YouTube 拦截了后端请求，请配置 yt-dlp cookies.txt 后重启后端"
+        : e?.code === "translation_already_running"
+          ? e.message
+          : `字幕加载失败：${detail}`;
     showStatus(message, "error", Math.max(0, Number(e?.hideAfterMs) || 0));
     console.error("[YTS]", e);
   } finally {
@@ -453,10 +499,12 @@ function findV() {
   if (videoChanged) bindVideo(v);
   if (videoChanged || idChanged) {
     loadedVideoId = vid;
+    browserSubtitleCache = null;
     load(`https://www.youtube.com/watch?v=${vid}`);
   }
 }
 function videoId() { try { return new URL(location.href).searchParams.get("v")||""; } catch { return ""; } }
+function vidFromUrl(url) { try { return new URL(url).searchParams.get("v") || ""; } catch { return ""; } }
 
 // ── download VTT ───────────────────────────────────────────
 
@@ -565,7 +613,12 @@ function updateToggleIcon(btn) {
 chrome.storage.local.get(["ytsSettings"], d => {
   // Enabling translation is intentionally page-local. Every fresh page load
   // starts off, preventing an automatic API request before the user opts in.
-  settings = { ...DEF, ...(d.ytsSettings||{}), enabled:false };
+  const storedSettings = { ...(d.ytsSettings || {}) };
+  if (storedSettings.backendUrl === "http://localhost:8787") {
+    storedSettings.backendUrl = DEF.backendUrl;
+    chrome.storage.local.set({ ytsSettings: storedSettings });
+  }
+  settings = { ...DEF, ...storedSettings, enabled:false };
   syncStyle(); findV();
   injectToggle();
 
@@ -589,6 +642,7 @@ chrome.storage.local.get(["ytsSettings"], d => {
     const toggle = document.getElementById("yts-toggle");
     if (toggle) updateToggleIcon(toggle);
     loadedVideoId = "";
+    browserSubtitleCache = null;
     cancelActiveLoad();
     clearStatus();
     subtitles = []; ci = -1; refresh();

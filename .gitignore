@@ -1,6 +1,8 @@
 # Dependencies
 backend/.venv/
 backend/cache/
+backend/cookies/*
+!backend/cookies/.gitkeep
 backend/__pycache__/
 backend/*.py[cod]
 backend/.pytest_cache/

@@ -36,6 +36,14 @@ def build_yt_dlp_command(args: list[str]) -> list[str]:
             f"youtubepot-bgutilhttp:base_url={pot_provider_url}",
         ])
 
+    # YouTube may challenge the Docker/container IP even when a PO-token
+    # provider is configured.  An optional Netscape cookie file lets operators
+    # pass an authenticated browser session without baking credentials into
+    # the image or command line used by callers.
+    cookies_file = os.getenv("YTDLP_COOKIES_FILE", "").strip()
+    if cookies_file:
+        command.extend(["--cookies", cookies_file])
+
     return [*command, *args]
 
 

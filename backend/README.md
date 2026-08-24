@@ -89,6 +89,23 @@ uvicorn youtube_ingest.server:app --host 0.0.0.0 --port 8787
 docker compose up -d
 ```
 
+若 `/api/subtitle/tracks` 返回 400，且 detail 包含
+`Sign in to confirm you’re not a bot`，请从浏览器导出 Netscape 格式的
+`cookies.txt`，保存到 `backend/cookies/youtube-cookies.txt`，并在项目根目录
+`.env` 设置：
+
+```env
+YTDLP_COOKIES_FILE=/run/secrets/youtube-cookies.txt
+```
+
+Compose 会把 `backend/cookies/` 只读挂载到 `/run/secrets/`。然后执行：
+
+```bash
+docker compose up -d --build backend
+```
+
+Cookie 是敏感凭据，不要提交到 Git。
+
 ### API 示例
 
 ```bash

@@ -21,7 +21,7 @@ function updateRangeLabel(id) {
 function loadSettings() {
   chrome.storage.local.get(["ytsSettings"], (data) => {
     const settings = data.ytsSettings || {};
-    setVal("backendUrl", settings.backendUrl || "http://localhost:8787");
+    setVal("backendUrl", settings.backendUrl || "http://localhost:8791");
     setVal("languages", settings.languages || "en,zh-Hans,zh-Hant,zh");
     setVal("toLang", settings.toLang || "zh-CN");
     setVal("segmentation", settings.segmentation || "rule");
@@ -66,7 +66,7 @@ function saveSettings() {
       settings[id] = getVal(id).trim();
     }
 
-    settings.backendUrl = settings.backendUrl.replace(/\/+$/, "") || "http://localhost:8787";
+    settings.backendUrl = settings.backendUrl.replace(/\/+$/, "") || "http://localhost:8791";
     settings.translateWhole = getVal("translateWhole") === "true";
     settings.whisperEnabled = getVal("whisperEnabled") === "true";
     settings.isBilingual = getVal("isBilingual") === "true";

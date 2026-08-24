@@ -26,6 +26,12 @@ class YtDlpCommandTests(unittest.TestCase):
         )
         self.assertEqual(command[-1], "--version")
 
+    @patch.dict("os.environ", {"YTDLP_COOKIES_FILE": "/run/secrets/youtube-cookies.txt"}, clear=True)
+    def test_cookie_file_is_added_to_command(self) -> None:
+        command = build_yt_dlp_command(["--version"])
+        self.assertIn("--cookies", command)
+        self.assertIn("/run/secrets/youtube-cookies.txt", command)
+
 
 class SubtitleSelectionTests(unittest.TestCase):
     def test_manual_subtitle_wins_over_automatic(self) -> None:

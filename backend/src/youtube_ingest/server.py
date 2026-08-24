@@ -329,6 +329,11 @@ class SubtitleRequest(BaseModel):
     whisper_base_url: str | None = None
     whisper_model: str | None = None
     whisper_language: str | None = None  # 传给 Whisper 的 ISO-639 语言提示
+    # Browser fallback: cues captured from YouTube's own timed-text request.
+    source_cues: list[dict] | None = None
+    source_video_id: str | None = None
+    source_title: str | None = None
+    source_language: str | None = None
 
 
 class SubtitleCue(BaseModel):
@@ -390,6 +395,10 @@ def _process_subtitle_sync(
     whisper_base_url: str | None = None,
     whisper_model: str | None = None,
     whisper_language: str | None = None,
+    source_cues: list[dict] | None = None,
+    source_video_id: str | None = None,
+    source_title: str | None = None,
+    source_language: str | None = None,
 ) -> tuple[dict, list[dict]]:
     """Shared sync portion: fetch metadata, pick track, download & segment.
 
@@ -401,6 +410,34 @@ def _process_subtitle_sync(
     import tempfile
     from .audio import split_audio
     from .transcribe import WhisperClient, transcribe_timed_chunks
+
+    # When the browser can read YouTube's caption URL but yt-dlp is blocked by
+    # YouTube's bot check, trust only the timed cues supplied by the extension
+    # and keep the normal segmentation/translation pipeline unchanged.
+    if source_cues is not None:
+        cues = []
+        for cue in source_cues:
+            try:
+                start = float(cue.get("start"))
+                end = float(cue.get("end"))
+                text = str(cue.get("text") or "").strip()
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if end > start and text:
+                cues.append({
+                    "start": start,
+                    "end": end,
+                    "text": text,
+                    "translation": str(cue.get("translation") or ""),
+                })
+        if not cues:
+            raise HTTPException(status_code=422, detail="Browser returned no usable subtitle cues")
+        return {
+            "video_id": source_video_id or "unknown",
+            "title": source_title or source_video_id or "YouTube video",
+            "from_lang": source_language or (languages[0] if languages else "auto"),
+            "source": "browser",
+        }, cues
 
     # Metadata
     metadata = _fetch_metadata_cached(url)
@@ -631,6 +668,10 @@ async def process_subtitle(req: SubtitleRequest):
             whisper_base_url=req.whisper_base_url,
             whisper_model=req.whisper_model,
             whisper_language=req.whisper_language,
+            source_cues=req.source_cues,
+            source_video_id=req.source_video_id,
+            source_title=req.source_title,
+            source_language=req.source_language,
         )
 
         # Translate if requested
@@ -716,6 +757,10 @@ async def process_subtitle_stream(req: SubtitleRequest):
             whisper_base_url=req.whisper_base_url,
             whisper_model=req.whisper_model,
             whisper_language=req.whisper_language,
+            source_cues=req.source_cues,
+            source_video_id=req.source_video_id,
+            source_title=req.source_title,
+            source_language=req.source_language,
         )
     except HTTPException as exc:
         raise

@@ -5,7 +5,7 @@
 ```
 minimal-extension/
 ├── public/
-│   ├── manifest.json    # Chrome 扩展配置
+│   ├── manifest.json    # Chrome / Firefox 扩展配置
 │   ├── content.js       # 注入 YouTube 页面：调后端 → 渲染字幕
 │   ├── options.html     # 设置页面：后端地址 / API key / 断句模式
 │   ├── icon48.png
@@ -26,14 +26,27 @@ minimal-extension/
 
 ## 安装
 
+支持 Chrome 121+ 和 Firefox 128+。
+
+### Chrome
+
 1. 打开 `chrome://extensions`
 2. 开启「开发者模式」
 3. 「加载已解压的扩展程序」→ 选择 `minimal-extension/public/`
 4. 点击扩展图标 → 右键「选项」打开设置页
 
+### Firefox
+
+1. 打开 `about:debugging#/runtime/this-firefox`
+2. 点击「临时载入附加组件」
+3. 选择 `minimal-extension/public/manifest.json`
+4. 打开扩展的「选项」页面完成设置
+
+Firefox 中临时载入的扩展会在浏览器重启后被移除；长期安装需要将扩展打包并经 Mozilla 签名。
+
 ## 使用
 
 1. 启动后端：`make start`（或 `docker compose up -d`）
-2. 在设置页填入后端地址（默认 `http://localhost:8787`）
+2. 在设置页填入后端地址（Docker 默认 `http://localhost:8791`）
 3. 可选：填入翻译 API key、选择断句模式
 4. 打开 YouTube 视频 → 字幕自动双语显示

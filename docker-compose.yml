@@ -15,6 +15,8 @@ services:
       - "${PORT:-8787}:8787"
     volumes:
       - ./backend/cache:/app/cache
+      # Optional Netscape-format YouTube cookies can be placed here.
+      - ./backend/cookies:/run/secrets:ro
     environment:
       - HOST=0.0.0.0
       - PORT=8787
@@ -35,6 +37,9 @@ services:
       - GROQ_API_KEY=${GROQ_API_KEY:-}
       - YTDLP_POT_PROVIDER_URL=http://pot-provider:4416
       - YTDLP_YOUTUBE_CLIENT=android,mweb
+      # Optional Netscape-format cookies file on the host. Set YTDLP_COOKIES_FILE
+      # in .env and mount that file if YouTube challenges the server IP.
+      - YTDLP_COOKIES_FILE=${YTDLP_COOKIES_FILE:-}
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8787/api/health', timeout=5)"]

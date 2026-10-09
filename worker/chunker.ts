@@ -1,4 +1,4 @@
-import type { CueBlock } from "./types.js";
+import type { CueBlock } from "./domain-types.js";
 
 /**
  * Estimates token count for a text or cue.

@@ -1,4 +1,4 @@
-import type { SourceCue, PublishedCue } from "./types.js";
+import type { SourceCue, PublishedCue } from "./domain-types.js";
 
 export type ValidationResult = {
   valid: boolean; errors: string[]; mappings?: Map<string, string>; orderedCues?: PublishedCue[];

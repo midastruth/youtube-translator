@@ -7,7 +7,10 @@
  *   bridge → content.js: "yts-browser-subtitles" {videoId, title, language, events?, cues?}
  */
 import { normalizeJson3, record } from "./types.js";
-import type { BrowserSubtitles, SubtitlePayload, CaptionTrack, PlayerResponse } from "./types.js";
+import type { BrowserSubtitles, SubtitlePayload, PlayerResponse } from "./types.js";
+import { videoIdFromUrl } from "./subtitles.js";
+import { hasBrowserSubtitles } from "./stream-request.js";
+import { captionLanguageRank, originalCaptionInfo, selectPlayerCaptionTrack } from "./captions.js";
 
 (() => {
   const EVENT = "yts-browser-subtitles";
@@ -24,19 +27,7 @@ import type { BrowserSubtitles, SubtitlePayload, CaptionTrack, PlayerResponse } 
 
   const originalFetch = window.fetch;
 
-  const currentVideoId = () => {
-    try { return new URL(location.href).searchParams.get("v") || ""; } catch { return ""; }
-  };
-
-  const langRank = (code: string | undefined) => {
-    const value = String(code || "").toLowerCase();
-    if (!value || value === "auto") return languages.length + 1;
-    const exact = languages.findIndex(l => l.toLowerCase() === value);
-    if (exact >= 0) return exact;
-    const prefix = value.split("-")[0];
-    const related = languages.findIndex(l => l.toLowerCase().split("-")[0] === prefix);
-    return related >= 0 ? related : languages.length;
-  };
+  const currentVideoId = () => videoIdFromUrl(location.href);
 
   const emit = (detail: BrowserSubtitles) => {
     window.dispatchEvent(new CustomEvent(EVENT, { detail: JSON.stringify(detail) }));
@@ -45,11 +36,9 @@ import type { BrowserSubtitles, SubtitlePayload, CaptionTrack, PlayerResponse } 
   /** Keep the best-ranked capture per video; announce it if it is current. */
   const store = (videoId: string, language: string, payload: SubtitlePayload, direct = false) => {
     if (!videoId) return;
-    const hasEvents = payload.events?.length;
-    const hasCues = payload.cues?.length;
-    if (!hasEvents && !hasCues) return;
+    if (!hasBrowserSubtitles(payload)) return;
 
-    const rank = langRank(language);
+    const rank = captionLanguageRank(language, languages);
     const previous = captured.get(videoId);
     if (previous && previous.rank <= rank) {
       if (direct) previous.direct = true;
@@ -101,19 +90,7 @@ import type { BrowserSubtitles, SubtitlePayload, CaptionTrack, PlayerResponse } 
   };
 
   /** Only original-language timedtext responses; skip YouTube auto-translations. */
-  const captionInfo = (url: string) => {
-    try {
-      const parsed = new URL(url, location.href);
-      if (!/\/api\/timedtext/i.test(parsed.pathname)) return null;
-      if (parsed.searchParams.get("tlang")) return null;
-      return {
-        videoId: parsed.searchParams.get("v") || "",
-        language: parsed.searchParams.get("lang") || "auto",
-      };
-    } catch {
-      return null;
-    }
-  };
+  const captionInfo = (url: string) => originalCaptionInfo(url, location.href);
 
   const handleRaw = (raw: string, url: string, direct = false) => {
     const info = captionInfo(url);
@@ -165,21 +142,11 @@ import type { BrowserSubtitles, SubtitlePayload, CaptionTrack, PlayerResponse } 
     return candidates.find(r => r?.videoDetails?.videoId === videoId) || null;
   };
 
-  const pickTrack = (tracks: CaptionTrack[]) => {
-    const usable = tracks.filter(t => t?.baseUrl);
-    if (!usable.length) return null;
-    // Manual tracks before ASR; then user language priority.
-    return [...usable].sort((a, b) => (
-      Number(a.kind === "asr") - Number(b.kind === "asr")
-      || langRank(a.languageCode) - langRank(b.languageCode)
-    ))[0];
-  };
-
   const fetchPlayerTrack = async (videoId: string) => {
     const response = playerResponse(videoId);
     if (!response) return false;
     const tracks = response.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
-    const track = pickTrack(tracks);
+    const track = selectPlayerCaptionTrack(tracks, languages);
     if (!track) return true; // player loaded, video simply has no captions
     try {
       const url = new URL(track.baseUrl, location.href);

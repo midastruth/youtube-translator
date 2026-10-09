@@ -1,4 +1,4 @@
-import type { SourceCue } from "./types.js";
+import type { SourceCue } from "./domain-types.js";
 export type EvaluationCue = SourceCue & { category: string; term?: string; expected: string };
 export type QualityIssue = { severity: string };
 export type EvaluationRun = { issues?: QualityIssue[]; timelineIntegrity?: number };

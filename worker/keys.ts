@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import type { InputCue } from "./types.js";
+import type { InputCue } from "./domain-types.js";
 
 export type JobKeyOptions = {
   videoId?: string; sourceCues?: InputCue[]; fromLang?: string; toLang?: string;

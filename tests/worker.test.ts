@@ -131,7 +131,7 @@ test("stream cardinality is captured before the asynchronous snapshot", async t 
   } finally { await worker.close(); await fs.rm(directory, { recursive: true, force: true }); }
 });
 
-test("HTTP snapshot reads the committed document, not a missing definition", async () => {
+test("HTTP snapshot delegates to the worker's committed application view", async t => {
   await fs.mkdir("./tmp", { recursive: true });
   const directory = await fs.mkdtemp("./tmp/worker-unit-");
   const { server, worker } = await createWorkerServer({ storagePath: `${directory}/db.sqlite`, port: 0 });
@@ -147,6 +147,21 @@ test("HTTP snapshot reads the committed document, not a missing definition", asy
     assert.equal(snapshot.status, "succeeded");
     assert.deepEqual(snapshot.published_cues, [{ ...cue, translation: "你好" }]);
     assert.deepEqual(snapshot.final_result.cues, [{ index: 0, ...cue, translation: "你好" }]);
+
+    assert.ok(worker.harness);
+    t.mock.method(worker.harness, "snapshot", async () => undefined);
+    assert.deepEqual(await worker.snapshotJob(job), {
+      job_id: job.jobId, status: job.status, published_cues: [], failed_cues: [], final_result: undefined,
+    });
+
+    const applicationView = { job_id: "application-id", status: "application-status", published_cues: [], failed_cues: [], final_result: undefined };
+    t.mock.method(worker, "snapshotJob", async (observedJob: typeof job) => {
+      assert.equal(observedJob, job);
+      return applicationView;
+    });
+    const delegated = await fetch(`http://127.0.0.1:${address.port}/internal/jobs/${job.jobId}`);
+    assert.equal(delegated.status, 200);
+    assert.deepEqual(await delegated.json(), JSON.parse(JSON.stringify(applicationView)));
   } finally {
     server.closeAllConnections();
     await new Promise<void>(resolve => server.close(() => resolve()));

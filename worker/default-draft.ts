@@ -1,4 +1,4 @@
-import type { Draft, SourceCue } from "./types.js";
+import type { Draft, SourceCue } from "./domain-types.js";
 
 /** Existing scripted translation fallback, separate from durable task transitions. */
 export function defaultDraft(cues: SourceCue[], glossary: Draft = {}): Draft {

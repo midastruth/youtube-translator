@@ -1,4 +1,4 @@
-import type { BrowserSubtitles, ExtensionSettings, StreamRequest } from "./types.js";
+import type { BrowserSubtitles, ExtensionSettings, StreamRequest, SubtitlePayload } from "./types.js";
 
 export type BackendTrack = { source: string; language: string };
 
@@ -15,7 +15,7 @@ export function selectBackendTrack(tracks: BackendTrack[], languages: string[]) 
   return track || tracks[0];
 }
 
-export function hasBrowserSubtitles(detail: BrowserSubtitles | null) {
+export function hasBrowserSubtitles(detail: SubtitlePayload | BrowserSubtitles | null) {
   return Boolean(detail && (
     (Array.isArray(detail.events) && detail.events.length)
     || (Array.isArray(detail.cues) && detail.cues.length)

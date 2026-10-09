@@ -1,4 +1,4 @@
-import type { SourceCue, Draft, ReviewIssue } from "./types.js";
+import type { SourceCue, Draft, ReviewIssue } from "./domain-types.js";
 
 /** Builds a targeted revision prompt for the model. */
 export function buildRevisionPrompt({ cues, draftTranslations, issues, contextBefore = [], contextAfter = [] }: {

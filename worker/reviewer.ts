@@ -1,4 +1,4 @@
-import type { SourceCue, Draft, ReviewIssue, ReviewResult } from "./types.js";
+import type { SourceCue, Draft, ReviewIssue, ReviewResult } from "./domain-types.js";
 export { buildRevisionPrompt } from "./revision-prompt.js";
 
 type ReviewCue = { cueId: string; original: string; translation: string };

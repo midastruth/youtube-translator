@@ -1,6 +1,5 @@
 import http from "node:http";
 import { AgentWorker } from "./agent-worker.js";
-import { SubtitleJobDoc } from "./task-definition.js";
 import type { SubmitJobOptions } from "./types.js";
 
 const PORT = Number(process.env.TRANSLATION_AGENT_PORT) || 8788;
@@ -84,23 +83,9 @@ export async function createWorkerServer({ storagePath = STORAGE_PATH, port = PO
           return;
         }
 
-        // Snapshot
-        if (!worker.harness) throw new Error("Worker harness is not open");
-        const doc = await worker.harness.snapshot(
-          SubtitleJobDoc,
-          job.conversationId,
-          worker.context
-        );
+        const snapshot = await worker.snapshotJob(job);
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(
-          JSON.stringify({
-            job_id: job.jobId,
-            status: doc?.status || job.status,
-            published_cues: Object.values(doc?.published_cues || {}),
-            failed_cues: doc?.failed_cues || [],
-            final_result: doc?.final_result,
-          })
-        );
+        res.end(JSON.stringify(snapshot));
         return;
       }
 

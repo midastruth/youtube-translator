@@ -317,6 +317,18 @@ export class AgentWorker {
     return true;
   }
 
+  /** Application snapshot; delivery adapters do not need durable document details. */
+  async snapshotJob(job: JobRecord) {
+    const doc = await this.activeHarness.snapshot(SubtitleJobDoc, job.conversationId, this.context);
+    return {
+      job_id: job.jobId,
+      status: doc?.status || job.status,
+      published_cues: Object.values(doc?.published_cues || {}),
+      failed_cues: doc?.failed_cues || [],
+      final_result: doc?.final_result,
+    };
+  }
+
   /**
    * Observe job stream (SSE / WS style)
    */

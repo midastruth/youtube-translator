@@ -48,13 +48,17 @@ function hallucinationIssues({ cueId, original, translation }: ReviewCue): Revie
   return [{ cue_id: cueId, reason: "hallucination", details: `Translation added financial or payment information not in source: "${translation}"` }];
 }
 
+function appendIssues(target: ReviewIssue[], ...groups: ReviewIssue[][]) {
+  for (const group of groups) for (const issue of group) target.push(issue);
+}
+
 /** Reviews semantic rules in their original order, retaining every issue. */
 export async function reviewTranslations(cues: SourceCue[], translations: Draft | Map<string, string> | null, { glossary = {}, domain = "general" }: { glossary?: Draft; domain?: string } = {}): Promise<ReviewResult> {
   const transMap = translations instanceof Map ? translations : new Map(Object.entries(translations || {}));
   const issues: ReviewIssue[] = [];
   for (const source of cues) {
     const cue = { cueId: source.cue_id, original: source.text || "", translation: transMap.get(source.cue_id) || "" };
-    issues.push(...negationIssues(cue), ...numberIssues(cue), ...terminologyIssues(cue, glossary, domain), ...hallucinationIssues(cue));
+    appendIssues(issues, negationIssues(cue), numberIssues(cue), terminologyIssues(cue, glossary, domain), hallucinationIssues(cue));
   }
   return { passed: issues.length === 0, issues };
 }

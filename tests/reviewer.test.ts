@@ -14,6 +14,13 @@ test("review rules retain issue order and repeated source-number findings", asyn
   assert.ok(result.issues.every(issue => issue.cue_id === "c0"));
 });
 
+test("large review issue sets retain every finding without variadic argument limits", async () => {
+  const count = 140_000;
+  const result = await reviewTranslations([{ ...cue, text: "5 mg ".repeat(count) }], { c0: "50 毫克" });
+  assert.equal(result.issues.length, count);
+  assert.ok(result.issues.every(issue => issue.reason === "dose_and_number_error"));
+});
+
 test("review preserves glossary exceptions and does not flag legitimate financial language", async () => {
   const cases: { text: string; translation: string; glossary: Record<string, string>; domain: string; reasons: string[] }[] = [
     { text: "Do not use 5 mg", translation: "不要使用 5 毫克", glossary: {}, domain: "general", reasons: [] },

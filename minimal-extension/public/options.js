@@ -25,6 +25,7 @@ function loadSettings() {
     setVal("languages", settings.languages || "en,zh-Hans,zh-Hant,zh");
     setVal("toLang", settings.toLang || "zh-CN");
     setVal("segmentation", settings.segmentation || "rule");
+    setVal("translateEngine", settings.translateEngine || "legacy");
     setVal("translateApiKey", settings.translateApiKey || "");
     setVal("translateBaseUrl", settings.translateBaseUrl || "");
     setVal("translateModel", settings.translateModel || "");
@@ -58,7 +59,7 @@ function saveSettings() {
     const settings = { ...(data.ytsSettings || {}) };
     delete settings.enabled;
     for (const id of [
-      "backendUrl", "languages", "toLang", "segmentation",
+      "backendUrl", "languages", "toLang", "segmentation", "translateEngine",
       "translateApiKey", "translateBaseUrl", "translateModel",
       "whisperApiKey", "whisperBaseUrl", "whisperModel", "whisperLanguage",
       "origColor", "tranColor",

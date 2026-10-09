@@ -24,11 +24,12 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, model_serializer
 from starlette.concurrency import run_in_threadpool
 
 from .cache import SubtitleCache
 from .errors import IngestError
+from .agent_client import AgentWorkerClient, AgentWorkerError
 from .subtitle_processing import (
     FlatEvent,
     builtin_segment,
@@ -170,6 +171,15 @@ def _translation_cache_profile(
     base_url: str | None,
     model: str | None,
     strategy: str,
+    engine: str = "legacy",
+    from_lang: str = "en",
+    to_lang: str = "zh-CN",
+    segmentation: str = "rule",
+    prompt_version: str = "prompt-v1",
+    review_version: str = "review-v1",
+    workflow_version: str = "wf-v1",
+    glossary_version: str = "glossary-v1",
+    style_config: str = "standard",
 ) -> str:
     """Version translations by their inputs without storing provider URLs."""
     effective_provider = provider.lower().strip()
@@ -198,10 +208,19 @@ def _translation_cache_profile(
     material = json.dumps(
         {
             "version": _TRANSLATION_CACHE_VERSION,
+            "engine": engine,
             "provider": effective_provider,
             "endpoint": effective_base_url,
             "model": effective_model,
             "strategy": strategy,
+            "from_lang": from_lang,
+            "to_lang": to_lang,
+            "segmentation": segmentation,
+            "prompt_version": prompt_version,
+            "review_version": review_version,
+            "workflow_version": workflow_version,
+            "glossary_version": glossary_version,
+            "style_config": style_config,
             "source_cues": source_cues,
         },
         ensure_ascii=False,
@@ -223,6 +242,12 @@ def _cached_translation(
     base_url: str | None,
     model: str | None,
     strategy: str,
+    engine: str = "legacy",
+    prompt_version: str = "prompt-v1",
+    review_version: str = "review-v1",
+    workflow_version: str = "wf-v1",
+    glossary_version: str = "glossary-v1",
+    style_config: str = "standard",
 ) -> tuple[str, list[dict]]:
     """Return a profile and source cues merged with valid cached translations."""
     profile = _translation_cache_profile(
@@ -231,6 +256,15 @@ def _cached_translation(
         base_url=base_url,
         model=model,
         strategy=strategy,
+        engine=engine,
+        from_lang=from_lang,
+        to_lang=to_lang,
+        segmentation=segmentation,
+        prompt_version=prompt_version,
+        review_version=review_version,
+        workflow_version=workflow_version,
+        glossary_version=glossary_version,
+        style_config=style_config,
     )
     working = [dict(cue) for cue in cues]
     cached = _cache.get_translation(
@@ -368,6 +402,7 @@ class SubtitleRequest(BaseModel):
     allow_automatic: bool = True
     segmentation: str = "rule"  # "rule" | "statistical"
     translate_to: str | None = None
+    translate_engine: str = "legacy"  # "legacy" | "agent"
     translate_provider: str = "openai"
     translate_api_key: str | None = None
     translate_base_url: str | None = None
@@ -394,6 +429,14 @@ class SubtitleCue(BaseModel):
     end: float
     text: str
     translation: str = ""
+    cue_id: str | None = None
+
+    @model_serializer(mode="wrap")
+    def serialize_cue(self, handler):
+        data = handler(self)
+        if data.get("cue_id") is None:
+            data.pop("cue_id", None)
+        return data
 
 
 class SubtitleResponse(BaseModel):
@@ -405,6 +448,9 @@ class SubtitleResponse(BaseModel):
     source: str  # "manual" | "automatic" | "whisper"
     cues: list[SubtitleCue] = []
     progress: int = 100
+    translation_status: str = "succeeded"  # "succeeded" | "partial" | "failed" | "not_requested"
+    failed_cues: int = 0
+    job_id: str | None = None
 
 
 class TracksResponse(BaseModel):
@@ -733,45 +779,137 @@ async def process_subtitle(req: SubtitleRequest):
 
         # Translate if requested
         to_lang = req.translate_to
-        if to_lang and cues:
-            strategy = "rest-whole-v1" if req.translate_whole else "rest-batch-v1"
-            profile, cached_cues = _cached_translation(
+        if not to_lang or not cues:
+            return SubtitleResponse(
                 video_id=meta["video_id"],
+                title=meta["title"],
                 from_lang=meta["from_lang"],
+                to_lang=None,
                 segmentation=req.segmentation,
-                to_lang=to_lang,
-                cues=cues,
-                provider=req.translate_provider,
-                base_url=req.translate_base_url,
-                model=req.translate_model,
-                strategy=strategy,
+                source=meta["source"],
+                cues=[SubtitleCue(**c) for c in cues],
+                translation_status="not_requested",
+                failed_cues=0,
+                progress=100,
             )
-            if all(
-                str(cue.get("translation") or "").strip()
-                not in ("", "[Translation failed]")
-                for cue in cached_cues
-            ):
-                cues = cached_cues
-            else:
-                try:
-                    cues = await translate_subtitles(
-                        cues, from_lang=meta["from_lang"], to_lang=to_lang,
-                        provider=req.translate_provider,
-                        api_key=req.translate_api_key,
-                        base_url=req.translate_base_url,
-                        model=req.translate_model,
-                        whole=req.translate_whole,
-                    )
-                    _cache.put_translation(
-                        meta["video_id"],
-                        meta["from_lang"],
-                        req.segmentation,
-                        to_lang,
-                        profile,
-                        cues,
-                    )
-                except Exception as exc:
-                    logger.warning("Translation failed, returning untranslated cues: %s", exc)
+
+        if req.translate_engine == "agent":
+            # Durable agent translation
+            if req.translate_provider not in ("openai", "deepl", "mock"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid agent model, credentials, or worker configuration",
+                )
+
+            agent_client = AgentWorkerClient()
+            try:
+                job_res = await agent_client.submit_or_attach(
+                    cues=cues,
+                    video_id=meta["video_id"],
+                    title=meta["title"],
+                    from_lang=meta["from_lang"],
+                    to_lang=to_lang,
+                    segmentation=req.segmentation,
+                    provider=req.translate_provider,
+                    model=req.translate_model or "gpt-4o",
+                    base_url=req.translate_base_url,
+                    api_key=req.translate_api_key,
+                )
+                job_id = job_res.get("job_id")
+                # Wait for job completion via snapshot polling
+                snapshot = None
+                for _ in range(60):
+                    snapshot = await agent_client.get_job(job_id)
+                    if snapshot.get("status") in ("succeeded", "partial", "failed", "budget_exceeded"):
+                        break
+                    await asyncio.sleep(0.5)
+
+                pub_map = {c["cue_id"]: c.get("translation", "") for c in snapshot.get("published_cues", [])}
+                failed_set = set(snapshot.get("failed_cues", []))
+
+                result_cues = []
+                for idx, c in enumerate(cues):
+                    cue_id = c.get("cue_id") or f"c{idx}"
+                    tr = pub_map.get(cue_id, "")
+                    result_cues.append(SubtitleCue(
+                        start=c["start"],
+                        end=c["end"],
+                        text=c["text"],
+                        translation=tr,
+                        cue_id=cue_id,
+                    ))
+
+                total = len(cues)
+                failed_count = len(failed_set)
+                if not failed_count and snapshot.get("status") == "budget_exceeded":
+                    failed_count = sum(1 for c in result_cues if not c.translation)
+
+                if failed_count == 0:
+                    status = "succeeded"
+                elif failed_count < total:
+                    status = "partial"
+                else:
+                    status = "failed"
+
+                progress = int(((total - failed_count) / max(1, total)) * 100)
+
+                return SubtitleResponse(
+                    video_id=meta["video_id"],
+                    title=meta["title"],
+                    from_lang=meta["from_lang"],
+                    to_lang=to_lang,
+                    segmentation=req.segmentation,
+                    source=meta["source"],
+                    cues=result_cues,
+                    translation_status=status,
+                    failed_cues=failed_count,
+                    progress=progress,
+                    job_id=job_id,
+                )
+            except AgentWorkerError as exc:
+                logger.error("Agent worker failed: %s", exc)
+                raise HTTPException(status_code=503, detail=f"Agent translation service unavailable: {exc}")
+
+        # Legacy translation path
+        strategy = "rest-whole-v1" if req.translate_whole else "rest-batch-v1"
+        profile, cached_cues = _cached_translation(
+            video_id=meta["video_id"],
+            from_lang=meta["from_lang"],
+            segmentation=req.segmentation,
+            to_lang=to_lang,
+            cues=cues,
+            provider=req.translate_provider,
+            base_url=req.translate_base_url,
+            model=req.translate_model,
+            strategy=strategy,
+            engine="legacy",
+        )
+        if all(
+            str(cue.get("translation") or "").strip()
+            not in ("", "[Translation failed]")
+            for cue in cached_cues
+        ):
+            cues = cached_cues
+        else:
+            try:
+                cues = await translate_subtitles(
+                    cues, from_lang=meta["from_lang"], to_lang=to_lang,
+                    provider=req.translate_provider,
+                    api_key=req.translate_api_key,
+                    base_url=req.translate_base_url,
+                    model=req.translate_model,
+                    whole=req.translate_whole,
+                )
+                _cache.put_translation(
+                    meta["video_id"],
+                    meta["from_lang"],
+                    req.segmentation,
+                    to_lang,
+                    profile,
+                    cues,
+                )
+            except Exception as exc:
+                logger.warning("Translation failed, returning untranslated cues: %s", exc)
 
         return SubtitleResponse(
             video_id=meta["video_id"],
@@ -835,9 +973,46 @@ async def process_subtitle_stream(req: SubtitleRequest):
             yield f"data: {json.dumps({'type': 'meta', **meta, 'to_lang': None, 'segmentation': req.segmentation, 'total_cues': len(cues)}, ensure_ascii=False)}\n\n"
             for i, c in enumerate(cues):
                 yield f"data: {json.dumps({'type': 'cue', 'index': i, **c}, ensure_ascii=False)}\n\n"
-            yield "data: {\"type\":\"done\"}\n\n"
+            yield "data: {\"type\":\"done\", \"total_cues\": " + str(len(cues)) + ", \"failed_cues\": 0}\n\n"
         return StreamingResponse(
             _no_translate(), media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    if req.translate_engine == "agent":
+        if req.translate_provider not in ("openai", "deepl", "mock"):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid agent model, credentials, or worker configuration",
+            )
+        agent_client = AgentWorkerClient()
+        try:
+            job_res = await agent_client.submit_or_attach(
+                cues=cues,
+                video_id=meta["video_id"],
+                title=meta["title"],
+                from_lang=meta["from_lang"],
+                to_lang=to_lang,
+                segmentation=req.segmentation,
+                provider=req.translate_provider,
+                model=req.translate_model or "gpt-4o",
+                base_url=req.translate_base_url,
+                api_key=req.translate_api_key,
+            )
+            job_id = job_res["job_id"]
+        except AgentWorkerError as exc:
+            raise HTTPException(status_code=503, detail=f"Agent translation service unavailable: {exc}")
+
+        async def _agent_sse_stream():
+            async for event in agent_client.stream_job(job_id):
+                if event.get("type") == "keepalive":
+                    yield ": keepalive\n\n"
+                else:
+                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+        return StreamingResponse(
+            _agent_sse_stream(),
+            media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
@@ -1023,6 +1198,34 @@ async def ws_subtitle_process(ws: WebSocket):
     })
 
     if to_lang and cues:
+        if req.translate_engine == "agent":
+            agent_client = AgentWorkerClient()
+            try:
+                job_res = await agent_client.submit_or_attach(
+                    cues=cues,
+                    video_id=meta["video_id"],
+                    title=meta["title"],
+                    from_lang=meta["from_lang"],
+                    to_lang=to_lang,
+                    segmentation=req.segmentation,
+                    provider=req.translate_provider,
+                    model=req.translate_model or "gpt-4o",
+                    base_url=req.translate_base_url,
+                    api_key=req.translate_api_key,
+                )
+                job_id = job_res["job_id"]
+                async for event in agent_client.stream_job(job_id):
+                    if event.get("type") != "keepalive":
+                        await ws.send_json(event)
+            except Exception as exc:
+                await ws.send_json({"type": "error", "detail": str(exc)})
+            try:
+                await ws.receive_text()
+            except WebSocketDisconnect:
+                pass
+            await ws.close()
+            return
+
         profile, working = _cached_translation(
             video_id=meta["video_id"],
             from_lang=meta["from_lang"],
@@ -1086,6 +1289,20 @@ async def ws_subtitle_process(ws: WebSocket):
     except WebSocketDisconnect:
         pass
     await ws.close()
+
+
+# ── Abort / Cancel ───────────────────────────────────────────────────
+
+class AbortJobRequest(BaseModel):
+    job_id: str
+
+
+@app.post("/api/subtitle/abort")
+@app.post("/api/subtitle/cancel")
+async def abort_subtitle_job(req: AbortJobRequest):
+    agent_client = AgentWorkerClient()
+    success = await agent_client.abort_job(req.job_id)
+    return {"success": success, "job_id": req.job_id}
 
 
 # ── Cache admin ────────────────────────────────────────────────────────

@@ -1,0 +1,20 @@
+{
+  "name": "youtube-translator",
+  "version": "0.3.0",
+  "description": "YouTube subtitle ingestion, sentence segmentation, and durable translation agent",
+  "type": "module",
+  "scripts": {
+    "test": "cucumber-js docs/acceptance/translation-agent.feature --import 'features/step_definitions/**/*.js'",
+    "test:acceptance": "cucumber-js docs/acceptance/translation-agent.feature --import 'features/step_definitions/**/*.js'",
+    "test:backend": "cd backend && uv run pytest",
+    "worker": "node worker/server.js"
+  },
+  "dependencies": {
+    "@earendil-works/chord": "1.1.0",
+    "@earendil-works/pi-ai": "1.1.0",
+    "@earendil-works/pi-durable": "1.1.0"
+  },
+  "devDependencies": {
+    "@cucumber/cucumber": "^13.3.0"
+  }
+}

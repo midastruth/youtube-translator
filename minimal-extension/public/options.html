@@ -56,6 +56,11 @@
   <!-- Translation API -->
   <div class="section">
     <div class="section-title">🔑 翻译 API（可选，留空用服务端 .env）</div>
+    <label>翻译引擎</label>
+    <select id="translateEngine">
+      <option value="legacy">标准引擎 (Legacy)</option>
+      <option value="agent">Durable Agent (上下文审校与恢复)</option>
+    </select>
     <label>OpenAI API Key</label>
     <input type="password" id="translateApiKey" placeholder="sk-...">
     <label>API 地址</label>

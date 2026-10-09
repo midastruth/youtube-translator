@@ -383,7 +383,8 @@ async function load(pageUrl) {
     if (track) body.language = track.language;
     if (settings.autoTranslate !== false && settings.toLang) {
       body.translate_to = settings.toLang;
-      body.translate_provider = "openai";
+      body.translate_engine = settings.translateEngine || "legacy";
+      body.translate_provider = settings.translateProvider || "openai";
       if (settings.translateApiKey) body.translate_api_key = settings.translateApiKey;
       if (settings.translateBaseUrl) body.translate_base_url = settings.translateBaseUrl;
       if (settings.translateModel) body.translate_model = settings.translateModel;

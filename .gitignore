@@ -1,4 +1,5 @@
 # Dependencies
+node_modules/
 backend/.venv/
 backend/cache/
 backend/cookies/*

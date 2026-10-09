@@ -243,6 +243,56 @@ def _cached_translation(
     return profile, working
 
 
+def _browser_source_events(
+    source_events: list[dict] | None,
+    source_cues: list[dict] | None,
+) -> list[dict]:
+    """Normalize browser-captured subtitles into json3-style events."""
+    if source_events:
+        events = []
+        for event in source_events:
+            if not isinstance(event, dict):
+                continue
+            try:
+                start = float(event.get("tStartMs") or 0)
+                duration = float(event.get("dDurationMs") or 0)
+            except (TypeError, ValueError):
+                continue
+            segs = [
+                {
+                    "utf8": str(seg.get("utf8") or ""),
+                    **(
+                        {"tOffsetMs": float(seg["tOffsetMs"])}
+                        if isinstance(seg.get("tOffsetMs"), (int, float)) else {}
+                    ),
+                }
+                for seg in (event.get("segs") or [])
+                if isinstance(seg, dict)
+            ]
+            normalized = {"tStartMs": start, "dDurationMs": duration, "segs": segs}
+            if event.get("aAppend") == 1:
+                normalized["aAppend"] = 1
+            events.append(normalized)
+        if events:
+            return events
+
+    events = []
+    for cue in source_cues or []:
+        try:
+            start = float(cue.get("start"))
+            end = float(cue.get("end"))
+            text = str(cue.get("text") or "").strip()
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if end > start and text:
+            events.append({
+                "tStartMs": start,
+                "dDurationMs": end - start,
+                "segs": [{"utf8": text}],
+            })
+    return events
+
+
 # ── yt-dlp helpers ─────────────────────────────────────────────────────
 
 def _run_yt_dlp(args: list[str]) -> str:
@@ -329,7 +379,10 @@ class SubtitleRequest(BaseModel):
     whisper_base_url: str | None = None
     whisper_model: str | None = None
     whisper_language: str | None = None  # 传给 Whisper 的 ISO-639 语言提示
-    # Browser fallback: cues captured from YouTube's own timed-text request.
+    # Browser fallback: subtitles captured from YouTube's own timed-text request.
+    # source_events are raw json3 events (preferred, keep word timings);
+    # source_cues are plain {start, end, text} cues (e.g. from XML captions).
+    source_events: list[dict] | None = None
     source_cues: list[dict] | None = None
     source_video_id: str | None = None
     source_title: str | None = None
@@ -399,6 +452,7 @@ def _process_subtitle_sync(
     source_video_id: str | None = None,
     source_title: str | None = None,
     source_language: str | None = None,
+    source_events: list[dict] | None = None,
 ) -> tuple[dict, list[dict]]:
     """Shared sync portion: fetch metadata, pick track, download & segment.
 
@@ -412,30 +466,32 @@ def _process_subtitle_sync(
     from .transcribe import WhisperClient, transcribe_timed_chunks
 
     # When the browser can read YouTube's caption URL but yt-dlp is blocked by
-    # YouTube's bot check, trust only the timed cues supplied by the extension
-    # and keep the normal segmentation/translation pipeline unchanged.
-    if source_cues is not None:
-        cues = []
-        for cue in source_cues:
-            try:
-                start = float(cue.get("start"))
-                end = float(cue.get("end"))
-                text = str(cue.get("text") or "").strip()
-            except (TypeError, ValueError, AttributeError):
-                continue
-            if end > start and text:
-                cues.append({
-                    "start": start,
-                    "end": end,
-                    "text": text,
-                    "translation": str(cue.get("translation") or ""),
-                })
-        if not cues:
+    # YouTube's bot check, use the subtitles supplied by the extension and run
+    # them through the same cleaning/segmentation/translation pipeline.
+    if source_events is not None or source_cues is not None:
+        raw_events = _browser_source_events(source_events, source_cues)
+        if not raw_events:
             raise HTTPException(status_code=422, detail="Browser returned no usable subtitle cues")
+
+        # The cache key comes from the requested URL, never from the client
+        # supplied id, so a mismatched page id cannot poison another video.
+        video_id = _metadata_cache_key(url)
+        from_lang = source_language or (languages[0] if languages else "auto")
+        prepared = prepare_timed_text_events(raw_events)
+        if not prepared["flat_events"]:
+            raise HTTPException(status_code=422, detail="Browser returned no usable subtitle cues")
+        cues = builtin_segment(
+            prepared["events"], prepared["flat_events"],
+            from_lang=from_lang, mode=segmentation,
+        )
+        logger.info(
+            "Segmented %d browser events into %d cues (mode=%s)",
+            len(raw_events), len(cues), segmentation,
+        )
         return {
-            "video_id": source_video_id or "unknown",
-            "title": source_title or source_video_id or "YouTube video",
-            "from_lang": source_language or (languages[0] if languages else "auto"),
+            "video_id": video_id,
+            "title": source_title or source_video_id or video_id,
+            "from_lang": from_lang,
             "source": "browser",
         }, cues
 
@@ -672,6 +728,7 @@ async def process_subtitle(req: SubtitleRequest):
             source_video_id=req.source_video_id,
             source_title=req.source_title,
             source_language=req.source_language,
+            source_events=req.source_events,
         )
 
         # Translate if requested
@@ -761,6 +818,7 @@ async def process_subtitle_stream(req: SubtitleRequest):
             source_video_id=req.source_video_id,
             source_title=req.source_title,
             source_language=req.source_language,
+            source_events=req.source_events,
         )
     except HTTPException as exc:
         raise
@@ -943,6 +1001,11 @@ async def ws_subtitle_process(ws: WebSocket):
             whisper_base_url=req.whisper_base_url,
             whisper_model=req.whisper_model,
             whisper_language=req.whisper_language,
+            source_cues=req.source_cues,
+            source_video_id=req.source_video_id,
+            source_title=req.source_title,
+            source_language=req.source_language,
+            source_events=req.source_events,
         )
     except Exception as exc:
         await ws.send_json({"type": "error", "detail": str(exc)})

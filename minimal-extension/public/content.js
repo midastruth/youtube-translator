@@ -11,7 +11,7 @@ let renderFrame = null;
 let browserSubtitleCache = null;
 
 const DEF = {
-  backendUrl: "http://localhost:8791",
+  backendUrl: "http://localhost:8787",
   languages: "en,zh-Hans,zh-Hant,zh",
   toLang: "zh-CN",
   segmentation: "rule",
@@ -129,10 +129,30 @@ function cancelActiveLoad() {
   loadAbortController = null;
 }
 
+// bridge.js runs in the page's MAIN world; event details cross worlds as JSON
+// strings because object details are not reliably readable across worlds.
+function parseBridgeDetail(raw) {
+  if (typeof raw !== "string") return raw && typeof raw === "object" ? raw : null;
+  try { return JSON.parse(raw); } catch { return null; }
+}
+
+function hasBrowserSubtitles(detail) {
+  return Boolean(detail && (
+    (Array.isArray(detail.events) && detail.events.length)
+    || (Array.isArray(detail.cues) && detail.cues.length)
+  ));
+}
+
 function acceptBrowserSubtitles(event) {
-  const detail = event.detail;
-  if (!detail?.videoId || detail.videoId !== videoId() || !Array.isArray(detail.cues)) return;
+  const detail = parseBridgeDetail(event.detail);
+  if (!detail?.videoId || detail.videoId !== videoId() || !hasBrowserSubtitles(detail)) return;
   browserSubtitleCache = detail;
+}
+
+function requestBrowserSubtitles(id, languages) {
+  window.dispatchEvent(new CustomEvent("yts-request-subtitles", {
+    detail: JSON.stringify({ videoId: id, languages }),
+  }));
 }
 
 function waitForBrowserSubtitles(id, signal, timeout = 8000) {
@@ -147,7 +167,8 @@ function waitForBrowserSubtitles(id, signal, timeout = 8000) {
     };
     const onAbort = () => finish(null);
     const onEvent = event => {
-      if (event.detail?.videoId === id) finish(event.detail);
+      const detail = parseBridgeDetail(event.detail);
+      if (detail?.videoId === id && hasBrowserSubtitles(detail)) finish(detail);
     };
     timer = setTimeout(() => finish(browserSubtitleCache?.videoId === id ? browserSubtitleCache : null), timeout);
     signal?.addEventListener("abort", onAbort, { once: true });
@@ -299,21 +320,21 @@ async function load(pageUrl) {
       .split(",")
       .map(value => value.trim())
       .filter(Boolean);
+    const pageVideoId = vidFromUrl(pageUrl);
+    // Let bridge.js start capturing YouTube's own captions in parallel; they
+    // are only used if the backend (yt-dlp) cannot provide a track.
+    requestBrowserSubtitles(pageVideoId, langs);
     const params = new URLSearchParams({ url: pageUrl, languages: langs.join(",") });
     const tracksResponse = await fetch(`${baseUrl}/api/subtitle/tracks?${params}`, {
       signal: controller.signal,
     });
     let tr = { tracks: [] };
+    let tracksError = null;
     if (tracksResponse.ok) {
       tr = await tracksResponse.json();
     } else {
-      // If yt-dlp is blocked with HTTP 400, give YouTube's own player a
-      // moment to provide the timed-text response captured by bridge.js.
-      await waitForBrowserSubtitles(vidFromUrl(pageUrl), controller.signal);
-      if (!browserSubtitleCache || browserSubtitleCache.videoId !== vidFromUrl(pageUrl)) {
-        const error = await tracksResponse.json().catch(() => ({}));
-        throw new Error(error.detail || `Backend ${tracksResponse.status}`);
-      }
+      const error = await tracksResponse.json().catch(() => ({}));
+      tracksError = new Error(error.detail || `Backend ${tracksResponse.status}`);
     }
 
     let track = null;
@@ -326,9 +347,22 @@ async function load(pageUrl) {
       if (track) break;
     }
     if (!track) track = tr.tracks[0];
-    if (!track && !settings.whisperEnabled && (!browserSubtitleCache || browserSubtitleCache.videoId !== vidFromUrl(pageUrl))) {
-      showStatus("没有找到匹配字幕，可在设置中启用 Whisper", "error");
-      return;
+
+    // Fallback: yt-dlp is blocked (e.g. HTTP 400 bot check) or found no
+    // track. Give YouTube's own player a moment to provide its captions.
+    let browserSubs = null;
+    if (!track) {
+      showStatus("后端无法获取字幕，正在尝试读取播放器字幕…");
+      browserSubs = await waitForBrowserSubtitles(pageVideoId, controller.signal);
+      if (generation !== loadGeneration) return;
+      if (browserSubs?.videoId !== pageVideoId || !hasBrowserSubtitles(browserSubs)) browserSubs = null;
+    }
+    if (!track && !browserSubs) {
+      if (tracksError && !settings.whisperEnabled) throw tracksError;
+      if (!settings.whisperEnabled) {
+        showStatus("没有找到匹配字幕，可在设置中启用 Whisper", "error");
+        return;
+      }
     }
 
     const body = {
@@ -337,11 +371,14 @@ async function load(pageUrl) {
       allow_automatic: true,
       segmentation: settings.segmentation||"rule",
     };
-    if (browserSubtitleCache?.videoId === vidFromUrl(pageUrl)) {
-      body.source_cues = browserSubtitleCache.cues;
-      body.source_video_id = browserSubtitleCache.videoId;
-      body.source_title = browserSubtitleCache.title;
-      body.source_language = browserSubtitleCache.language;
+    if (browserSubs) {
+      if (browserSubs.events?.length) body.source_events = browserSubs.events;
+      else body.source_cues = browserSubs.cues;
+      body.source_video_id = browserSubs.videoId;
+      body.source_title = browserSubs.title || document.title.replace(/ - YouTube$/, "");
+      body.source_language = browserSubs.language;
+      body.languages = [browserSubs.language].filter(l => l && l !== "auto");
+      if (!body.languages.length) body.languages = langs;
     }
     if (track) body.language = track.language;
     if (settings.autoTranslate !== false && settings.toLang) {
@@ -361,7 +398,9 @@ async function load(pageUrl) {
       if (settings.whisperLanguage) body.whisper_language = settings.whisperLanguage;
     }
 
-    showStatus(track ? "正在处理并流式翻译字幕…" : "没有字幕，正在使用 Whisper 转写…");
+    showStatus(
+      track || browserSubs ? "正在处理并流式翻译字幕…" : "没有字幕，正在使用 Whisper 转写…",
+    );
     let totalCues = 0;
     let restoredCues = 0;
     let streamDone = false;
@@ -614,10 +653,6 @@ chrome.storage.local.get(["ytsSettings"], d => {
   // Enabling translation is intentionally page-local. Every fresh page load
   // starts off, preventing an automatic API request before the user opts in.
   const storedSettings = { ...(d.ytsSettings || {}) };
-  if (storedSettings.backendUrl === "http://localhost:8787") {
-    storedSettings.backendUrl = DEF.backendUrl;
-    chrome.storage.local.set({ ytsSettings: storedSettings });
-  }
   settings = { ...DEF, ...storedSettings, enabled:false };
   syncStyle(); findV();
   injectToggle();

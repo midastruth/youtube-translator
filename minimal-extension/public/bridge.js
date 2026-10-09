@@ -1,82 +1,150 @@
 /* Capture YouTube's own timed-text response before yt-dlp needs to access it.
  * This runs in the page's MAIN world. It is a fallback for servers whose IP is
  * challenged by YouTube; no cookies or credentials leave the browser.
+ *
+ * Protocol (details are JSON strings so they cross Chrome/Firefox worlds):
+ *   content.js → bridge: "yts-request-subtitles" {videoId, languages}
+ *   bridge → content.js: "yts-browser-subtitles" {videoId, title, language, events?, cues?}
  */
 (() => {
   const EVENT = "yts-browser-subtitles";
-  const videoId = () => {
+  const REQUEST = "yts-request-subtitles";
+  const POLL_INTERVAL_MS = 500;
+  const POLL_ATTEMPTS = 30;
+  const MAX_CAPTURED = 5;
+
+  let languages = ["en", "zh-Hans", "zh-Hant", "zh"];
+  // videoId -> { detail, rank, direct }
+  const captured = new Map();
+  let pollTimer = null;
+  let pollVideoId = "";
+
+  const originalFetch = window.fetch;
+
+  const currentVideoId = () => {
     try { return new URL(location.href).searchParams.get("v") || ""; } catch { return ""; }
   };
 
-  const emit = (cues, language = "auto") => {
-    const clean = cues.filter(c => c && Number.isFinite(c.start) && Number.isFinite(c.end) && c.text);
-    if (!clean.length || !videoId()) return;
+  const langRank = (code) => {
+    const value = String(code || "").toLowerCase();
+    if (!value || value === "auto") return languages.length + 1;
+    const exact = languages.findIndex(l => l.toLowerCase() === value);
+    if (exact >= 0) return exact;
+    const prefix = value.split("-")[0];
+    const related = languages.findIndex(l => l.toLowerCase().split("-")[0] === prefix);
+    return related >= 0 ? related : languages.length;
+  };
+
+  const emit = (detail) => {
+    window.dispatchEvent(new CustomEvent(EVENT, { detail: JSON.stringify(detail) }));
+  };
+
+  /** Keep the best-ranked capture per video; announce it if it is current. */
+  const store = (videoId, language, payload, direct = false) => {
+    if (!videoId) return;
+    const hasEvents = payload.events?.length;
+    const hasCues = payload.cues?.length;
+    if (!hasEvents && !hasCues) return;
+
+    const rank = langRank(language);
+    const previous = captured.get(videoId);
+    if (previous && previous.rank <= rank) {
+      if (direct) previous.direct = true;
+      return;
+    }
     const detail = {
-      videoId: videoId(),
-      title: document.title.replace(/ - YouTube$/, ""),
-      language,
-      cues: clean,
+      videoId,
+      title: videoId === currentVideoId() ? document.title.replace(/ - YouTube$/, "") : "",
+      language: language || "auto",
+      ...payload,
     };
-    window.__YTS_BROWSER_SUBTITLES = detail;
-    window.dispatchEvent(new CustomEvent(EVENT, { detail }));
+    captured.delete(videoId);
+    captured.set(videoId, { detail, rank, direct: direct || previous?.direct || false });
+    while (captured.size > MAX_CAPTURED) captured.delete(captured.keys().next().value);
+    if (videoId === currentVideoId()) emit(detail);
   };
 
-  const json3 = (data) => {
-    const cues = [];
-    for (const event of data?.events || []) {
-      const text = (event.segs || []).map(s => s.utf8 || "").join("").replace(/\s+/g, " ").trim();
-      const start = Number(event.tStartMs);
-      const duration = Number(event.dDurationMs || 0);
-      if (text && Number.isFinite(start) && duration > 0) cues.push({ start, end: start + duration, text });
-    }
-    return cues;
-  };
+  // ── parsing ─────────────────────────────────────────────
 
-  const xml = (value) => {
+  /** Keep json3 events intact so the backend can use word-level timings. */
+  const json3Events = (data) => (data?.events || []).filter(event => (
+    Number.isFinite(Number(event?.tStartMs)) && Array.isArray(event?.segs)
+  )).map(event => {
+    const out = {
+      tStartMs: Number(event.tStartMs),
+      dDurationMs: Number(event.dDurationMs || 0),
+      segs: event.segs.map(seg => {
+        const s = { utf8: String(seg?.utf8 ?? "") };
+        if (Number.isFinite(Number(seg?.tOffsetMs))) s.tOffsetMs = Number(seg.tOffsetMs);
+        return s;
+      }),
+    };
+    if (event.aAppend === 1) out.aAppend = 1;
+    return out;
+  });
+
+  const xmlCues = (value) => {
     const doc = new DOMParser().parseFromString(value, "text/xml");
-    return [...doc.querySelectorAll("text")].map(node => ({
-      start: Number(node.getAttribute("start")) * 1000,
-      end: (Number(node.getAttribute("start")) + Number(node.getAttribute("dur") || 0)) * 1000,
-      text: node.textContent.replace(/\s+/g, " ").trim(),
-    })).filter(c => c.end > c.start);
+    return [...doc.querySelectorAll("text")].map(node => {
+      const start = Number(node.getAttribute("start"));
+      const dur = Number(node.getAttribute("dur") || 0);
+      return {
+        start: start * 1000,
+        end: (start + dur) * 1000,
+        text: node.textContent.replace(/\s+/g, " ").trim(),
+      };
+    }).filter(c => Number.isFinite(c.start) && c.end > c.start && c.text);
   };
 
-  const parse = async (response, url) => {
-    const type = (response.headers.get("content-type") || "").toLowerCase();
-    const raw = await response.clone().text();
-    let cues = [];
-    if (type.includes("json") || raw.trim().startsWith("{")) {
-      try { cues = json3(JSON.parse(raw)); } catch { /* try XML below */ }
+  const parseRaw = (raw) => {
+    const text = String(raw || "").trim();
+    if (text.startsWith("{")) {
+      try {
+        const events = json3Events(JSON.parse(text));
+        if (events.length) return { events };
+      } catch { /* fall through */ }
     }
-    if (!cues.length && raw.trim().startsWith("<")) cues = xml(raw);
-    if (!cues.length) return;
-    const lang = new URL(url, location.href).searchParams.get("lang") || "auto";
-    emit(cues, lang);
+    if (text.startsWith("<")) {
+      const cues = xmlCues(text);
+      if (cues.length) return { cues };
+    }
+    return null;
   };
 
-  const preferredLanguages = () => ["en", "zh-Hans", "zh-Hant", "zh"];
-  const fetchPlayerTrack = async () => {
-    const tracks = window.ytInitialPlayerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
-    if (!tracks.length || !videoId()) return;
-    const preferred = preferredLanguages();
-    const track = preferred.map(language => tracks.find(item => (
-      item.languageCode?.toLowerCase() === language.toLowerCase()
-      || item.languageCode?.toLowerCase().split("-")[0] === language.toLowerCase().split("-")[0]
-    ))).find(Boolean) || tracks[0];
-    if (!track?.baseUrl) return;
+  /** Only original-language timedtext responses; skip YouTube auto-translations. */
+  const captionInfo = (url) => {
     try {
-      const response = await originalFetch(track.baseUrl, { credentials: "include" });
-      const raw = await response.text();
-      const cues = raw.trim().startsWith("{") ? json3(JSON.parse(raw)) : xml(raw);
-      if (cues.length) emit(cues, track.languageCode || "auto");
-    } catch { /* YouTube may reject this track; network interception can still work. */ }
+      const parsed = new URL(url, location.href);
+      if (!/\/api\/timedtext/i.test(parsed.pathname)) return null;
+      if (parsed.searchParams.get("tlang")) return null;
+      return {
+        videoId: parsed.searchParams.get("v") || "",
+        language: parsed.searchParams.get("lang") || "auto",
+      };
+    } catch {
+      return null;
+    }
   };
 
-  const originalFetch = window.fetch;
+  const handleRaw = (raw, url, direct = false) => {
+    const info = captionInfo(url);
+    if (!info?.videoId) return false;
+    const payload = parseRaw(raw);
+    if (!payload) return false;
+    store(info.videoId, info.language, payload, direct);
+    return true;
+  };
+
+  // ── passive interception ────────────────────────────────
+
   window.fetch = async function(...args) {
     const response = await originalFetch.apply(this, args);
-    const url = typeof args[0] === "string" ? args[0] : args[0]?.url || "";
-    if (/timedtext|caption/i.test(url)) parse(response, url).catch(() => {});
+    try {
+      const url = typeof args[0] === "string" ? args[0] : args[0]?.url || String(args[0] || "");
+      if (captionInfo(url)) {
+        response.clone().text().then(raw => handleRaw(raw, url)).catch(() => {});
+      }
+    } catch { /* never break the page's fetch */ }
     return response;
   };
 
@@ -87,22 +155,101 @@
     return open.call(this, method, url, ...rest);
   };
   XMLHttpRequest.prototype.send = function(...args) {
-    if (/timedtext|caption/i.test(this.__ytsCaptionUrl || "")) {
+    if (captionInfo(this.__ytsCaptionUrl || "")) {
       this.addEventListener("load", () => {
-        const raw = String(this.responseText || "");
-        const url = this.__ytsCaptionUrl;
-        let cues = [];
-        if (raw.trim().startsWith("{")) { try { cues = json3(JSON.parse(raw)); } catch {} }
-        if (!cues.length && raw.trim().startsWith("<")) cues = xml(raw);
-        if (cues.length) emit(cues, new URL(url, location.href).searchParams.get("lang") || "auto");
+        try {
+          if (this.responseType && this.responseType !== "text") return;
+          handleRaw(this.responseText, this.__ytsCaptionUrl);
+        } catch { /* ignore */ }
       });
     }
     return send.apply(this, args);
   };
 
-  let attempts = 0;
-  const poll = setInterval(() => {
-    fetchPlayerTrack();
-    if (++attempts >= 30) clearInterval(poll);
-  }, 500);
+  // ── active fetch from the current player response ───────
+
+  /** ytInitialPlayerResponse is stale after SPA navigation; prefer the player. */
+  const playerResponse = (videoId) => {
+    const candidates = [];
+    try { candidates.push(document.getElementById("movie_player")?.getPlayerResponse?.()); } catch {}
+    candidates.push(window.ytInitialPlayerResponse);
+    return candidates.find(r => r?.videoDetails?.videoId === videoId) || null;
+  };
+
+  const pickTrack = (tracks) => {
+    const usable = tracks.filter(t => t?.baseUrl);
+    if (!usable.length) return null;
+    // Manual tracks before ASR; then user language priority.
+    return [...usable].sort((a, b) => (
+      (a.kind === "asr") - (b.kind === "asr")
+      || langRank(a.languageCode) - langRank(b.languageCode)
+    ))[0];
+  };
+
+  const fetchPlayerTrack = async (videoId) => {
+    const response = playerResponse(videoId);
+    if (!response) return false;
+    const tracks = response.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
+    const track = pickTrack(tracks);
+    if (!track) return true; // player loaded, video simply has no captions
+    try {
+      const url = new URL(track.baseUrl, location.href);
+      url.searchParams.set("fmt", "json3");
+      const r = await originalFetch(url.toString(), { credentials: "include" });
+      if (!r.ok) return false;
+      const raw = await r.text();
+      // baseUrl may lack v=; attribute the result to the requested video.
+      if (!url.searchParams.get("v")) url.searchParams.set("v", videoId);
+      if (!url.searchParams.get("lang")) url.searchParams.set("lang", track.languageCode || "auto");
+      return handleRaw(raw, url.toString(), true);
+    } catch {
+      // YouTube may require a PO token for direct requests; the player's
+      // own request can still be captured by the interception above.
+      return false;
+    }
+  };
+
+  const stopPolling = () => {
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = null;
+    pollVideoId = "";
+  };
+
+  const startPolling = (videoId) => {
+    const existing = captured.get(videoId);
+    if (existing) emit(existing.detail);
+    if (existing?.direct) return;
+    if (pollTimer && pollVideoId === videoId) return;
+    stopPolling();
+    pollVideoId = videoId;
+    let attempts = 0;
+    let inFlight = false;
+    pollTimer = setInterval(async () => {
+      if (currentVideoId() !== videoId || ++attempts > POLL_ATTEMPTS) {
+        stopPolling();
+        return;
+      }
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        if (await fetchPlayerTrack(videoId)) stopPolling();
+      } finally {
+        inFlight = false;
+      }
+    }, POLL_INTERVAL_MS);
+  };
+
+  window.addEventListener(REQUEST, (event) => {
+    let detail = event.detail;
+    if (typeof detail === "string") {
+      try { detail = JSON.parse(detail); } catch { return; }
+    }
+    if (Array.isArray(detail?.languages) && detail.languages.length) {
+      languages = detail.languages.map(String);
+    }
+    const videoId = String(detail?.videoId || "");
+    if (videoId && videoId === currentVideoId()) startPolling(videoId);
+  });
+
+  window.addEventListener("yt-navigate-start", stopPolling);
 })();

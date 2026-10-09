@@ -47,6 +47,6 @@ Firefox 中临时载入的扩展会在浏览器重启后被移除；长期安装
 ## 使用
 
 1. 启动后端：`make start`（或 `docker compose up -d`）
-2. 在设置页填入后端地址（Docker 默认 `http://localhost:8791`）
+2. 在设置页填入后端地址（默认 `http://localhost:8787`；若 `.env` 设置了 `PORT`，填对应宿主机端口）
 3. 可选：填入翻译 API key、选择断句模式
 4. 打开 YouTube 视频 → 字幕自动双语显示

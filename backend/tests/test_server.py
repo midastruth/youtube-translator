@@ -660,6 +660,58 @@ class ServerErrorHandlingTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 500)
 
 
+class ServerBrowserSourceTest(unittest.TestCase):
+    """Browser-captured subtitles must go through normal segmentation."""
+
+    def _process(self, **kwargs):
+        from youtube_ingest.server import _process_subtitle_sync
+        with patch("youtube_ingest.server.fetch_metadata") as mock_fetch:
+            result = _process_subtitle_sync(
+                url="https://www.youtube.com/watch?v=browser123",
+                languages=["en"],
+                allow_automatic=True,
+                segmentation="rule",
+                **kwargs,
+            )
+            mock_fetch.assert_not_called()
+        return result
+
+    def test_source_events_are_segmented_into_sentences(self):
+        events = [
+            {"tStartMs": 0, "dDurationMs": 1000, "segs": [{"utf8": "Hello there"}]},
+            {"tStartMs": 1000, "dDurationMs": 1000, "segs": [{"utf8": "my friend."}]},
+            {"tStartMs": 2000, "dDurationMs": 1000, "segs": [{"utf8": "How are you?"}]},
+        ]
+        meta, cues = self._process(
+            source_events=events,
+            source_video_id="spoofed-id",
+            source_language="en",
+        )
+        self.assertEqual(meta["source"], "browser")
+        # Cache identity comes from the URL, not from client-supplied ids.
+        self.assertEqual(meta["video_id"], "browser123")
+        self.assertEqual([c["text"] for c in cues], [
+            "Hello there my friend.", "How are you?",
+        ])
+        self.assertEqual(cues[0]["start"], 0)
+        self.assertEqual(cues[0]["end"], 2000)
+
+    def test_source_cues_are_segmented(self):
+        cues_in = [
+            {"start": 0, "end": 1000, "text": "Hello there"},
+            {"start": 1000, "end": 2000, "text": "my friend."},
+            {"start": 5, "end": 1, "text": "invalid"},
+        ]
+        _, cues = self._process(source_cues=cues_in, source_language="en")
+        self.assertEqual([c["text"] for c in cues], ["Hello there my friend."])
+
+    def test_empty_browser_source_is_rejected(self):
+        from fastapi import HTTPException
+        with self.assertRaises(HTTPException) as ctx:
+            self._process(source_cues=[{"start": 0, "end": 0, "text": ""}])
+        self.assertEqual(ctx.exception.status_code, 422)
+
+
 class ServerResponseModelTest(unittest.TestCase):
     def test_default_languages_in_request(self):
         from youtube_ingest.server import SubtitleRequest

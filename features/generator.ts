@@ -28,6 +28,8 @@ function scenarioLines(scenario: AcceptanceIR["scenarios"][number], background: 
 
 export function generateFeature(ir: AcceptanceIR, tables = new Map<string, string[][]>(), tags = new Map<string, string[]>()) {
   const lines = [`Feature: ${ir.name}`];
-  for (const scenario of ir.scenarios) lines.push(...scenarioLines(scenario, ir.background || [], tables, tags));
+  for (const scenario of ir.scenarios) {
+    for (const line of scenarioLines(scenario, ir.background || [], tables, tags)) lines.push(line);
+  }
   return lines.join("\n") + "\n";
 }

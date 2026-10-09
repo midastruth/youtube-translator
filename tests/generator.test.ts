@@ -16,3 +16,12 @@ test("APS step text, backgrounds, and example values drive generated executable 
   assert.doesNotMatch(output, /<value>/);
   assert.throws(() => generateFeature({ name: "Bad", scenarios: [{ name: "missing", steps: [{ keyword: "Given", text: "<absent>" }], examples: [{}] }] }), /Unbound example/);
 });
+
+test("large example sets do not depend on the engine's argument-count limit", () => {
+  const examples = Array.from({ length: 80_000 }, (_, index) => ({ value: String(index) }));
+  const output = generateFeature({ name: "Large", scenarios: [{
+    name: "example <value>", steps: [{ keyword: "Given", text: "value <value>" }], examples,
+  }] });
+  assert.equal((output.match(/Scenario:/g) || []).length, examples.length);
+  assert.ok(output.includes("Scenario: example 79999\n    Given value 79999"));
+});

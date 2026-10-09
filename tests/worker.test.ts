@@ -71,6 +71,45 @@ test("a missing completion document remains a failed job, never empty success", 
   } finally { await worker.close(); await fs.rm(directory, { recursive: true, force: true }); }
 });
 
+test("durable lookup restores the committed job without changing stored metadata", async () => {
+  const directory = await fs.mkdtemp("./tmp/restore-job-");
+  const worker = new AgentWorker({ storagePath: `${directory}/db.sqlite` });
+  try {
+    assert.equal(await worker.getJob("absent"), null);
+    await worker.start();
+    const job = await worker.submitOrAttachJob({ cues: [cue], videoId: "video", translatorMock: async () => ({ c0: "你好" }) });
+    await job.taskPromise;
+    assert.equal(await worker.getJob(job.jobId), job);
+    worker.jobs.clear();
+    const restored = await worker.getJob(job.conversationId);
+    assert.ok(restored);
+    assert.equal(restored.jobKey, job.jobKey); assert.equal(restored.videoId, "video");
+    assert.equal(restored.jobId, `job-${job.conversationId}`);
+    assert.deepEqual(restored.cues, [cue]); assert.equal(restored.status, "succeeded");
+    assert.equal(await worker.getJob("absent"), null);
+  } finally { await worker.close(); await fs.rm(directory, { recursive: true, force: true }); }
+});
+
+test("a task exhausting its block budget retains already published cues", async () => {
+  const directory = await fs.mkdtemp("./tmp/budget-job-");
+  const worker = new AgentWorker({ storagePath: `${directory}/db.sqlite` });
+  try {
+    await worker.start();
+    const job = await worker.submitOrAttachJob({ cues: [cue, { ...cue, cue_id: "c1" }], budgetLimit: 1, maxCuesPerBlock: 1,
+      translatorMock: async ({ cues }) => Object.fromEntries(cues.map(cue => [cue.cue_id, "译"])),
+      reviewerMock: async () => ({ passed: true, issues: [] }),
+    });
+    await job.taskPromise;
+    assert.equal(job.status, "budget_exceeded"); assert.equal(job.error, undefined);
+    assert.ok(worker.harness);
+    const { SubtitleJobDoc } = await import("../worker/task-definition.js");
+    const doc = await worker.harness.snapshot(SubtitleJobDoc, job.conversationId, worker.context);
+    assert.equal(doc?.network_attempts, 1);
+    assert.deepEqual(doc?.published_cues.c0, { ...cue, translation: "译" });
+    assert.equal(doc?.published_cues.c1, undefined);
+  } finally { await worker.close(); await fs.rm(directory, { recursive: true, force: true }); }
+});
+
 test("HTTP snapshot reads the committed document, not a missing definition", async () => {
   await fs.mkdir("./tmp", { recursive: true });
   const directory = await fs.mkdtemp("./tmp/worker-unit-");

@@ -16,5 +16,5 @@
 ;; Generate concrete scenarios from APS IR, then execute them through the
 ;; Cucumber adapter. Original data tables/tags are retained by its official AST.
 (spit "./tmp/acceptance-sources.json" (json/generate-string sources))
-(process/check (process/shell "node" "--import" "tsx" "scripts/generate-acceptance.ts"))
-(process/check (process/shell "node" "--import" "tsx" "./tmp/acceptance-runner.ts"))
+(process/check (process/shell "node" "--import" "./scripts/register-typescript.ts" "scripts/generate-acceptance.ts"))
+(process/check (process/shell "node" "--import" "./scripts/register-typescript.ts" "./tmp/acceptance-runner.ts"))

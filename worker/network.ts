@@ -1,24 +1,38 @@
-export type Usage = { promptTokens?: number; completionTokens?: number; cost?: number };
+import { RequestBudgetTracker } from "./request-budget.js";
+export { RequestBudgetTracker, BudgetExceededError } from "./request-budget.js";
+export type { Usage } from "./request-budget.js";
+
 export type RequestFailure = Error & { statusCode?: number; status?: number; retryAfter?: string; response?: { status?: number; headers?: Record<string, string> } };
 export function requestFailure(value: unknown): RequestFailure {
   if (value instanceof Error) return value;
   const error: RequestFailure = new Error(String(value));
   if (!value || typeof value !== "object") return error;
   if ("message" in value && typeof value.message === "string") error.message = value.message;
-  if ("statusCode" in value && typeof value.statusCode === "number") error.statusCode = value.statusCode;
-  if ("status" in value && typeof value.status === "number") error.status = value.status;
-  if ("retryAfter" in value && (typeof value.retryAfter === "string" || typeof value.retryAfter === "number")) error.retryAfter = String(value.retryAfter);
-  if ("response" in value && value.response && typeof value.response === "object") {
-    const response = value.response;
-    error.response = {};
-    if ("status" in response && typeof response.status === "number") error.response.status = response.status;
-    if ("headers" in response && response.headers && typeof response.headers === "object") {
-      error.response.headers = Object.fromEntries(Object.entries(response.headers)
-        .filter((entry): entry is [string, string] => typeof entry[1] === "string"));
-    }
-  }
+  copyFailureMetadata(error, value);
   return error;
 }
+
+function copyFailureMetadata(error: RequestFailure, value: object) {
+  if ("statusCode" in value && typeof value.statusCode === "number") error.statusCode = value.statusCode;
+  if ("status" in value && typeof value.status === "number") error.status = value.status;
+  copyRetryAfter(error, value);
+  if ("response" in value && value.response && typeof value.response === "object") error.response = responseMetadata(value.response);
+}
+
+function copyRetryAfter(error: RequestFailure, value: object) {
+  if ("retryAfter" in value && (typeof value.retryAfter === "string" || typeof value.retryAfter === "number")) error.retryAfter = String(value.retryAfter);
+}
+
+function responseMetadata(response: object): NonNullable<RequestFailure["response"]> {
+  const metadata: NonNullable<RequestFailure["response"]> = {};
+  if ("status" in response && typeof response.status === "number") metadata.status = response.status;
+  if ("headers" in response && response.headers && typeof response.headers === "object") {
+    metadata.headers = Object.fromEntries(Object.entries(response.headers)
+      .filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+  }
+  return metadata;
+}
+
 export class NetworkError extends Error {
   statusCode?: number;
   retryAfter?: string;
@@ -34,22 +48,37 @@ export class NetworkError extends Error {
   }
 }
 
-export class BudgetExceededError extends Error {
-  code: string;
-  constructor(message = "Model request budget exceeded") {
-    super(message);
-    this.name = "BudgetExceededError";
-    this.code = "budget_exceeded";
-  }
+function statusOf(error: RequestFailure) {
+  return error.statusCode || error.status || error.response?.status;
 }
 
-/**
- * Executes a logical model call with bounded network retries and budget reservation.
- *
- * @param {Function} requestFn - async () => result
- * @param {Object} options - policy options
- * @returns {Promise<T>}
- */
+function nonRetryableError(error: RequestFailure): NetworkError | null {
+  const statusCode = statusOf(error);
+  if (statusCode === 401 || statusCode === 403) {
+    return new NetworkError(`Authentication or permission error (${statusCode}): ${error.message}`, {
+      statusCode, retryable: false, errorType: "auth_error",
+    });
+  }
+  if (statusCode === 400 || error.message?.includes("unsupported model") ||
+      error.message?.includes("Invalid model") || error.message?.includes("invalid parameter")) {
+    return new NetworkError(`Configuration error (${statusCode}): ${error.message}`, {
+      statusCode, retryable: false, errorType: "config_error",
+    });
+  }
+  return null;
+}
+
+function retryDelay(error: RequestFailure, attempt: number) {
+  if (statusOf(error) !== 429) return Math.min(4000, 1000 * Math.pow(2, attempt - 1));
+  const header = error.retryAfter || error.response?.headers?.["retry-after"];
+  if (header) {
+    const seconds = Number.parseFloat(header);
+    if (!Number.isNaN(seconds)) return seconds * 1000;
+  }
+  return 1000;
+}
+
+/** Executes a logical model call with bounded retries and budget reservation. */
 export async function executeWithRetryAndBudget<T>(
   requestFn: (attempt: number) => Promise<T>,
   {
@@ -60,15 +89,10 @@ export async function executeWithRetryAndBudget<T>(
   }: { maxAttempts?: number; budgetTracker?: RequestBudgetTracker | null; sleepFn?: (ms: number) => Promise<void>; onAttempt?: ((attempt: number) => void) | null } = {}
 ): Promise<T> {
   let attempt = 0;
-
   while (attempt < maxAttempts) {
-    if (budgetTracker) {
-      budgetTracker.checkAndReserve();
-    }
-
+    budgetTracker?.checkAndReserve();
     attempt++;
-    if (onAttempt) onAttempt(attempt);
-
+    onAttempt?.(attempt);
     try {
       const result = await requestFn(attempt);
       if (budgetTracker) {
@@ -77,116 +101,20 @@ export async function executeWithRetryAndBudget<T>(
       }
       return result;
     } catch (value) {
-      const err = requestFailure(value);
-      const statusCode = err.statusCode || err.status || (err.response && err.response.status);
-      const is401or403 = statusCode === 401 || statusCode === 403;
-      const isConfigError =
-        statusCode === 400 ||
-        err.message?.includes("unsupported model") ||
-        err.message?.includes("Invalid model") ||
-        err.message?.includes("invalid parameter");
-
-      // Non-retryable errors
-      if (is401or403) {
-        if (budgetTracker) budgetTracker.recordError(err, false);
-        throw new NetworkError(`Authentication or permission error (${statusCode}): ${err.message}`, {
-          statusCode,
-          retryable: false,
-          errorType: "auth_error",
-        });
+      const error = requestFailure(value);
+      const terminal = nonRetryableError(error);
+      if (terminal) {
+        budgetTracker?.recordError(error, false);
+        throw terminal;
       }
-
-      if (isConfigError) {
-        if (budgetTracker) budgetTracker.recordError(err, false);
-        throw new NetworkError(`Configuration error (${statusCode}): ${err.message}`, {
-          statusCode,
-          retryable: false,
-          errorType: "config_error",
-        });
-      }
-
-      // Check if max attempts reached
       if (attempt >= maxAttempts) {
-        if (budgetTracker) budgetTracker.recordError(err, true);
-        throw new NetworkError(
-          `Request failed after max attempts (${maxAttempts}): ${err.message}`,
-          { statusCode, retryable: false }
-        );
+        budgetTracker?.recordError(error, true);
+        throw new NetworkError(`Request failed after max attempts (${maxAttempts}): ${error.message}`, {
+          statusCode: statusOf(error), retryable: false,
+        });
       }
-
-      // Rate limit 429
-      if (statusCode === 429) {
-        let retryAfterMs = 1000;
-        const retryAfterHeader =
-          err.retryAfter || (err.response && err.response.headers && err.response.headers["retry-after"]);
-        if (retryAfterHeader) {
-          const seconds = Number.parseFloat(retryAfterHeader);
-          if (!Number.isNaN(seconds)) {
-            retryAfterMs = seconds * 1000;
-          }
-        }
-        await sleepFn(retryAfterMs);
-        continue;
-      }
-
-      // 5xx or network timeout -> exponential backoff
-      const backoffMs = Math.min(4000, 1000 * Math.pow(2, attempt - 1));
-      await sleepFn(backoffMs);
+      await sleepFn(retryDelay(error, attempt));
     }
   }
-
   throw new NetworkError(`Max attempts (${maxAttempts}) exceeded`);
-}
-
-/**
- * Budget tracker to manage external request attempt limits.
- */
-export class RequestBudgetTracker {
-  maxBudget: number;
-  attempts: number;
-  knownTokens: number;
-  knownCost: number;
-  interruptedAttempts: number;
-  constructor({ maxBudget = 12, currentAttempts = 0, knownTokens = 0, knownCost = 0, interruptedAttempts = 0 } = {}) {
-    this.maxBudget = maxBudget;
-    this.attempts = currentAttempts;
-    this.knownTokens = knownTokens;
-    this.knownCost = knownCost;
-    this.interruptedAttempts = interruptedAttempts;
-  }
-
-  checkAndReserve() {
-    if (this.attempts >= this.maxBudget) {
-      throw new BudgetExceededError(
-        `Budget limit reached: ${this.attempts}/${this.maxBudget} attempts issued`
-      );
-    }
-    this.attempts++;
-  }
-
-  recordSuccess(usage: unknown = {}) {
-    if (usage && typeof usage === "object") {
-      const prompt = "promptTokens" in usage && typeof usage.promptTokens === "number" ? usage.promptTokens : 0;
-      const completion = "completionTokens" in usage && typeof usage.completionTokens === "number" ? usage.completionTokens : 0;
-      this.knownTokens += prompt + completion;
-      this.knownCost += "cost" in usage && typeof usage.cost === "number" ? usage.cost : 0;
-    }
-  }
-
-  recordError(err: unknown, wasInterrupted = false) {
-    if (wasInterrupted) {
-      this.interruptedAttempts++;
-    }
-  }
-
-  getUsageReport() {
-    return {
-      totalAttempts: this.attempts,
-      maxBudget: this.maxBudget,
-      knownTokens: this.knownTokens,
-      knownCost: this.knownCost,
-      interruptedAttempts: this.interruptedAttempts,
-      remainingAttempts: Math.max(0, this.maxBudget - this.attempts),
-    };
-  }
 }

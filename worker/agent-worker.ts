@@ -7,7 +7,8 @@ import { openOwnedSqliteStorage } from "./storage.js";
 import { WHITELIST_TOOLS } from "./tools.js";
 import { SubtitleTranslationTask, SubtitleJobDoc, TaskMocks } from "./task-definition.js";
 import { calculateJobKey } from "./keys.js";
-import type { JobRecord, SubmitJobOptions, TaskResult, StreamEvent, PublishedCue } from "./types.js";
+import type { JobRecord, SubmitJobOptions, TaskResult, StreamEvent, JobDocument } from "./types.js";
+import { observeJobEvents } from "./job-stream.js";
 import type { TaskId, ConversationId } from "@earendil-works/pi-durable";
 
 export class AgentWorker {
@@ -116,39 +117,36 @@ export class AgentWorker {
         return job;
       }
     }
-    // Search storage
-    if (this.storage && this.harness) {
-      try {
-        const page = await this.storage.scanConversations({}, 100, undefined, this.context);
-        for (const item of page.items || []) {
-          const doc = await this.harness.snapshot(SubtitleJobDoc, item.id, this.context);
-          if (doc && (doc.job_key === jobKeyOrId || item.id === jobKeyOrId)) {
-            const emitter = new EventEmitter();
-            emitter.on("error", () => {});
-            const jobRecord: JobRecord = {
-              jobId: `job-${item.id}`,
-              jobKey: doc.job_key,
-              taskId: null,
-              conversationId: item.id,
-              videoId: doc.video_id,
-              title: "",
-              fromLang: doc.from_lang,
-              toLang: doc.to_lang,
-              cues: doc.source_cues || [],
-              status: doc.status || "succeeded",
-              emitter,
-              finalResult: doc.final_result,
-              aborted: doc.cancelled || false,
-            };
-            this.jobs.set(doc.job_key, jobRecord);
-            return jobRecord;
-          }
+    return this.findStoredJob(jobKeyOrId);
+  }
+
+  private async findStoredJob(jobKeyOrId: string | ConversationId): Promise<JobRecord | null> {
+    if (!this.storage || !this.harness) return null;
+    try {
+      const page = await this.storage.scanConversations({}, 100, undefined, this.context);
+      for (const item of page.items || []) {
+        const doc = await this.harness.snapshot(SubtitleJobDoc, item.id, this.context);
+        if (doc && (doc.job_key === jobKeyOrId || item.id === jobKeyOrId)) {
+          return this.restoreJob(item.id, doc);
         }
-      } catch {
-        // ignore scan error
       }
+    } catch {
+      // Preserve the existing best-effort storage lookup.
     }
     return null;
+  }
+
+  private restoreJob(conversationId: ConversationId, doc: JobDocument): JobRecord {
+    const emitter = new EventEmitter();
+    emitter.on("error", () => {});
+    const jobRecord: JobRecord = {
+      jobId: `job-${conversationId}`, jobKey: doc.job_key, taskId: null, conversationId,
+      videoId: doc.video_id, title: "", fromLang: doc.from_lang, toLang: doc.to_lang,
+      cues: doc.source_cues || [], status: doc.status || "succeeded", emitter,
+      finalResult: doc.final_result, aborted: doc.cancelled || false,
+    };
+    this.jobs.set(doc.job_key, jobRecord);
+    return jobRecord;
   }
 
   async submitOrAttachJob({
@@ -323,137 +321,7 @@ export class AgentWorker {
    * Observe job stream (SSE / WS style)
    */
   async *observeJobStream(jobRecord: JobRecord, { heartbeatIntervalMs = 5000, signal = null }: { heartbeatIntervalMs?: number; signal?: AbortSignal | null } = {}): AsyncGenerator<StreamEvent> {
-    const total = jobRecord.cues.length;
-    const doc = await this.activeHarness.snapshot(
-      SubtitleJobDoc,
-      jobRecord.conversationId,
-      this.context
-    );
-
-    const published = doc?.published_cues || {};
-    const completedCount = Object.keys(published).length;
-
-    // 1. Meta event
-    yield {
-      type: "meta",
-      video_id: jobRecord.videoId,
-      title: jobRecord.title,
-      from_lang: jobRecord.fromLang,
-      to_lang: jobRecord.toLang,
-      total_cues: total,
-      completed_cues: completedCount,
-    };
-
-    // 2. Source cues with stable index
-    for (let i = 0; i < total; i++) {
-      yield {
-        type: "source_cue",
-        index: i,
-        ...jobRecord.cues[i],
-      };
-    }
-
-    // 3. Already published cues marked cached: true
-    for (let i = 0; i < total; i++) {
-      const cueId = jobRecord.cues[i].cue_id;
-      if (published[cueId]) {
-        yield {
-          type: "cue",
-          index: i,
-          ...published[cueId],
-          cached: true,
-        };
-      }
-    }
-
-    // If job already terminal
-    const isTerminal =
-      doc?.status === "succeeded" ||
-      doc?.status === "partial" ||
-      doc?.status === "failed" ||
-      Boolean(doc?.final_result) ||
-      jobRecord.status === "succeeded" ||
-      jobRecord.status === "partial" ||
-      jobRecord.status === "failed";
-
-    if (isTerminal) {
-      const failed = doc?.final_result?.failed_cues ?? 0;
-      yield {
-        type: "done",
-        total_cues: total,
-        failed_cues: failed,
-      };
-      return;
-    }
-
-    if (doc?.status === "cancelled" || jobRecord.status === "cancelled") {
-      yield {
-        type: "error",
-        code: "task_cancelled",
-        detail: "Translation task was cancelled",
-      };
-      return;
-    }
-
-    // Listen for live events with heartbeats
-    const queue: StreamEvent[] = [];
-    let resolveNext: ((value?: string) => void) | null = null;
-
-    const push = (item: StreamEvent) => {
-      queue.push(item);
-      if (resolveNext) {
-        const r = resolveNext;
-        resolveNext = null;
-        r();
-      }
-    };
-
-    const cueListener = (cue: PublishedCue) => push({ type: "cue", index: cue.index, ...cue, cached: false });
-    const doneListener = (done: { total_cues: number; failed_cues: number }) => push({ type: "done", ...done });
-    const errListener = (err: unknown) => push({ type: "error", detail: err instanceof Error ? err.message : String(err) });
-
-    jobRecord.emitter.on("cue", cueListener);
-    jobRecord.emitter.on("done", doneListener);
-    jobRecord.emitter.on("error", errListener);
-
-    try {
-      let isDone = false;
-      while (!isDone) {
-        if (signal?.aborted) {
-          // Browser disconnect only detaches observation, does not abort job
-          break;
-        }
-
-        if (queue.length > 0) {
-          const item = queue.shift()!;
-          yield item;
-          if (item.type === "done" || item.type === "error") {
-            isDone = true;
-          }
-          continue;
-        }
-
-        // Wait for next item or heartbeat
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        const waitPromise = new Promise<string | undefined>((resolve) => {
-          resolveNext = resolve;
-          timer = setTimeout(() => {
-            resolveNext = null;
-            resolve("keepalive");
-          }, heartbeatIntervalMs);
-        });
-
-        const res = await waitPromise;
-        clearTimeout(timer);
-
-        if (res === "keepalive" && queue.length === 0) {
-          yield { type: "keepalive" };
-        }
-      }
-    } finally {
-      jobRecord.emitter.off("cue", cueListener);
-      jobRecord.emitter.off("done", doneListener);
-      jobRecord.emitter.off("error", errListener);
-    }
+    const doc = await this.activeHarness.snapshot(SubtitleJobDoc, jobRecord.conversationId, this.context);
+    yield* observeJobEvents(doc, jobRecord, { heartbeatIntervalMs, signal });
   }
 }

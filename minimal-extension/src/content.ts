@@ -1,10 +1,13 @@
 /* YouTube Subtitle Translator — Content Script */
 import { parseBrowserSubtitles, displayError } from "./types.js";
-import type { ExtensionSettings, StoredSettings, Subtitle, BrowserSubtitles, StreamRequest, SubtitleEvent, DisplayError } from "./types.js";
+import type { ExtensionSettings, StoredSettings, Subtitle, BrowserSubtitles, DisplayError } from "./types.js";
+import { exportableSubtitles, formatVtt, subtitleIndexAt, videoIdFromUrl } from "./subtitles.js";
+import type { PendingSubtitle } from "./subtitles.js";
+import { buildStreamRequest, hasBrowserSubtitles, selectBackendTrack } from "./stream-request.js";
+import { apiStream } from "./subtitle-stream.js";
 
 const CID = "yts-overlay";
 
-type PendingSubtitle = Omit<Subtitle, "start" | "end"> & Partial<Pick<Subtitle, "start" | "end">>;
 let videoEl: HTMLVideoElement | null = null, subtitles: PendingSubtitle[] = [], ci = -1;
 let observer: MutationObserver | null = null;
 let settings: ExtensionSettings;
@@ -65,50 +68,6 @@ function syncStyle() {
 
 // ── API ────────────────────────────────────────────────────
 
-async function apiStream(path: string, body: StreamRequest, signal: AbortSignal, onEvent: (event: SubtitleEvent) => void) {
-  const baseUrl = (settings.backendUrl || DEF.backendUrl).replace(/\/+$/, "");
-  const url = `${baseUrl}${path}`;
-  const r = await fetch(url, {
-    method:"POST",
-    headers:{"Content-Type":"application/json", "Accept":"text/event-stream"},
-    body:JSON.stringify(body),
-    signal,
-  });
-  if (!r.ok) {
-    const error = await r.json().catch(() => ({}));
-    throw new Error(error.detail || `Backend ${r.status}`);
-  }
-  if (!r.body) throw new Error("浏览器不支持流式字幕响应");
-
-  const reader = r.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-
-  const consumeFrame = (frame: string) => {
-    const data = frame
-      .split("\n")
-      .filter(line => line.startsWith("data:"))
-      .map(line => line.slice(5).trimStart())
-      .join("\n");
-    if (!data) return;
-    onEvent(JSON.parse(data));
-  };
-
-  while (true) {
-    const { value, done } = await reader.read();
-    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
-    buffer = buffer.replace(/\r\n/g, "\n");
-    let boundary = buffer.indexOf("\n\n");
-    while (boundary >= 0) {
-      consumeFrame(buffer.slice(0, boundary));
-      buffer = buffer.slice(boundary + 2);
-      boundary = buffer.indexOf("\n\n");
-    }
-    if (done) break;
-  }
-  if (buffer.trim()) consumeFrame(buffer);
-}
-
 function waitForRetry(delay: number, signal: AbortSignal) {
   return new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -135,16 +94,17 @@ function cancelActiveLoad() {
   loadAbortController = null;
 }
 
+function hideTranslation() {
+  cancelActiveLoad();
+  clearStatus();
+  subtitles = []; ci = -1; refresh();
+  const el = document.getElementById(CID);
+  if (el) el.style.display = "none";
+}
+
 // bridge.js runs in the page's MAIN world; event details cross worlds as JSON
 // strings because object details are not reliably readable across worlds.
 const parseBridgeDetail = parseBrowserSubtitles;
-
-function hasBrowserSubtitles(detail: BrowserSubtitles | null) {
-  return Boolean(detail && (
-    (Array.isArray(detail.events) && detail.events.length)
-    || (Array.isArray(detail.cues) && detail.cues.length)
-  ));
-}
 
 function acceptBrowserSubtitles(event: CustomEvent<unknown>) {
   const detail = parseBridgeDetail(event.detail);
@@ -296,13 +256,7 @@ function drag(el: HTMLElement) {
 // ── subtitle index ─────────────────────────────────────────
 
 function idxOf(ms: number) {
-  let lo = 0, hi = subtitles.length - 1;
-  while (lo <= hi) {
-    const m = (lo + hi) >>> 1, s = subtitles[m];
-    if (ms >= Number(s.start) && ms <= Number(s.end)) return m;
-    if (ms < Number(s.start)) hi = m - 1; else lo = m + 1;
-  }
-  return -1;
+  return subtitleIndexAt(subtitles, ms);
 }
 
 // ── load ───────────────────────────────────────────────────
@@ -323,7 +277,7 @@ async function load(pageUrl: string) {
       .split(",")
       .map(value => value.trim())
       .filter(Boolean);
-    const pageVideoId = vidFromUrl(pageUrl);
+    const pageVideoId = videoIdFromUrl(pageUrl);
     // Let bridge.js start capturing YouTube's own captions in parallel; they
     // are only used if the backend (yt-dlp) cannot provide a track.
     requestBrowserSubtitles(pageVideoId, langs);
@@ -340,16 +294,7 @@ async function load(pageUrl: string) {
       tracksError = new Error(error.detail || `Backend ${tracksResponse.status}`);
     }
 
-    let track: { source: string; language: string } | undefined;
-    for (const src of ["manual","automatic"]) {
-      for (const l of langs) {
-        const p = l.split("-")[0].toLowerCase();
-        track = tr.tracks.find(t => t.source===src && t.language.toLowerCase().startsWith(p));
-        if (track) break;
-      }
-      if (track) break;
-    }
-    if (!track) track = tr.tracks[0];
+    const track = selectBackendTrack(tr.tracks, langs);
 
     // Fallback: yt-dlp is blocked (e.g. HTTP 400 bot check) or found no
     // track. Give YouTube's own player a moment to provide its captions.
@@ -368,39 +313,9 @@ async function load(pageUrl: string) {
       }
     }
 
-    const body: StreamRequest = {
-      url: pageUrl,
-      languages: track ? [track.language] : langs,
-      allow_automatic: true,
-      segmentation: settings.segmentation||"rule",
-    };
-    if (browserSubs) {
-      if (browserSubs.events?.length) body.source_events = browserSubs.events;
-      else body.source_cues = browserSubs.cues;
-      body.source_video_id = browserSubs.videoId;
-      body.source_title = browserSubs.title || document.title.replace(/ - YouTube$/, "");
-      body.source_language = browserSubs.language;
-      body.languages = [browserSubs.language].filter(l => l && l !== "auto");
-      if (!body.languages.length) body.languages = langs;
-    }
-    if (track) body.language = track.language;
-    if (settings.autoTranslate !== false && settings.toLang) {
-      body.translate_to = settings.toLang;
-      body.translate_engine = settings.translateEngine || "legacy";
-      body.translate_provider = settings.translateProvider || "openai";
-      if (settings.translateApiKey) body.translate_api_key = settings.translateApiKey;
-      if (settings.translateBaseUrl) body.translate_base_url = settings.translateBaseUrl;
-      if (settings.translateModel) body.translate_model = settings.translateModel;
-      if (settings.translateWhole) body.translate_whole = true;
-    }
-
-    if (settings.whisperEnabled) {
-      body.whisper_enabled = true;
-      if (settings.whisperApiKey) body.whisper_api_key = settings.whisperApiKey;
-      if (settings.whisperBaseUrl) body.whisper_base_url = settings.whisperBaseUrl;
-      if (settings.whisperModel) body.whisper_model = settings.whisperModel;
-      if (settings.whisperLanguage) body.whisper_language = settings.whisperLanguage;
-    }
+    const body = buildStreamRequest({
+      pageUrl, languages: langs, track, browserSubtitles: browserSubs, title: document.title, settings,
+    });
 
     showStatus(
       track || browserSubs ? "正在处理并流式翻译字幕…" : "没有字幕，正在使用 Whisper 转写…",
@@ -416,7 +331,8 @@ async function load(pageUrl: string) {
       failedCues = 0;
       translated.clear();
 
-      await apiStream("/api/subtitle/stream", body, controller.signal, event => {
+      const streamBaseUrl = (settings.backendUrl || DEF.backendUrl).replace(/\/+$/, "");
+      await apiStream(streamBaseUrl, "/api/subtitle/stream", body, controller.signal, event => {
         if (generation !== loadGeneration || settings.enabled === false) return;
 
         if (event.type === "meta") {
@@ -547,39 +463,24 @@ function findV() {
     load(`https://www.youtube.com/watch?v=${vid}`);
   }
 }
-function videoId() { try { return new URL(location.href).searchParams.get("v")||""; } catch { return ""; } }
-function vidFromUrl(url: string) { try { return new URL(url).searchParams.get("v") || ""; } catch { return ""; } }
+function videoId() { return videoIdFromUrl(location.href); }
 
 // ── download VTT ───────────────────────────────────────────
 
 function downloadVtt() {
-  const exportable = subtitles.filter((s): s is Subtitle => (
-    s && Number.isFinite(Number(s.start)) && Number.isFinite(Number(s.end)) && Boolean(s.text)
-  ));
+  const exportable = exportableSubtitles(subtitles);
   if (!exportable.length) {
     const error = "还没有可导出的字幕，请先开启翻译并等待字幕加载";
     showStatus(error, "error", 4000);
     return { ok:false, error };
   }
-  const lines = ["WEBVTT",""];
-  exportable.forEach((s,i) => {
-    const st = msVtt(s.start), en = msVtt(s.end);
-    lines.push(`${i+1}`, `${st} --> ${en}`, s.text);
-    if (s.translation) lines.push(s.translation);
-    lines.push("");
-  });
-  const b = new Blob([lines.join("\n")], { type:"text/vtt;charset=utf-8" });
+  const b = new Blob([formatVtt(exportable)], { type:"text/vtt;charset=utf-8" });
   const u = URL.createObjectURL(b);
   const filename = `youtube_${videoId() || "subtitles"}_${Date.now()}.vtt`;
   const a = document.createElement("a"); a.href = u; a.download = filename; a.click();
   setTimeout(() => URL.revokeObjectURL(u), 1000);
   showStatus(`已导出 ${exportable.length} 条字幕`, "success", 2500);
   return { ok:true, count:exportable.length, filename };
-}
-function msVtt(ms: number) {
-  const s = ms/1000;
-  const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), sec = (s%60).toFixed(3).padStart(6,"0");
-  return h>0 ? `${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}:${sec}` : `${String(m).padStart(2,"0")}:${sec}`;
 }
 
 // ── messages ───────────────────────────────────────────────
@@ -617,11 +518,7 @@ function injectToggle() {
     settings.enabled = settings.enabled === false ? true : false;
     updateToggleIcon(btn);
     if (settings.enabled === false) {
-      cancelActiveLoad();
-      clearStatus();
-      subtitles = []; ci = -1; refresh();
-      const el = document.getElementById(CID);
-      if (el) el.style.display = "none";
+      hideTranslation();
     } else {
       const el = document.getElementById(CID);
       if (el) el.style.display = "";
@@ -683,11 +580,7 @@ chrome.storage.local.get(["ytsSettings"], (d: StoredSettings) => {
     if (toggle) updateToggleIcon(toggle);
     loadedVideoId = "";
     browserSubtitleCache = null;
-    cancelActiveLoad();
-    clearStatus();
-    subtitles = []; ci = -1; refresh();
-    const el = document.getElementById(CID);
-    if (el) el.style.display = "none";
+    hideTranslation();
     setTimeout(() => { injectToggle(); findV(); }, 1000);
   });
 });
@@ -714,10 +607,7 @@ chrome.storage.onChanged.addListener(changes => {
       return;
     }
     if (settings.enabled === false) {
-      cancelActiveLoad();
-      clearStatus();
-      subtitles = []; ci = -1; refresh();
-      const el = document.getElementById(CID); if (el) el.style.display = "none";
+      hideTranslation();
     } else {
       const el = document.getElementById(CID); if (el) el.style.display = "";
       loadedVideoId = "";

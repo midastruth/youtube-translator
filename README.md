@@ -109,6 +109,9 @@ npm run build           # dist/worker/*.js + minimal-extension/public/*.js
 npm run worker          # 自行构建并启动真实内部 HTTP 服务
 npm run test:unit       # 独立单元测试
 npm test                # 单元测试 + 原有和新增 Gherkin 验收
+npm run test:property   # 单独运行固定种子的 fast-check 属性测试
+npm run verify          # npm test 后再显式运行属性测试
+npm run test:coverage   # 普通单元覆盖率，不包含属性测试
 ```
 
 worker 默认端口 `8788`，数据库默认 `./cache/worker-storage.db`；可通过
@@ -121,6 +124,12 @@ SwarmForge 环境可先运行 `swarm_tool.sh require gherkin-parser`，缺失时
 APS 解析、Babashka 入口生成及生成的可执行测试；Cucumber 是运行器适配层，
 测试的场景、步骤与 Examples 来自 APS IR；适配层保留原数据表和标签
 （APS IR 目前未携带这些信息），并校验生成场景数量。
+测试和验收的 TS 源码由 Node 原生类型擦除加载；`scripts/register-typescript.ts`
+只将不存在的相对 `.js` 源码导入解析到 `.ts`，保留覆盖率的源码位置。
+构建仍使用 esbuild，浏览器和 worker 发布入口仍为生成的 JS。
+覆盖率针对 worker 和抽出的无 DOM 字幕模块；浏览器适配脚本由真实构建产物的边界测试验证，
+不将它们计入源码覆盖率。详见 `docs/acceptance/typescript-refactoring.md`。
+
 测试夹具在 `./tmp/` 隔离真实 HTTP/数据库以及受控 DOM、浏览器 API 与播放器边界，
 不请求真实模型，也不声称已在真实浏览器安装验证或证明翻译质量改善。
 

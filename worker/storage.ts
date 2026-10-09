@@ -24,43 +24,7 @@ export class StorageOwnershipManager {
   acquire() {
     fs.mkdirSync(path.dirname(this.storagePath), { recursive: true });
 
-    if (fs.existsSync(this.lockPath)) {
-      try {
-        const content = fs.readFileSync(this.lockPath, "utf-8");
-        const data = JSON.parse(content);
-        if (data.workerId !== this.workerId) {
-          let isAlive = false;
-          try {
-            if (data.pid) {
-              process.kill(data.pid, 0);
-              isAlive = true;
-            }
-          } catch {
-            isAlive = false;
-          }
-
-          if (isAlive) {
-            const conflictMsg = `Storage ownership conflict: storage ${this.storagePath} is already owned by worker ${data.workerId} (pid ${data.pid})`;
-            console.error(conflictMsg);
-            throw new StorageOwnershipConflictError(conflictMsg);
-          }
-        }
-        // If not alive or same worker, remove stale lock
-        try {
-          fs.unlinkSync(this.lockPath);
-        } catch {}
-      } catch (err) {
-        if (err instanceof StorageOwnershipConflictError) {
-          throw err;
-        }
-        // If file was corrupted or previous process died, remove stale lock
-        try {
-          fs.unlinkSync(this.lockPath);
-        } catch {
-          // ignore
-        }
-      }
-    }
+    this.removeStaleOwner();
 
     try {
       const lockData = {
@@ -80,6 +44,26 @@ export class StorageOwnershipManager {
     }
   }
 
+  private removeStaleOwner() {
+    if (!fs.existsSync(this.lockPath)) return;
+    try {
+      const data = JSON.parse(fs.readFileSync(this.lockPath, "utf-8"));
+      if (data.workerId !== this.workerId && ownerIsAlive(data)) {
+        const message = `Storage ownership conflict: storage ${this.storagePath} is already owned by worker ${data.workerId} (pid ${data.pid})`;
+        console.error(message);
+        throw new StorageOwnershipConflictError(message);
+      }
+      this.unlinkOwner();
+    } catch (error) {
+      if (error instanceof StorageOwnershipConflictError) throw error;
+      this.unlinkOwner();
+    }
+  }
+
+  private unlinkOwner() {
+    try { fs.unlinkSync(this.lockPath); } catch { /* Already removed or inaccessible. */ }
+  }
+
   release() {
     if (this.acquired && fs.existsSync(this.lockPath)) {
       try {
@@ -89,6 +73,16 @@ export class StorageOwnershipManager {
       }
       this.acquired = false;
     }
+  }
+}
+
+function ownerIsAlive(owner: { pid?: number }) {
+  try {
+    if (!owner.pid) return false;
+    process.kill(owner.pid, 0);
+    return true;
+  } catch {
+    return false;
   }
 }
 

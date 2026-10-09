@@ -1,5 +1,7 @@
 import { defineTool } from "@earendil-works/pi-durable";
 import { Type } from "@earendil-works/pi-ai";
+import { glossaryQuery } from "./glossary.js";
+import { mappingStructure } from "./validator.js";
 
 /**
  * Whitelisted tool: read_context
@@ -39,24 +41,11 @@ export const queryGlossaryTool = defineTool({
   }),
   replay: "safe",
   execute: async (args, api) => {
-    const term = (args.term || "").trim().toLowerCase();
-    // Default known domain terms, can be augmented from runtime
-    let match = null;
-    if (term.includes("transaction")) {
-      match = "事务";
-    } else if (term.includes("embedding")) {
-      match = "嵌入";
-    }
-
     return {
       content: [
         {
           type: "text",
-          text: JSON.stringify({
-            term: args.term,
-            translation: match,
-            context: match ? "approved" : "unmatched",
-          }),
+          text: JSON.stringify(glossaryQuery(args.term)),
         },
       ],
     };
@@ -80,17 +69,14 @@ export const validateStructureTool = defineTool({
   }),
   replay: "safe",
   execute: async (args, api) => {
-    const mappings = args.mappings || [];
-    const valid = mappings.every(
-      (m) => m.cue_id && m.translation && m.translation.trim().length > 0
-    );
+    const { valid, count } = mappingStructure(args.mappings || []);
     return {
       content: [
         {
           type: "text",
           text: JSON.stringify({
             valid,
-            count: mappings.length,
+            count,
           }),
         },
       ],

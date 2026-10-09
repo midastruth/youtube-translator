@@ -8,6 +8,14 @@ export function estimateTokens(text = "") {
   return Math.max(1, Math.ceil(text.length * 1.5));
 }
 
+function assertCompletePartition(blocks: { cues: unknown[] }[], expectedCount: number) {
+  let assignedCount = 0;
+  for (const block of blocks) assignedCount += block.cues.length;
+  if (assignedCount !== expectedCount) {
+    throw new Error(`Partition error: assigned ${assignedCount} cues but expected ${expectedCount}`);
+  }
+}
+
 /**
  * Partitions cues into continuous chunks that fit within the model context budget,
  * providing surrounding context without duplicate output.
@@ -65,15 +73,7 @@ export function partitionCuesIntoBlocks<T extends { text: string }>(
   }
 
   // Ensure ALL source cues belong to exactly one publish block (partition completeness)
-  let assignedCount = 0;
-  for (const b of blocks) {
-    assignedCount += b.cues.length;
-  }
-  if (assignedCount !== cues.length) {
-    throw new Error(
-      `Partition error: assigned ${assignedCount} cues but expected ${cues.length}`
-    );
-  }
+  assertCompletePartition(blocks, cues.length);
 
   // Now attach continuous contextBefore and contextAfter within budget
   return blocks.map((block, idx) => {

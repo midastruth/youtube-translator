@@ -3,9 +3,12 @@ import { partitionCuesIntoBlocks } from "./chunker.js";
 import { validateOutputMapping } from "./validator.js";
 import { reviewTranslations } from "./reviewer.js";
 
-export const TaskMocks = new Map(); // taskId -> { translatorMock, reviewerMock, revisorMock }
+import type { TaskId } from "@earendil-works/pi-durable";
+import type { JobDocument, TaskInput, TaskCheckpoint, TaskResult, ModelMocks, Draft, ReviewResult } from "./types.js";
 
-export const SubtitleJobDoc = defineDoc({
+export const TaskMocks = new Map<TaskId<TaskResult>, ModelMocks>(); // taskId -> { translatorMock, reviewerMock, revisorMock }
+
+export const SubtitleJobDoc = defineDoc<JobDocument>({
   kind: "youtube.subtitle_job",
   version: 1,
   scope: "conversation",
@@ -33,7 +36,7 @@ export const SubtitleJobDoc = defineDoc({
 /**
  * Durable Task: subtitle_translation
  */
-export const SubtitleTranslationTask = defineTask({
+export const SubtitleTranslationTask = defineTask<TaskInput, TaskCheckpoint, TaskResult>({
   name: "subtitle_translation",
   version: 1,
   initial: (input) => ({
@@ -88,6 +91,7 @@ export const SubtitleTranslationTask = defineTask({
       const block = blocks[cp.blockIndex];
       const doc = await runtime.snapshot(SubtitleJobDoc, runtime.conversationId, context);
 
+      if (!doc) throw new Error("Subtitle job document is missing");
       if (!block) {
         await runtime.commit(async () => {
           return {
@@ -134,7 +138,7 @@ export const SubtitleTranslationTask = defineTask({
       }
 
       // Generate translation draft
-      let draft = {};
+      let draft: Draft = {};
       const mocks = TaskMocks.get(task.id);
       if (mocks?.translatorMock) {
         draft = await mocks.translatorMock({
@@ -189,12 +193,13 @@ export const SubtitleTranslationTask = defineTask({
       const block = cp.blocks[cp.blockIndex];
       const doc = await runtime.snapshot(SubtitleJobDoc, runtime.conversationId, context);
 
-      let reviewResult = { passed: true, issues: [] };
+      if (!doc) throw new Error("Subtitle job document is missing");
+      let reviewResult: ReviewResult = { passed: true, issues: [] };
       const mocks = TaskMocks.get(task.id);
       if (mocks?.reviewerMock) {
         reviewResult = await mocks.reviewerMock({
           cues: block.cues,
-          draft: cp.draft,
+          draft: cp.draft || {},
           revisions: cp.revisions,
         });
       } else {
@@ -260,7 +265,7 @@ export const SubtitleTranslationTask = defineTask({
       if (mocks?.revisorMock) {
         revisedDraft = await mocks.revisorMock({
           cues: block.cues,
-          draft: cp.draft,
+          draft: cp.draft || {},
           issues: cp.issues,
           revisions: cp.revisions + 1,
         });
@@ -336,7 +341,7 @@ export const SubtitleTranslationTask = defineTask({
       // Valid: Commit published cues and update glossary
       await runtime.commit(async (tx) => {
         const d = await tx.doc(SubtitleJobDoc, runtime.conversationId);
-        for (const cue of validation.orderedCues) {
+        for (const cue of validation.orderedCues || []) {
           d.published_cues[cue.cue_id] = cue;
           if (cue.text.includes("database transaction")) {
             d.glossary["transaction"] = "事务";

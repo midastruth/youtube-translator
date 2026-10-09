@@ -1,25 +1,27 @@
+import type { StoredSettings } from "./types.js";
+
 const RANGE_KEYS = ["fontSizeOrig", "fontSizeTran", "bgOpacity"];
 
-function setVal(id, value) {
+function setVal(id: string, value: string | number) {
   const element = document.getElementById(id);
-  if (!element) return;
-  element.value = value;
+  if (!(element instanceof HTMLInputElement || element instanceof HTMLSelectElement)) return;
+  element.value = String(value);
 }
 
-function getVal(id) {
+function getVal(id: string) {
   const element = document.getElementById(id);
-  if (!element) throw new Error(`Missing options field: ${id}`);
+  if (!(element instanceof HTMLInputElement || element instanceof HTMLSelectElement)) throw new Error(`Missing options field: ${id}`);
   return element.value;
 }
 
-function updateRangeLabel(id) {
+function updateRangeLabel(id: string) {
   const span = document.getElementById(`${id}Val`);
   if (!span) return;
   span.textContent = `${getVal(id)}${id === "bgOpacity" ? "%" : "px"}`;
 }
 
 function loadSettings() {
-  chrome.storage.local.get(["ytsSettings"], (data) => {
+  chrome.storage.local.get(["ytsSettings"], (data: StoredSettings) => {
     const settings = data.ytsSettings || {};
     setVal("backendUrl", settings.backendUrl || "http://localhost:8787");
     setVal("languages", settings.languages || "en,zh-Hans,zh-Hant,zh");
@@ -54,7 +56,7 @@ function downloadVtt() {
 }
 
 function saveSettings() {
-  chrome.storage.local.get(["ytsSettings"], (data) => {
+  chrome.storage.local.get(["ytsSettings"], (data: StoredSettings) => {
     // Keep page-controlled display state such as positionY.
     const settings = { ...(data.ytsSettings || {}) };
     delete settings.enabled;
@@ -63,11 +65,11 @@ function saveSettings() {
       "translateApiKey", "translateBaseUrl", "translateModel",
       "whisperApiKey", "whisperBaseUrl", "whisperModel", "whisperLanguage",
       "origColor", "tranColor",
-    ]) {
+    ] as const) {
       settings[id] = getVal(id).trim();
     }
 
-    settings.backendUrl = settings.backendUrl.replace(/\/+$/, "") || "http://localhost:8787";
+    settings.backendUrl = (settings.backendUrl || "").replace(/\/+$/, "") || "http://localhost:8787";
     settings.translateWhole = getVal("translateWhole") === "true";
     settings.whisperEnabled = getVal("whisperEnabled") === "true";
     settings.isBilingual = getVal("isBilingual") === "true";
@@ -79,6 +81,7 @@ function saveSettings() {
 
     chrome.storage.local.set({ ytsSettings: settings }, () => {
       const message = document.getElementById("savedMsg");
+      if (!message) return;
       message.classList.remove("show");
       void message.offsetWidth;
       message.classList.add("show");
@@ -87,9 +90,9 @@ function saveSettings() {
 }
 
 for (const key of RANGE_KEYS) {
-  document.getElementById(key).addEventListener("input", () => updateRangeLabel(key));
+  document.getElementById(key)?.addEventListener("input", () => updateRangeLabel(key));
 }
-document.getElementById("downloadVttButton").addEventListener("click", downloadVtt);
-document.getElementById("saveButton").addEventListener("click", saveSettings);
+document.getElementById("downloadVttButton")?.addEventListener("click", downloadVtt);
+document.getElementById("saveButton")?.addEventListener("click", saveSettings);
 
 loadSettings();

@@ -1,3 +1,5 @@
+import type { SourceCue, Draft, ReviewIssue, ReviewResult } from "./types.js";
+
 /**
  * Reviews translated cues for semantic accuracy, negation retention, numbers/units,
  * terminology consistency, and hallucinations.
@@ -7,8 +9,8 @@
  * @param {Object} options - Review options (glossary, context)
  * @returns {Promise<{ passed: boolean, issues: Array<{ cue_id: string, reason: string, details: string }> }>}
  */
-export async function reviewTranslations(cues, translations, { glossary = {}, domain = "general" } = {}) {
-  const issues = [];
+export async function reviewTranslations(cues: SourceCue[], translations: Draft | Map<string, string> | null, { glossary = {}, domain = "general" }: { glossary?: Draft; domain?: string } = {}): Promise<ReviewResult> {
+  const issues: ReviewIssue[] = [];
   const transMap =
     translations instanceof Map
       ? translations
@@ -98,7 +100,7 @@ export async function reviewTranslations(cues, translations, { glossary = {}, do
 /**
  * Builds a targeted revision prompt for model.
  */
-export function buildRevisionPrompt({ cues, draftTranslations, issues, contextBefore = [], contextAfter = [] }) {
+export function buildRevisionPrompt({ cues, draftTranslations, issues, contextBefore = [], contextAfter = [] }: { cues: SourceCue[]; draftTranslations: Draft; issues: ReviewIssue[]; contextBefore?: SourceCue[]; contextAfter?: SourceCue[] }) {
   return {
     instruction: "Please revise the translation based on the specific review issues identified.",
     cues,

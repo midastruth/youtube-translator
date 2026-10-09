@@ -1,5 +1,7 @@
 import http from "node:http";
 import { AgentWorker } from "./agent-worker.js";
+import { SubtitleJobDoc } from "./task-definition.js";
+import type { SubmitJobOptions } from "./types.js";
 
 const PORT = Number(process.env.TRANSLATION_AGENT_PORT) || 8788;
 const STORAGE_PATH = process.env.TRANSLATION_AGENT_STORAGE || "./cache/worker-storage.db";
@@ -20,7 +22,7 @@ export async function createWorkerServer({ storagePath = STORAGE_PATH, port = PO
       return;
     }
 
-    const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+    const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
 
     try {
       if (req.method === "GET" && url.pathname === "/internal/health") {
@@ -33,7 +35,7 @@ export async function createWorkerServer({ storagePath = STORAGE_PATH, port = PO
       if (req.method === "POST" && url.pathname === "/internal/jobs") {
         let body = "";
         for await (const chunk of req) body += chunk;
-        const data = JSON.parse(body || "{}");
+        const data: SubmitJobOptions = JSON.parse(body || "{}");
 
         const job = await worker.submitOrAttachJob(data);
         res.writeHead(200, { "Content-Type": "application/json" });
@@ -83,6 +85,7 @@ export async function createWorkerServer({ storagePath = STORAGE_PATH, port = PO
         }
 
         // Snapshot
+        if (!worker.harness) throw new Error("Worker harness is not open");
         const doc = await worker.harness.snapshot(
           SubtitleJobDoc,
           job.conversationId,
@@ -115,7 +118,7 @@ export async function createWorkerServer({ storagePath = STORAGE_PATH, port = PO
     } catch (err) {
       console.error("Worker server error:", err);
       res.writeHead(500, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: err.message }));
+      res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
     }
   });
 

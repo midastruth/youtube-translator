@@ -1,4 +1,4 @@
-.PHONY: start start-backend test lint clean
+.PHONY: start start-backend test lint clean build-extension
 
 # ── 启动 ─────────────────────────────────────────────────────────────
 
@@ -30,10 +30,10 @@ docker-build:
 install:
 	cd backend && python3 -m venv .venv
 	cd backend && .venv/bin/pip install -e .
-	@echo "minimal-extension is static; no frontend dependencies to install"
+	npm ci
 
 build-extension:
-	@echo "minimal-extension/public is ready to load directly in Chrome"
+	npm run build:extension
 
 # ── 清理 ─────────────────────────────────────────────────────────────
 

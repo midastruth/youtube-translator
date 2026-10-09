@@ -6,6 +6,9 @@
  *   content.js → bridge: "yts-request-subtitles" {videoId, languages}
  *   bridge → content.js: "yts-browser-subtitles" {videoId, title, language, events?, cues?}
  */
+import { normalizeJson3, record } from "./types.js";
+import type { BrowserSubtitles, SubtitlePayload, CaptionTrack, PlayerResponse } from "./types.js";
+
 (() => {
   const EVENT = "yts-browser-subtitles";
   const REQUEST = "yts-request-subtitles";
@@ -15,8 +18,8 @@
 
   let languages = ["en", "zh-Hans", "zh-Hant", "zh"];
   // videoId -> { detail, rank, direct }
-  const captured = new Map();
-  let pollTimer = null;
+  const captured = new Map<string, { detail: BrowserSubtitles; rank: number; direct: boolean }>();
+  let pollTimer: ReturnType<typeof setInterval> | null = null;
   let pollVideoId = "";
 
   const originalFetch = window.fetch;
@@ -25,7 +28,7 @@
     try { return new URL(location.href).searchParams.get("v") || ""; } catch { return ""; }
   };
 
-  const langRank = (code) => {
+  const langRank = (code: string | undefined) => {
     const value = String(code || "").toLowerCase();
     if (!value || value === "auto") return languages.length + 1;
     const exact = languages.findIndex(l => l.toLowerCase() === value);
@@ -35,12 +38,12 @@
     return related >= 0 ? related : languages.length;
   };
 
-  const emit = (detail) => {
+  const emit = (detail: BrowserSubtitles) => {
     window.dispatchEvent(new CustomEvent(EVENT, { detail: JSON.stringify(detail) }));
   };
 
   /** Keep the best-ranked capture per video; announce it if it is current. */
-  const store = (videoId, language, payload, direct = false) => {
+  const store = (videoId: string, language: string, payload: SubtitlePayload, direct = false) => {
     if (!videoId) return;
     const hasEvents = payload.events?.length;
     const hasCues = payload.cues?.length;
@@ -60,30 +63,16 @@
     };
     captured.delete(videoId);
     captured.set(videoId, { detail, rank, direct: direct || previous?.direct || false });
-    while (captured.size > MAX_CAPTURED) captured.delete(captured.keys().next().value);
+    while (captured.size > MAX_CAPTURED) captured.delete(captured.keys().next().value!);
     if (videoId === currentVideoId()) emit(detail);
   };
 
   // ── parsing ─────────────────────────────────────────────
 
   /** Keep json3 events intact so the backend can use word-level timings. */
-  const json3Events = (data) => (data?.events || []).filter(event => (
-    Number.isFinite(Number(event?.tStartMs)) && Array.isArray(event?.segs)
-  )).map(event => {
-    const out = {
-      tStartMs: Number(event.tStartMs),
-      dDurationMs: Number(event.dDurationMs || 0),
-      segs: event.segs.map(seg => {
-        const s = { utf8: String(seg?.utf8 ?? "") };
-        if (Number.isFinite(Number(seg?.tOffsetMs))) s.tOffsetMs = Number(seg.tOffsetMs);
-        return s;
-      }),
-    };
-    if (event.aAppend === 1) out.aAppend = 1;
-    return out;
-  });
+  const json3Events = normalizeJson3;
 
-  const xmlCues = (value) => {
+  const xmlCues = (value: string) => {
     const doc = new DOMParser().parseFromString(value, "text/xml");
     return [...doc.querySelectorAll("text")].map(node => {
       const start = Number(node.getAttribute("start"));
@@ -91,12 +80,12 @@
       return {
         start: start * 1000,
         end: (start + dur) * 1000,
-        text: node.textContent.replace(/\s+/g, " ").trim(),
+        text: (node.textContent || "").replace(/\s+/g, " ").trim(),
       };
     }).filter(c => Number.isFinite(c.start) && c.end > c.start && c.text);
   };
 
-  const parseRaw = (raw) => {
+  const parseRaw = (raw: string): SubtitlePayload | null => {
     const text = String(raw || "").trim();
     if (text.startsWith("{")) {
       try {
@@ -112,7 +101,7 @@
   };
 
   /** Only original-language timedtext responses; skip YouTube auto-translations. */
-  const captionInfo = (url) => {
+  const captionInfo = (url: string) => {
     try {
       const parsed = new URL(url, location.href);
       if (!/\/api\/timedtext/i.test(parsed.pathname)) return null;
@@ -126,7 +115,7 @@
     }
   };
 
-  const handleRaw = (raw, url, direct = false) => {
+  const handleRaw = (raw: string, url: string, direct = false) => {
     const info = captionInfo(url);
     if (!info?.videoId) return false;
     const payload = parseRaw(raw);
@@ -140,9 +129,9 @@
   window.fetch = async function(...args) {
     const response = await originalFetch.apply(this, args);
     try {
-      const url = typeof args[0] === "string" ? args[0] : args[0]?.url || String(args[0] || "");
+      const url = typeof args[0] === "string" ? args[0] : args[0] instanceof Request ? args[0].url : String(args[0] || "");
       if (captionInfo(url)) {
-        response.clone().text().then(raw => handleRaw(raw, url)).catch(() => {});
+        response.clone().text().then(raw => { handleRaw(raw, url); }).catch(() => {});
       }
     } catch { /* never break the page's fetch */ }
     return response;
@@ -150,16 +139,16 @@
 
   const open = XMLHttpRequest.prototype.open;
   const send = XMLHttpRequest.prototype.send;
-  XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+  XMLHttpRequest.prototype.open = function(method: string, url: string | URL, async: boolean = true, username?: string | null, password?: string | null) {
     this.__ytsCaptionUrl = String(url || "");
-    return open.call(this, method, url, ...rest);
+    return open.call(this, method, url, async, username, password);
   };
   XMLHttpRequest.prototype.send = function(...args) {
     if (captionInfo(this.__ytsCaptionUrl || "")) {
       this.addEventListener("load", () => {
         try {
           if (this.responseType && this.responseType !== "text") return;
-          handleRaw(this.responseText, this.__ytsCaptionUrl);
+          handleRaw(this.responseText, this.__ytsCaptionUrl || "");
         } catch { /* ignore */ }
       });
     }
@@ -169,24 +158,24 @@
   // ── active fetch from the current player response ───────
 
   /** ytInitialPlayerResponse is stale after SPA navigation; prefer the player. */
-  const playerResponse = (videoId) => {
-    const candidates = [];
+  const playerResponse = (videoId: string) => {
+    const candidates: (PlayerResponse | undefined)[] = [];
     try { candidates.push(document.getElementById("movie_player")?.getPlayerResponse?.()); } catch {}
     candidates.push(window.ytInitialPlayerResponse);
     return candidates.find(r => r?.videoDetails?.videoId === videoId) || null;
   };
 
-  const pickTrack = (tracks) => {
+  const pickTrack = (tracks: CaptionTrack[]) => {
     const usable = tracks.filter(t => t?.baseUrl);
     if (!usable.length) return null;
     // Manual tracks before ASR; then user language priority.
     return [...usable].sort((a, b) => (
-      (a.kind === "asr") - (b.kind === "asr")
+      Number(a.kind === "asr") - Number(b.kind === "asr")
       || langRank(a.languageCode) - langRank(b.languageCode)
     ))[0];
   };
 
-  const fetchPlayerTrack = async (videoId) => {
+  const fetchPlayerTrack = async (videoId: string) => {
     const response = playerResponse(videoId);
     if (!response) return false;
     const tracks = response.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
@@ -215,7 +204,7 @@
     pollVideoId = "";
   };
 
-  const startPolling = (videoId) => {
+  const startPolling = (videoId: string) => {
     const existing = captured.get(videoId);
     if (existing) emit(existing.detail);
     if (existing?.direct) return;
@@ -244,7 +233,8 @@
     if (typeof detail === "string") {
       try { detail = JSON.parse(detail); } catch { return; }
     }
-    if (Array.isArray(detail?.languages) && detail.languages.length) {
+    if (!record(detail)) return;
+    if (Array.isArray(detail.languages) && detail.languages.length) {
       languages = detail.languages.map(String);
     }
     const videoId = String(detail?.videoId || "");

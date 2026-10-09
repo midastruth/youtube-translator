@@ -1,4 +1,6 @@
-function showBadge(tabId, text, color) {
+export {};
+
+function showBadge(tabId: number, text: string, color: string) {
   chrome.action.setBadgeBackgroundColor({ tabId, color });
   chrome.action.setBadgeText({ tabId, text });
   setTimeout(() => chrome.action.setBadgeText({ tabId, text:"" }), 2500);
@@ -7,15 +9,16 @@ function showBadge(tabId, text, color) {
 chrome.action.onClicked.addListener(tab => {
   if (tab.id === undefined) return;
 
-  chrome.tabs.sendMessage(tab.id, { action:"downloadVtt" }, response => {
+  const tabId = tab.id;
+  chrome.tabs.sendMessage(tabId, { action:"downloadVtt" }, (response: { ok?: boolean } | undefined) => {
     if (chrome.runtime.lastError) {
-      showBadge(tab.id, "!", "#d93025");
+      showBadge(tabId, "!", "#d93025");
       return;
     }
     if (response?.ok) {
-      showBadge(tab.id, "✓", "#188038");
+      showBadge(tabId, "✓", "#188038");
     } else {
-      showBadge(tab.id, "!", "#d93025");
+      showBadge(tabId, "!", "#d93025");
     }
   });
 });

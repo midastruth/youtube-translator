@@ -1,4 +1,11 @@
 import crypto from "node:crypto";
+import type { InputCue } from "./types.js";
+
+export type JobKeyOptions = {
+  videoId?: string; sourceCues?: InputCue[]; fromLang?: string; toLang?: string;
+  segmentationVersion?: string; engine?: string; provider?: string; baseUrl?: string; model?: string;
+  promptVersion?: string; reviewVersion?: string; workflowVersion?: string; glossaryVersion?: string; styleConfig?: string;
+};
 
 export const DEFAULT_VERSIONS = {
   workflow_version: "wf-v1",
@@ -9,12 +16,12 @@ export const DEFAULT_VERSIONS = {
   style_config: "standard",
 };
 
-function sortObject(obj) {
+function sortObject(obj: unknown): unknown {
   if (obj === null || typeof obj !== "object") return obj;
   if (Array.isArray(obj)) return obj.map(sortObject);
-  const sorted = {};
+  const sorted: Record<string, unknown> = {};
   for (const key of Object.keys(obj).sort()) {
-    sorted[key] = sortObject(obj[key]);
+    sorted[key] = sortObject((obj as Record<string, unknown>)[key]);
   }
   return sorted;
 }
@@ -46,7 +53,7 @@ export function calculateJobKey({
   workflowVersion = DEFAULT_VERSIONS.workflow_version,
   glossaryVersion = DEFAULT_VERSIONS.glossary_version,
   styleConfig = DEFAULT_VERSIONS.style_config,
-} = {}) {
+}: JobKeyOptions = {}) {
   const normalizedCues = (sourceCues || []).map((cue, index) => ({
     cue_id: cue.cue_id || `c${index}`,
     start: Number(cue.start),

@@ -1,3 +1,5 @@
+import type { CueBlock } from "./types.js";
+
 /**
  * Estimates token count for a text or cue.
  */
@@ -14,15 +16,15 @@ export function estimateTokens(text = "") {
  * @param {Object} options - Token budget options
  * @returns {Array} List of block definitions
  */
-export function partitionCuesIntoBlocks(
-  cues = [],
+export function partitionCuesIntoBlocks<T extends { text: string }>(
+  cues: T[] = [],
   {
     contextWindow = 4096,
     reserveOutputTokens = 1024,
     reservePromptTokens = 512,
     maxCuesPerBlock = 10,
-  } = {}
-) {
+  }: { contextWindow?: number; reserveOutputTokens?: number; reservePromptTokens?: number; maxCuesPerBlock?: number } = {}
+): CueBlock<T>[] {
   if (!cues || cues.length === 0) return [];
 
   const availableInputTokens = Math.max(
@@ -30,8 +32,8 @@ export function partitionCuesIntoBlocks(
     contextWindow - reserveOutputTokens - reservePromptTokens
   );
 
-  const blocks = [];
-  let currentBlockCues = [];
+  const blocks: { blockIndex: number; cues: T[] }[] = [];
+  let currentBlockCues: T[] = [];
   let currentTokens = 0;
 
   for (let i = 0; i < cues.length; i++) {
@@ -82,7 +84,7 @@ export function partitionCuesIntoBlocks(
     let remainingBudget = Math.max(0, availableInputTokens - blockTokens);
 
     // Collect contextBefore
-    const contextBefore = [];
+    const contextBefore: T[] = [];
     let bIdx = startIndex - 1;
     while (bIdx >= 0 && remainingBudget > 0) {
       const c = cues[bIdx];
@@ -94,7 +96,7 @@ export function partitionCuesIntoBlocks(
     }
 
     // Collect contextAfter
-    const contextAfter = [];
+    const contextAfter: T[] = [];
     let aIdx = endIndex + 1;
     while (aIdx < cues.length && remainingBudget > 0) {
       const c = cues[aIdx];

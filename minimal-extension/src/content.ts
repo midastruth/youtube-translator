@@ -1,20 +1,24 @@
 /* YouTube Subtitle Translator — Content Script */
+import { parseBrowserSubtitles, displayError } from "./types.js";
+import type { ExtensionSettings, StoredSettings, Subtitle, BrowserSubtitles, StreamRequest, SubtitleEvent, DisplayError } from "./types.js";
 
 const CID = "yts-overlay";
 
-let videoEl = null, subtitles = [], ci = -1;
-let observer = null, settings = {};
+let videoEl: HTMLVideoElement | null = null, subtitles: Subtitle[] = [], ci = -1;
+let observer: MutationObserver | null = null;
+let settings: ExtensionSettings;
 let loadedVideoId = "", loadGeneration = 0;
-let statusTimer = null;
-let loadAbortController = null;
-let renderFrame = null;
-let browserSubtitleCache = null;
+let statusTimer: ReturnType<typeof setTimeout> | null = null;
+let loadAbortController: AbortController | null = null;
+let renderFrame: number | null = null;
+let browserSubtitleCache: BrowserSubtitles | null = null;
 
-const DEF = {
+const DEF: ExtensionSettings = {
   backendUrl: "http://localhost:8787",
   languages: "en,zh-Hans,zh-Hant,zh",
   toLang: "zh-CN",
   segmentation: "rule",
+  translateEngine: "legacy", translateProvider: "openai",
   translateApiKey: "", translateBaseUrl: "", translateModel: "",
   translateWhole: false, autoTranslate: true, enabled: false,
   // Whisper fallback (no subtitle track → transcribe audio)
@@ -30,6 +34,7 @@ const DEF = {
 // Reconnect a limited number of times so cached successes are kept and only the
 // remaining cues are submitted again, without risking an endless retry loop.
 const AUTO_RETRY_DELAYS = [3000, 6000];
+settings = { ...DEF };
 
 // ── style ──────────────────────────────────────────────────
 
@@ -59,7 +64,7 @@ function syncStyle() {
 
 // ── API ────────────────────────────────────────────────────
 
-async function apiStream(path, body, signal, onEvent) {
+async function apiStream(path: string, body: StreamRequest, signal: AbortSignal, onEvent: (event: SubtitleEvent) => void) {
   const baseUrl = (settings.backendUrl || DEF.backendUrl).replace(/\/+$/, "");
   const url = `${baseUrl}${path}`;
   const r = await fetch(url, {
@@ -78,7 +83,7 @@ async function apiStream(path, body, signal, onEvent) {
   const decoder = new TextDecoder();
   let buffer = "";
 
-  const consumeFrame = (frame) => {
+  const consumeFrame = (frame: string) => {
     const data = frame
       .split("\n")
       .filter(line => line.startsWith("data:"))
@@ -103,8 +108,8 @@ async function apiStream(path, body, signal, onEvent) {
   if (buffer.trim()) consumeFrame(buffer);
 }
 
-function waitForRetry(delay, signal) {
-  return new Promise((resolve, reject) => {
+function waitForRetry(delay: number, signal: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => {
       signal?.removeEventListener("abort", onAbort);
       resolve();
@@ -131,42 +136,39 @@ function cancelActiveLoad() {
 
 // bridge.js runs in the page's MAIN world; event details cross worlds as JSON
 // strings because object details are not reliably readable across worlds.
-function parseBridgeDetail(raw) {
-  if (typeof raw !== "string") return raw && typeof raw === "object" ? raw : null;
-  try { return JSON.parse(raw); } catch { return null; }
-}
+const parseBridgeDetail = parseBrowserSubtitles;
 
-function hasBrowserSubtitles(detail) {
+function hasBrowserSubtitles(detail: BrowserSubtitles | null) {
   return Boolean(detail && (
     (Array.isArray(detail.events) && detail.events.length)
     || (Array.isArray(detail.cues) && detail.cues.length)
   ));
 }
 
-function acceptBrowserSubtitles(event) {
+function acceptBrowserSubtitles(event: CustomEvent<unknown>) {
   const detail = parseBridgeDetail(event.detail);
   if (!detail?.videoId || detail.videoId !== videoId() || !hasBrowserSubtitles(detail)) return;
   browserSubtitleCache = detail;
 }
 
-function requestBrowserSubtitles(id, languages) {
+function requestBrowserSubtitles(id: string, languages: string[]) {
   window.dispatchEvent(new CustomEvent("yts-request-subtitles", {
     detail: JSON.stringify({ videoId: id, languages }),
   }));
 }
 
-function waitForBrowserSubtitles(id, signal, timeout = 8000) {
+function waitForBrowserSubtitles(id: string, signal: AbortSignal, timeout = 8000): Promise<BrowserSubtitles | null> {
   if (browserSubtitleCache?.videoId === id) return Promise.resolve(browserSubtitleCache);
   return new Promise(resolve => {
-    let timer;
-    const finish = value => {
+    let timer: ReturnType<typeof setTimeout>;
+    const finish = (value: BrowserSubtitles | null) => {
       clearTimeout(timer);
       signal?.removeEventListener("abort", onAbort);
       window.removeEventListener("yts-browser-subtitles", onEvent);
       resolve(value || null);
     };
     const onAbort = () => finish(null);
-    const onEvent = event => {
+    const onEvent = (event: CustomEvent<unknown>) => {
       const detail = parseBridgeDetail(event.detail);
       if (detail?.videoId === id && hasBrowserSubtitles(detail)) finish(detail);
     };
@@ -210,14 +212,14 @@ function scheduleRefresh() {
   });
 }
 
-function setText(element, value) {
+function setText(element: Element, value: unknown) {
   const text = String(value ?? "");
   if (element.textContent !== text) element.textContent = text;
 }
 
-function showStatus(message, type = "info", hideAfter = 0) {
+function showStatus(message: string, type = "info", hideAfter = 0) {
   const el = overlay();
-  const status = el?.querySelector(".status");
+  const status = el?.querySelector<HTMLElement>(".status");
   if (!status) return;
   if (statusTimer) clearTimeout(statusTimer);
   statusTimer = null;
@@ -235,15 +237,15 @@ function showStatus(message, type = "info", hideAfter = 0) {
 function clearStatus() {
   if (statusTimer) clearTimeout(statusTimer);
   statusTimer = null;
-  const status = document.querySelector(`#${CID} .status`);
+  const status = document.querySelector<HTMLElement>(`#${CID} .status`);
   if (status) status.style.display = "none";
 }
 
 function refresh() {
   const root = overlay();
-  const bg = root?.querySelector(".bg");
-  const orig = root?.querySelector(".orig");
-  const tran = root?.querySelector(".tran");
+  const bg = root?.querySelector<HTMLElement>(".bg");
+  const orig = root?.querySelector<HTMLElement>(".orig");
+  const tran = root?.querySelector<HTMLElement>(".tran");
   if (!orig || !tran || !bg) return;
 
   if (ci >= 0 && subtitles[ci]) {
@@ -262,9 +264,9 @@ function refresh() {
 
 // ── drag ───────────────────────────────────────────────────
 
-function drag(el) {
+function drag(el: HTMLElement) {
   let down = false, sy = 0, ib = 0;
-  const ct = () => el.parentElement;
+  const ct = () => el.parentElement!;
 
   el.addEventListener("mousedown", e => {
     if (e.button !== 0) return; e.preventDefault();
@@ -282,7 +284,7 @@ function drag(el) {
   });
   document.addEventListener("mouseup", () => {
     if (!down) return; down = false; el.classList.remove("drag");
-    chrome.storage.local.get(["ytsSettings"], d => {
+    chrome.storage.local.get(["ytsSettings"], (d: StoredSettings) => {
       const s = d.ytsSettings || {};
       s.positionY = settings.positionY;
       chrome.storage.local.set({ ytsSettings: s });
@@ -292,7 +294,7 @@ function drag(el) {
 
 // ── subtitle index ─────────────────────────────────────────
 
-function idxOf(ms) {
+function idxOf(ms: number) {
   let lo = 0, hi = subtitles.length - 1;
   while (lo <= hi) {
     const m = (lo + hi) >>> 1, s = subtitles[m];
@@ -304,7 +306,7 @@ function idxOf(ms) {
 
 // ── load ───────────────────────────────────────────────────
 
-async function load(pageUrl) {
+async function load(pageUrl: string) {
   loadAbortController?.abort();
   const controller = new AbortController();
   loadAbortController = controller;
@@ -328,8 +330,8 @@ async function load(pageUrl) {
     const tracksResponse = await fetch(`${baseUrl}/api/subtitle/tracks?${params}`, {
       signal: controller.signal,
     });
-    let tr = { tracks: [] };
-    let tracksError = null;
+    let tr: { tracks: { source: string; language: string }[] } = { tracks: [] };
+    let tracksError: Error | null = null;
     if (tracksResponse.ok) {
       tr = await tracksResponse.json();
     } else {
@@ -337,7 +339,7 @@ async function load(pageUrl) {
       tracksError = new Error(error.detail || `Backend ${tracksResponse.status}`);
     }
 
-    let track = null;
+    let track: { source: string; language: string } | undefined;
     for (const src of ["manual","automatic"]) {
       for (const l of langs) {
         const p = l.split("-")[0].toLowerCase();
@@ -350,7 +352,7 @@ async function load(pageUrl) {
 
     // Fallback: yt-dlp is blocked (e.g. HTTP 400 bot check) or found no
     // track. Give YouTube's own player a moment to provide its captions.
-    let browserSubs = null;
+    let browserSubs: BrowserSubtitles | null = null;
     if (!track) {
       showStatus("后端无法获取字幕，正在尝试读取播放器字幕…");
       browserSubs = await waitForBrowserSubtitles(pageVideoId, controller.signal);
@@ -365,7 +367,7 @@ async function load(pageUrl) {
       }
     }
 
-    const body = {
+    const body: StreamRequest = {
       url: pageUrl,
       languages: track ? [track.language] : langs,
       allow_automatic: true,
@@ -434,10 +436,10 @@ async function load(pageUrl) {
         if (["source_cue", "cue_chunk", "cue"].includes(event.type)) {
           const index = Number(event.index);
           if (!Number.isInteger(index) || index < 0) return;
-          const previous = subtitles[index] || {};
+          const previous: Partial<Subtitle> = subtitles[index] || {};
           subtitles[index] = {
-            start: event.start ?? previous.start,
-            end: event.end ?? previous.end,
+            start: event.start ?? previous.start ?? 0,
+            end: event.end ?? previous.end ?? 0,
             text: event.text ?? previous.text ?? "",
             translation: event.translation ?? previous.translation ?? "",
           };
@@ -458,7 +460,7 @@ async function load(pageUrl) {
         }
 
         if (event.type === "error") {
-          const streamError = new Error(event.detail || "字幕流处理失败");
+          const streamError: DisplayError = new Error(event.detail || "字幕流处理失败");
           streamError.code = event.code || "stream_error";
           streamError.hideAfterMs = Math.max(0, Number(event.hide_after_ms) || 0);
           throw streamError;
@@ -487,13 +489,14 @@ async function load(pageUrl) {
         "error",
       );
       await waitForRetry(delay, controller.signal);
-      if (generation !== loadGeneration || settings.enabled === false) return;
+      if (generation !== loadGeneration || !settings.enabled) return;
       showStatus(`正在自动重试 ${failedCues} 条字幕…`);
     }
 
-    if (generation !== loadGeneration || settings.enabled === false) return;
+    if (generation !== loadGeneration || !settings.enabled) return;
     if (!subtitles.length) showStatus("后端没有返回可显示的字幕", "error");
-  } catch (e) {
+  } catch (value) {
+    const e = displayError(value);
     if (generation !== loadGeneration) return;
     if (e?.name === "AbortError") return;
     const baseUrl = (settings.backendUrl || DEF.backendUrl).replace(/\/+$/, "");
@@ -515,7 +518,7 @@ async function load(pageUrl) {
 
 // ── events ─────────────────────────────────────────────────
 
-function bindVideo(nextVideo) {
+function bindVideo(nextVideo: HTMLVideoElement) {
   videoEl?.removeEventListener("timeupdate", tick);
   videoEl = nextVideo;
   videoEl.addEventListener("timeupdate", tick);
@@ -544,7 +547,7 @@ function findV() {
   }
 }
 function videoId() { try { return new URL(location.href).searchParams.get("v")||""; } catch { return ""; } }
-function vidFromUrl(url) { try { return new URL(url).searchParams.get("v") || ""; } catch { return ""; } }
+function vidFromUrl(url: string) { try { return new URL(url).searchParams.get("v") || ""; } catch { return ""; } }
 
 // ── download VTT ───────────────────────────────────────────
 
@@ -572,7 +575,7 @@ function downloadVtt() {
   showStatus(`已导出 ${exportable.length} 条字幕`, "success", 2500);
   return { ok:true, count:exportable.length, filename };
 }
-function msVtt(ms) {
+function msVtt(ms: number) {
   const s = ms/1000;
   const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), sec = (s%60).toFixed(3).padStart(6,"0");
   return h>0 ? `${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}:${sec}` : `${String(m).padStart(2,"0")}:${sec}`;
@@ -580,7 +583,7 @@ function msVtt(ms) {
 
 // ── messages ───────────────────────────────────────────────
 
-chrome.runtime.onMessage.addListener((msg, _, send) => {
+chrome.runtime.onMessage.addListener((msg: { action?: string }, _, send) => {
   if (msg.action === "downloadVtt") send(downloadVtt());
   else if (msg.action === "toggleBilingual") { settings.isBilingual = !settings.isBilingual; refresh(); send({isBilingual:settings.isBilingual}); }
 });
@@ -644,13 +647,13 @@ function injectToggle() {
   }
 }
 
-function updateToggleIcon(btn) {
+function updateToggleIcon(btn: HTMLElement) {
   const on = settings.enabled !== false;
   btn.innerHTML = on ? ICON_ON : ICON_OFF;
   btn.title = on ? "关闭字幕翻译" : "开启字幕翻译";
 }
 
-chrome.storage.local.get(["ytsSettings"], d => {
+chrome.storage.local.get(["ytsSettings"], (d: StoredSettings) => {
   // Enabling translation is intentionally page-local. Every fresh page load
   // starts off, preventing an automatic API request before the user opts in.
   const storedSettings = { ...(d.ytsSettings || {}) };
@@ -690,14 +693,14 @@ chrome.storage.local.get(["ytsSettings"], d => {
 
 chrome.storage.onChanged.addListener(changes => {
   if (changes.ytsSettings) {
-    const oldStored = changes.ytsSettings.oldValue || {};
-    const newStored = changes.ytsSettings.newValue || {};
+    const oldStored: Partial<ExtensionSettings> = changes.ytsSettings.oldValue || {};
+    const newStored: Partial<ExtensionSettings> = changes.ytsSettings.newValue || {};
     const changedKeys = new Set([
       ...Object.keys(oldStored),
       ...Object.keys(newStored),
     ]);
     const positionOnly = [...changedKeys].every(key => (
-      key === "positionY" || oldStored[key] === newStored[key]
+      key === "positionY" || oldStored[key as keyof ExtensionSettings] === newStored[key as keyof ExtensionSettings]
     ));
     const enabled = settings.enabled;
     settings = { ...DEF, ...newStored, enabled };

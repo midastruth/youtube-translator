@@ -1,7 +1,9 @@
 import assert from "node:assert";
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
+import { LegacyState, requestFailure } from "./legacy-state.js";
+import type { DataTable } from "@cucumber/cucumber";
+import type { RequestFailure } from "../../worker/network.js";
 import { Given, When, Then, Before, After } from "@cucumber/cucumber";
 
 import { openOwnedSqliteStorage, StorageOwnershipConflictError } from "../../worker/storage.js";
@@ -24,35 +26,19 @@ import {
 import { WHITELIST_TOOLS, testUnsafeTool } from "../../worker/tools.js";
 import { SubtitleTranslationTask, SubtitleJobDoc, TaskMocks } from "../../worker/task-definition.js";
 
-let tmpDir;
-let worker;
-let workerStoragePath;
-let world = {};
+let tmpDir: string;
+let worker: AgentWorker;
+let workerStoragePath: string;
+let world = new LegacyState();
 
 Before(function () {
   TaskMocks.clear();
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "yts-acceptance-"));
+  fs.mkdirSync("./tmp", { recursive: true });
+  tmpDir = fs.mkdtempSync(path.resolve("./tmp/yts-acceptance-"));
   workerStoragePath = path.join(tmpDir, "session.sqlite");
-  world = {
-    tmpDir,
-    workerStoragePath,
-    maxRevisions: 2,
-    maxNetworkAttempts: 3,
-    cues: [],
-    blocks: [],
-    requestPayload: {},
-    response: null,
-    job: null,
-    events: [],
-    error: null,
-    budgetTracker: null,
-    attemptCounts: 0,
-    retryPolicyExecuted: null,
-    dataset: null,
-    evalReport: null,
-    draftTranslations: {},
-    publishedDrafts: [],
-  };
+  world = new LegacyState();
+  world.tmpDir = tmpDir;
+  world.workerStoragePath = workerStoragePath;
 });
 
 After(async function () {
@@ -68,7 +54,7 @@ After(async function () {
     } catch {
       // ignore
     }
-    worker = null;
+    // Every legacy scenario starts its own worker in Background.
   }
   if (tmpDir && fs.existsSync(tmpDir)) {
     try {
@@ -83,7 +69,7 @@ After(async function () {
 
 Given("翻译 worker 使用锁定版本的 pi-durable 及兼容依赖", function () {
   const pkgPath = path.resolve("package.json");
-  const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+  const pkg: { dependencies: Record<string, string> } = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
   assert.strictEqual(pkg.dependencies["@earendil-works/pi-durable"], "1.1.0");
   assert.strictEqual(pkg.dependencies["@earendil-works/pi-ai"], "1.1.0");
   assert.strictEqual(pkg.dependencies["@earendil-works/chord"], "1.1.0");
@@ -112,17 +98,17 @@ Given("翻译 agent 只能使用上下文读取、术语查询和结构校验白
   assert.ok(!toolNames.includes("write"));
 });
 
-Given("每个翻译块最多允许 {int} 次审校后的修订", function (int) {
+Given("每个翻译块最多允许 {int} 次审校后的修订", function (int: number) {
   world.maxRevisions = int;
 });
 
-Given("每个逻辑模型请求包含首次请求在内最多允许 {int} 次网络尝试", function (int) {
+Given("每个逻辑模型请求包含首次请求在内最多允许 {int} 次网络尝试", function (int: number) {
   world.maxNetworkAttempts = int;
 });
 
 // ── Scenario Outline: 不同字幕来源进入同一 agent 翻译流程 ───────────
 
-Given("字幕通过 {string} 取得并已由现有分句流程产生源 cues", function (source) {
+Given("字幕通过 {string} 取得并已由现有分句流程产生源 cues", function (source: string) {
   world.source = source;
   world.videoId = "test-video-123";
   world.title = "Test Subtitle Video";
@@ -132,7 +118,7 @@ Given("字幕通过 {string} 取得并已由现有分句流程产生源 cues", f
   ];
 });
 
-When("用户设置 translate_engine 为 {string} 并请求翻译为 {string}", function (engine, toLang) {
+When("用户设置 translate_engine 为 {string} 并请求翻译为 {string}", function (engine: string, toLang: string) {
   world.requestPayload = {
     translate_engine: engine,
     translate_to: toLang,
@@ -162,6 +148,7 @@ Then("任务执行上下文准备、翻译、独立审校和结构校验", async
 });
 
 Then("返回字幕保留原有视频标识、标题、字幕来源及分句模式", function () {
+  assert.ok(world.job.finalResult);
   world.response = {
     video_id: world.requestPayload.video_id,
     title: world.requestPayload.title,
@@ -176,6 +163,7 @@ Then("返回字幕保留原有视频标识、标题、字幕来源及分句模�
 });
 
 Then("每个成功 cue 包含原文和通过审校及校验的译文", function () {
+  assert.ok(world.response);
   for (const c of world.response.cues) {
     assert.ok(c.text);
     assert.ok(c.translation);
@@ -185,11 +173,11 @@ Then("每个成功 cue 包含原文和通过审校及校验的译文", function 
 
 // ── Scenario: 旧调用方与旧翻译提供商仍可工作 ──────────────────────────
 
-Given("服务器默认 translate_engine 为 {string}", function (engine) {
+Given("服务器默认 translate_engine 为 {string}", function (engine: string) {
   world.defaultEngine = engine;
 });
 
-When("旧调用方不传 translate_engine 并选择 {string} 或 {string}", function (p1, p2) {
+When("旧调用方不传 translate_engine 并选择 {string} 或 {string}", function (p1: string, p2: string) {
   world.requestPayload = {
     translate_provider: p1,
     translate_to: "zh-CN",
@@ -208,7 +196,7 @@ Then("请求与响应仍满足原有必需字段和字幕时间单位的契约",
     title: "test",
     from_lang: "en",
     to_lang: "zh-CN",
-    cues: [{ start: 0.0, end: 1000.0, text: "Hello", translation: "你好" }],
+    cues: [{ cue_id: "c0", start: 0.0, end: 1000.0, text: "Hello", translation: "你好" }],
   };
   assert.strictEqual(typeof world.response.cues[0].start, "number");
   assert.strictEqual(typeof world.response.cues[0].end, "number");
@@ -237,7 +225,7 @@ When("扩展发送字幕翻译请求", function () {
   };
 });
 
-Then("请求包含 translate_engine 为 {string}", function (engine) {
+Then("请求包含 translate_engine 为 {string}", function (engine: string) {
   assert.strictEqual(world.extensionRequest.translate_engine, engine);
 });
 
@@ -311,7 +299,7 @@ When("系统处理字幕", function () {
   };
 });
 
-Then("返回原字幕且 translation_status 为 {string}", function (status) {
+Then("返回原字幕且 translation_status 为 {string}", function (status: string) {
   assert.strictEqual(world.noTranslateResp.translation_status, status);
 });
 
@@ -344,6 +332,7 @@ Then("待译块携带前后连续源字幕、可用标题和持久化术语表",
   const block = world.partitionBlocks.find((b) =>
     b.cues.some((c) => c.cue_id === "c1")
   );
+  assert.ok(block);
   assert.ok(block.contextBefore.some((c) => c.cue_id === "c0"));
   assert.ok(block.contextAfter.some((c) => c.cue_id === "c2"));
 });
@@ -352,6 +341,7 @@ Then("已完成的相邻 cue 可以作为上下文但不作为待发布输出", 
   const block = world.partitionBlocks.find((b) =>
     b.cues.some((c) => c.cue_id === "c1")
   );
+  assert.ok(block);
   assert.strictEqual(block.cues.length, 1);
   assert.strictEqual(block.cues[0].cue_id, "c1");
 });
@@ -367,7 +357,7 @@ Then("agent 不将不相邻的待译 cue 假装成连续对话", function () {
 
 // ── Scenario: 结合上下文解释专业词义 ──────────────────────────────────
 
-Given("源字幕为", function (dataTable) {
+Given("源字幕为", function (dataTable: DataTable) {
   const rows = dataTable.hashes();
   world.cues = rows.map((r) => ({
     cue_id: r.cue_id,
@@ -377,7 +367,7 @@ Given("源字幕为", function (dataTable) {
   }));
 });
 
-Given("审核后的术语表规定 transaction 在数据库语境中译为 {string}", function (termTran) {
+Given("审核后的术语表规定 transaction 在数据库语境中译为 {string}", function (termTran: string) {
   world.glossary = { transaction: termTran };
 });
 
@@ -391,14 +381,18 @@ When("agent 翻译并审校这些字幕", async function () {
   await world.job.taskPromise;
 });
 
-Then("c0 的译文使用 {string} 而不是 {string}", function (expected, forbidden) {
+Then("c0 的译文使用 {string} 而不是 {string}", function (expected: string, forbidden: string) {
+  assert.ok(world.job.finalResult);
   const c0 = world.job.finalResult.cues.find((c) => c.cue_id === "c0");
+  assert.ok(c0);
   assert.ok(c0.translation.includes(expected));
   assert.ok(!c0.translation.includes(forbidden));
 });
 
-Then("c1 的译文表达 {string} 的含义", function (meaning) {
+Then("c1 的译文表达 {string} 的含义", function (meaning: string) {
+  assert.ok(world.job.finalResult);
   const c1 = world.job.finalResult.cues.find((c) => c.cue_id === "c1");
+  assert.ok(c1);
   assert.ok(
     c1.translation.includes("回滚该事务") ||
       c1.translation.includes("回滚") ||
@@ -407,6 +401,7 @@ Then("c1 的译文表达 {string} 的含义", function (meaning) {
 });
 
 Then("最终译文不添加源字幕没有提到的交易、付款或金额信息", function () {
+  assert.ok(world.job.finalResult);
   for (const c of world.job.finalResult.cues) {
     assert.ok(!/(付款|支付|金额|美元)/.test(c.translation));
   }
@@ -414,7 +409,7 @@ Then("最终译文不添加源字幕没有提到的交易、付款或金额信�
 
 // ── Scenario: 跨块复用术语并在重启后保持一致 ────────────────────────
 
-Given("第一块已经审校并提交术语 embedding 在本视频 AI 语境中译为 {string}", async function (termTran) {
+Given("第一块已经审校并提交术语 embedding 在本视频 AI 语境中译为 {string}", async function (termTran: string) {
   world.job = await worker.submitOrAttachJob({
     cues: [{ cue_id: "c0", start: 0, end: 1000, text: "Vector embedding layer." }],
     initialGlossary: { embedding: termTran },
@@ -441,8 +436,10 @@ Then("翻译和审校都读取已提交的术语表", function () {
   assert.ok(world.job2.finalResult);
 });
 
-Then("后续译文使用 {string}", function (expected) {
+Then("后续译文使用 {string}", function (expected: string) {
+  assert.ok(world.job2.finalResult);
   const c1 = world.job2.finalResult.cues.find((c) => c.cue_id === "c1");
+  assert.ok(c1);
   assert.ok(c1.translation.includes(expected));
 });
 
@@ -453,11 +450,11 @@ Then("未审校草稿中的术语选择不覆盖已确认术语", function () {
 
 // ── Scenario: 审校发现否定、数字或单位误译后定向修订 ───────────────
 
-Given("源字幕为 {string}", function (src) {
+Given("源字幕为 {string}", function (src: string) {
   world.singleCue = { cue_id: "c0", start: 0, end: 2000, text: src };
 });
 
-Given("翻译模型给出的草稿为 {string}", function (draft) {
+Given("翻译模型给出的草稿为 {string}", function (draft: string) {
   world.draftTranslations = { c0: draft };
 });
 
@@ -498,6 +495,7 @@ Then("修订请求包含原文、草稿、上下文和具体审校问题", funct
 });
 
 Then("只修订受影响的块而不重新翻译全部视频", function () {
+  assert.ok(world.job.finalResult);
   assert.strictEqual(world.job.finalResult.cues.length, 1);
 });
 
@@ -505,13 +503,15 @@ Then("修订后再次进行审校及结构校验", function () {
   assert.strictEqual(world.job.status, "succeeded");
 });
 
-Then("发布译文保留 {string} 的含义", function (phrase) {
+Then("发布译文保留 {string} 的含义", function (phrase: string) {
+  assert.ok(world.job.finalResult);
   const c0 = world.job.finalResult.cues[0];
   assert.ok(c0.translation.includes("5 毫克"));
   assert.ok(c0.translation.includes("不要"));
 });
 
 Then("错误草稿从未作为最终字幕发送给客户端", function () {
+  assert.ok(world.job.finalResult);
   const c0 = world.job.finalResult.cues[0];
   assert.notStrictEqual(c0.translation, "将剂量增加到 50 毫克以上。");
 });
@@ -526,12 +526,12 @@ Given("待发布块包含 cue_id 为 c0、c1、c2 的三条非空源字幕", fun
   ];
 });
 
-Given("模型返回 {string}", function (invalidOutput) {
+Given("模型返回 {string}", function (invalidOutput: string) {
   world.invalidCandidate = invalidOutput;
 });
 
 When("系统校验输出", function () {
-  let candidateData = null;
+  let candidateData: unknown = null;
   const inv = world.invalidCandidate;
 
   if (inv === "缺少 c1") {
@@ -610,18 +610,21 @@ When("输出通过审校及校验", function () {
 });
 
 Then("系统按 cue_id 将译文合并到原字幕", function () {
+  assert.ok(world.validation.orderedCues);
   assert.strictEqual(world.validation.orderedCues[0].cue_id, "c0");
   assert.strictEqual(world.validation.orderedCues[1].cue_id, "c1");
   assert.strictEqual(world.validation.orderedCues[2].cue_id, "c2");
 });
 
-Then("客户端 index {int}、{int}、{int} 分别对应 c0、c1、c2", function (i0, i1, i2) {
+Then("客户端 index {int}、{int}、{int} 分别对应 c0、c1、c2", function (i0: number, i1: number, i2: number) {
+  assert.ok(world.validation.orderedCues);
   assert.strictEqual(world.validation.orderedCues[i0].translation, "甲");
   assert.strictEqual(world.validation.orderedCues[i1].translation, "乙");
   assert.strictEqual(world.validation.orderedCues[i2].translation, "丙");
 });
 
 Then("每条源字幕的 start、end、text、顺序及数量与 agent 输入一致", function () {
+  assert.ok(world.validation.orderedCues);
   assert.strictEqual(world.validation.orderedCues.length, world.threeCues.length);
   for (let i = 0; i < world.threeCues.length; i++) {
     assert.strictEqual(world.validation.orderedCues[i].start, world.threeCues[i].start);
@@ -631,13 +634,14 @@ Then("每条源字幕的 start、end、text、顺序及数量与 agent 输入一
 });
 
 Then("毫秒时间值不转换成秒", function () {
+  assert.ok(world.validation.orderedCues);
   assert.strictEqual(world.validation.orderedCues[0].start, 0);
   assert.strictEqual(world.validation.orderedCues[0].end, 1000);
 });
 
 // ── Scenario: 无法修复的块不会无限自我审校 ──────────────────────────
 
-Given("某块在首次审校和 {int} 次修订后的审校中均未通过", async function (int) {
+Given("某块在首次审校和 {int} 次修订后的审校中均未通过", async function (int: number) {
   world.job = await worker.submitOrAttachJob({
     cues: [
       { cue_id: "c0", start: 0, end: 1000, text: "Passing block cue" },
@@ -661,13 +665,17 @@ When("当前块处理结束", async function () {
 });
 
 Then("该块标记为翻译失败并保留源字幕", function () {
+  assert.ok(world.job.finalResult);
   const c1 = world.job.finalResult.cues.find((c) => c.cue_id === "c1");
+  assert.ok(c1);
   assert.strictEqual(c1.translation, "");
   assert.strictEqual(c1.text, "Failing block cue");
 });
 
 Then("其他独立通过的块仍可发布", function () {
+  assert.ok(world.job.finalResult);
   const c0 = world.job.finalResult.cues.find((c) => c.cue_id === "c0");
+  assert.ok(c0);
   assert.ok(c0.translation);
 });
 
@@ -680,12 +688,13 @@ Then("REST 返回 partial 或 failed 而不是 succeeded", function () {
 });
 
 Then("流式 done.failed_cues 等于该块内未成功发布的 cue 数量", function () {
+  assert.ok(world.job.finalResult);
   assert.strictEqual(world.job.finalResult.failed_cues, 1);
 });
 
 // ── Scenario: 源字幕中的指令只作为待翻译文本 ───────────────────────
 
-Given("源字幕包含 {string}", function (str) {
+Given("源字幕包含 {string}", function (str: string) {
   world.injectionCue = { cue_id: "c0", start: 0, end: 2000, text: str };
 });
 
@@ -697,6 +706,7 @@ When("agent 翻译该 cue", async function () {
 });
 
 Then("最终字幕表达该句的原意而不是执行该指令", function () {
+  assert.ok(world.job.finalResult);
   const c0 = world.job.finalResult.cues[0];
   assert.ok(c0.translation.includes("忽略") || c0.translation.includes("指令"));
   assert.ok(!c0.translation.includes("sk-"));
@@ -724,7 +734,7 @@ Then("响应及日志不出现 API key 或 YouTube Cookie", function () {
 
 // ── Scenario Outline: 流式播放先展示原文且仅发布审校后的译文 ───────
 
-Given("客户端通过 {string} 请求 agent 翻译", function (transport) {
+Given("客户端通过 {string} 请求 agent 翻译", function (transport: string) {
   world.transport = transport;
   world.streamCues = [
     { cue_id: "c0", start: 0, end: 1000, text: "Sentence A" },
@@ -732,7 +742,7 @@ Given("客户端通过 {string} 请求 agent 翻译", function (transport) {
   ];
 });
 
-Given("模型处理持续超过 {int} 秒", function (sec) {
+Given("模型处理持续超过 {int} 秒", function (sec: number) {
   world.durationSec = sec;
 });
 
@@ -759,7 +769,7 @@ Then("在翻译完成前发送 meta 和带稳定 index 的 source_cue", function
   assert.strictEqual(sourceCues[1].index, 1);
 });
 
-Then("连接等待期间每 {int} 秒或更短发送心跳", function (sec) {
+Then("连接等待期间每 {int} 秒或更短发送心跳", function (sec: number) {
   // Heartbeats are verified by observeJobStream yielding keepalive
   assert.ok(sec <= 10);
 });
@@ -791,7 +801,7 @@ Then("客户端按 index 更新原有字幕而不追加重复字幕", function (
 
 // ── Scenario Outline: 三种接口诚实报告部分失败 ──────────────────────
 
-Given("源字幕共有 {int} 条", function (int) {
+Given("源字幕共有 {int} 条", function (int: number) {
   world.tenCues = Array.from({ length: int }, (_, i) => ({
     cue_id: `c${i}`,
     start: i * 1000,
@@ -800,12 +810,12 @@ Given("源字幕共有 {int} 条", function (int) {
   }));
 });
 
-Given("{int} 条已通过审校及校验并发布而另 {int} 条达到失败上限", function (passed, failed) {
+Given("{int} 条已通过审校及校验并发布而另 {int} 条达到失败上限", function (passed: number, failed: number) {
   world.passedCount = passed;
   world.failedCount = failed;
 });
 
-When("用户通过 {string} 接收任务结果", async function (iface) {
+When("用户通过 {string} 接收任务结果", async function (iface: string) {
   world.currentIface = iface;
   world.job = await worker.submitOrAttachJob({
     cues: world.tenCues,
@@ -821,21 +831,23 @@ When("用户通过 {string} 接收任务结果", async function (iface) {
   await world.job.taskPromise;
 });
 
-Then("用户仍可观看全部 {int} 条原字幕及已完成的 {int} 条译文", function (total, passed) {
+Then("用户仍可观看全部 {int} 条原字幕及已完成的 {int} 条译文", function (total: number, passed: number) {
+  assert.ok(world.job.finalResult);
   assert.strictEqual(world.job.finalResult.cues.length, total);
   const completed = world.job.finalResult.cues.filter((c) => Boolean(c.translation)).length;
   assert.strictEqual(completed, passed);
 });
 
-Then("结果明确包含 failed_cues 为 {int}", function (count) {
+Then("结果明确包含 failed_cues 为 {int}", function (count: number) {
+  assert.ok(world.job.finalResult);
   assert.strictEqual(world.job.finalResult.failed_cues, count);
 });
 
-Then("客户端不得显示 {string}", function (phrase) {
+Then("客户端不得显示 {string}", function (phrase: string) {
   assert.notStrictEqual(world.job.status, "succeeded");
 });
 
-Then("若接口为 REST 则 translation_status 为 {string} 且 progress 为 {int}", function (status, prog) {
+Then("若接口为 REST 则 translation_status 为 {string} 且 progress 为 {int}", function (status: string, prog: number) {
   if (world.currentIface.includes("/api/subtitle/process")) {
     assert.strictEqual(world.job.status, status);
     const calculatedProgress = Math.round(
@@ -846,6 +858,7 @@ Then("若接口为 REST 则 translation_status 为 {string} 且 progress 为 {in
 });
 
 Then("未完成译文不以成功缓存或完成计数参与后续恢复", function () {
+  assert.ok(world.job.finalResult);
   const published = Object.keys(world.job.finalResult.published_cues || {}).length;
   assert.strictEqual(world.job.finalResult.failed_cues, 2);
 });
@@ -997,7 +1010,7 @@ When("第二个 worker 尝试打开同一 storage", async function () {
   try {
     await world.worker2.start();
   } catch (err) {
-    world.secondWorkerError = err;
+    world.secondWorkerError = requestFailure(err);
   }
 });
 
@@ -1018,6 +1031,7 @@ Then("所有权保护不依赖 pi-durable 提供跨进程锁", function () {
 
 Given("有一个声明 replay 为 safe 的只读术语查询工具和一个未声明 safe 的测试工具", function () {
   const queryTool = WHITELIST_TOOLS.find((t) => t.name === "query_glossary");
+  assert.ok(queryTool);
   assert.strictEqual(queryTool.replay, "safe");
   assert.strictEqual(testUnsafeTool.replay, "unsafe");
 });
@@ -1031,6 +1045,7 @@ When("worker 在工具执行途中崩溃并恢复", function () {
 
 Then("safe 的术语查询允许重新执行", function () {
   const queryTool = WHITELIST_TOOLS.find((t) => t.name === "query_glossary");
+  assert.ok(queryTool);
   assert.strictEqual(queryTool.replay, "safe");
 });
 
@@ -1074,7 +1089,7 @@ Then("就绪检查失败或该任务明确显示配置阻塞状态", async funct
   const readiness = await worker.readinessCheck();
   assert.strictEqual(readiness.ready, false);
   assert.strictEqual(readiness.reason, "configuration_blocked");
-  assert.ok(readiness.blockedTasks.length > 0);
+  assert.ok(readiness.blockedTasks && readiness.blockedTasks.length > 0);
   assert.strictEqual(readiness.blockedTasks[0].reason, "missing_task");
 });
 
@@ -1088,7 +1103,7 @@ Then("不创建一个空的新任务来伪装恢复成功", function () {
 
 // ── Scenario Outline: 按错误类别进行有界网络重试 ───────────────────
 
-Given("模型请求出现 {string}", function (failureType) {
+Given("模型请求出现 {string}", function (failureType: string) {
   world.failureType = failureType;
 });
 
@@ -1101,24 +1116,24 @@ When("系统处理该错误", async function () {
       async (attempt) => {
         world.attemptCounts = attempt;
         if (world.failureType === "429 且含 Retry-After") {
-          const err = new Error("Rate limit");
+          const err: RequestFailure = new Error("Rate limit");
           err.statusCode = 429;
           err.retryAfter = "0.01";
           throw err;
         } else if (world.failureType === "可重试 5xx") {
-          const err = new Error("Internal server error");
+          const err: RequestFailure = new Error("Internal server error");
           err.statusCode = 503;
           throw err;
         } else if (world.failureType === "网络超时") {
-          const err = new Error("Connection timed out");
+          const err: RequestFailure = new Error("Connection timed out");
           err.statusCode = 504;
           throw err;
         } else if (world.failureType === "401 或 403") {
-          const err = new Error("Unauthorized");
+          const err: RequestFailure = new Error("Unauthorized");
           err.statusCode = 401;
           throw err;
         } else if (world.failureType === "不支持的模型或请求参数") {
-          const err = new Error("unsupported model parameter");
+          const err: RequestFailure = new Error("unsupported model parameter");
           err.statusCode = 400;
           throw err;
         }
@@ -1130,11 +1145,12 @@ When("系统处理该错误", async function () {
       }
     );
   } catch (err) {
+    assert.ok(err instanceof NetworkError);
     world.retryError = err;
   }
 });
 
-Then("系统执行 {string}", function (policy) {
+Then("系统执行 {string}", function (policy: string) {
   world.retryPolicyExecuted = policy;
   if (policy.includes("等待指定间隔后重试")) {
     assert.strictEqual(world.attemptCounts, 3);
@@ -1166,11 +1182,11 @@ Then("达到上限时返回明确失败而不是空译文成功", function () {
 
 // ── Scenario: 请求预算限制在恢复后仍生效 ────────────────────────────
 
-Given("测试任务最多允许 {int} 次外部模型请求尝试", function (int) {
+Given("测试任务最多允许 {int} 次外部模型请求尝试", function (int: number) {
   world.budgetTracker = new RequestBudgetTracker({ maxBudget: int });
 });
 
-Given("包含翻译、审校、修订、重试和压缩的 {int} 次请求已被持久化预留并发出", function (int) {
+Given("包含翻译、审校、修订、重试和压缩的 {int} 次请求已被持久化预留并发出", function (int: number) {
   for (let i = 0; i < int; i++) {
     world.budgetTracker.checkAndReserve();
   }
@@ -1181,11 +1197,12 @@ When("工作流还需要新的模型请求或在此时恢复运行", function ()
   try {
     world.budgetTracker.checkAndReserve();
   } catch (err) {
+    assert.ok(err instanceof BudgetExceededError);
     world.budgetExceededError = err;
   }
 });
 
-Then("系统不发送第 {int} 次请求", function (int) {
+Then("系统不发送第 {int} 次请求", function (int: number) {
   assert.ok(world.budgetExceededError instanceof BudgetExceededError);
 });
 
@@ -1236,6 +1253,7 @@ Then("重连使用同一 job_key 取得当前快照并继续观察", async funct
 });
 
 Then("不因为浏览器断开而删除已提交译文", function () {
+  assert.ok(world.disconnectJob.finalResult);
   assert.strictEqual(world.disconnectJob.finalResult.cues.length, 2);
 });
 
@@ -1295,7 +1313,7 @@ Given("同一视频已有完整且有效的最终译文缓存", function () {
   world.initialJobKey = calculateJobKey(world.baseJobKeyOptions);
 });
 
-When("请求的 {string} 发生变化", function (dimension) {
+When("请求的 {string} 发生变化", function (dimension: string) {
   const modified = { ...world.baseJobKeyOptions };
   if (dimension === "完整源字幕内容或时间轴") {
     modified.sourceCues = [{ cue_id: "c0", start: 100, end: 1100, text: "Sample" }];
@@ -1405,7 +1423,7 @@ Then("上下文压缩不能删除待译原文或已确认术语的持久化记�
 
 // ── Scenario: 真实模型在冻结评测集上优于当前实现 ────────────────────
 
-Given("评测集至少包含 {int} 条 cue 并覆盖技术讲解、日常对话和口语表达", function (int) {
+Given("评测集至少包含 {int} 条 cue 并覆盖技术讲解、日常对话和口语表达", function (int: number) {
   world.dataset = generateFrozenDataset(int);
   assert.ok(world.dataset.length >= int);
   const categories = new Set(world.dataset.map((c) => c.category));
@@ -1431,7 +1449,7 @@ Given("legacy 基线和 agent 使用相同字幕、分句、目标语言及翻�
   assert.ok(true);
 });
 
-Given("每条路径独立运行 {int} 次并由两名不知路径身份的评审打分", function (int) {
+Given("每条路径独立运行 {int} 次并由两名不知路径身份的评审打分", function (int: number) {
   world.runsCount = int;
 });
 
@@ -1439,13 +1457,13 @@ Given("评审分歧经独立裁决后按每千源词计算加权错误分", func
   assert.ok(true);
 });
 
-Given("严重语义颠倒记 {int} 分、主要误译或漏译记 {int} 分、次要问题记 {int} 分", function (s, m, min) {
+Given("严重语义颠倒记 {int} 分、主要误译或漏译记 {int} 分、次要问题记 {int} 分", function (s: number, m: number, min: number) {
   assert.strictEqual(s, 25);
   assert.strictEqual(m, 5);
   assert.strictEqual(min, 1);
 });
 
-Given("基线的中位加权错误分大于 {int}", function (int) {
+Given("基线的中位加权错误分大于 {int}", function (int: number) {
   // Baseline simulated runs with errors
   world.baselineRuns = [
     { issues: [{ severity: "major" }, { severity: "major" }, { severity: "minor" }] },
@@ -1467,7 +1485,7 @@ When("比较两条路径的中位加权错误分", function () {
   });
 });
 
-Then("agent 的中位加权错误分至少比 legacy 降低 {int}%", function (pct) {
+Then("agent 的中位加权错误分至少比 legacy 降低 {int}%", function (pct: number) {
   assert.ok(world.evalReport.reductionPercent >= pct);
 });
 
@@ -1475,7 +1493,7 @@ Then("agent 在可辨识源文上没有新增严重语义颠倒", function () {
   assert.strictEqual(world.evalReport.zeroSevereInversions, true);
 });
 
-Then("字幕映射、数量与时间轴完整性通过率为 {int}%", function (pct) {
+Then("字幕映射、数量与时间轴完整性通过率为 {int}%", function (pct: number) {
   assert.strictEqual(world.evalReport.timelineIntegrityMet, true);
 });
 

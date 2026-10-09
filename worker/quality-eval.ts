@@ -1,10 +1,15 @@
+import type { SourceCue } from "./types.js";
+export type EvaluationCue = SourceCue & { category: string; term?: string; expected: string };
+export type QualityIssue = { severity: string };
+export type EvaluationRun = { issues?: QualityIssue[]; timelineIntegrity?: number };
+
 /**
  * Quality evaluation suite for comparing Agent translation against Legacy baseline
  * on a frozen evaluation dataset of >= 1000 cues.
  */
 
 export function generateFrozenDataset(cueCount = 1000) {
-  const cues = [];
+  const cues: EvaluationCue[] = [];
   const categories = ["technical", "dialogue", "colloquial"];
 
   const techPhrases = [
@@ -35,7 +40,7 @@ export function generateFrozenDataset(cueCount = 1000) {
     const start = i * 2000;
     const end = start + 1800;
 
-    let pool = techPhrases;
+    let pool: { text: string; term?: string; expected: string }[] = techPhrases;
     if (cat === "dialogue") pool = dialoguePhrases;
     else if (cat === "colloquial") pool = colloquialPhrases;
 
@@ -54,7 +59,7 @@ export function generateFrozenDataset(cueCount = 1000) {
   return cues;
 }
 
-export function computeWeightedErrorScore(issues, totalSourceWords) {
+export function computeWeightedErrorScore(issues: QualityIssue[], totalSourceWords: number) {
   // Weights: Severe = 25, Major = 5, Minor = 1
   let score = 0;
   for (const issue of issues) {
@@ -71,7 +76,7 @@ export function evaluateQualityGate({
   baselineRuns = [],
   agentRuns = [],
   totalSourceWords = 5000,
-}) {
+}: { baselineRuns?: EvaluationRun[]; agentRuns?: EvaluationRun[]; totalSourceWords?: number }) {
   const baselineScores = baselineRuns.map((r) =>
     computeWeightedErrorScore(r.issues || [], totalSourceWords)
   );
@@ -79,7 +84,7 @@ export function evaluateQualityGate({
     computeWeightedErrorScore(r.issues || [], totalSourceWords)
   );
 
-  const median = (arr) => {
+  const median = (arr: number[]) => {
     const s = [...arr].sort((a, b) => a - b);
     const mid = Math.floor(s.length / 2);
     return s.length % 2 !== 0 ? s[mid] : (s[mid - 1] + s[mid]) / 2;

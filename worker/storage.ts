@@ -3,14 +3,18 @@ import path from "node:path";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 
 export class StorageOwnershipConflictError extends Error {
-  constructor(message) {
+  constructor(message: string) {
     super(message);
     this.name = "StorageOwnershipConflictError";
   }
 }
 
 export class StorageOwnershipManager {
-  constructor(storagePath, workerId = `worker-${process.pid}`) {
+  storagePath: string;
+  workerId: string;
+  lockPath: string;
+  acquired: boolean;
+  constructor(storagePath: string, workerId = `worker-${process.pid}`) {
     this.storagePath = path.resolve(storagePath);
     this.workerId = workerId;
     this.lockPath = `${this.storagePath}.owner`;
@@ -67,7 +71,7 @@ export class StorageOwnershipManager {
       fs.writeFileSync(this.lockPath, JSON.stringify(lockData), { flag: "wx" });
       this.acquired = true;
     } catch (err) {
-      if (err.code === "EEXIST") {
+      if (err instanceof Error && "code" in err && err.code === "EEXIST") {
         const conflictMsg = `Storage ownership conflict: storage ${this.storagePath} is already owned by another worker`;
         console.error(conflictMsg);
         throw new StorageOwnershipConflictError(conflictMsg);
@@ -88,7 +92,7 @@ export class StorageOwnershipManager {
   }
 }
 
-export async function openOwnedSqliteStorage(storagePath, workerId) {
+export async function openOwnedSqliteStorage(storagePath: string, workerId: string) {
   const manager = new StorageOwnershipManager(storagePath, workerId);
   manager.acquire();
 

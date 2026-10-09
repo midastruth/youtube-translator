@@ -1,5 +1,14 @@
+export type Usage = { promptTokens?: number; completionTokens?: number; cost?: number };
+export type RequestFailure = Error & { statusCode?: number; status?: number; retryAfter?: string; response?: { status?: number; headers?: Record<string, string> } };
+export function requestFailure(value: unknown): RequestFailure {
+  return value instanceof Error ? value : new Error(String(value));
+}
 export class NetworkError extends Error {
-  constructor(message, { statusCode, retryAfter, retryable = true, errorType = "network" } = {}) {
+  statusCode?: number;
+  retryAfter?: string;
+  retryable: boolean;
+  errorType: string;
+  constructor(message: string, { statusCode, retryAfter, retryable = true, errorType = "network" }: { statusCode?: number; retryAfter?: string; retryable?: boolean; errorType?: string } = {}) {
     super(message);
     this.name = "NetworkError";
     this.statusCode = statusCode;
@@ -10,6 +19,7 @@ export class NetworkError extends Error {
 }
 
 export class BudgetExceededError extends Error {
+  code: string;
   constructor(message = "Model request budget exceeded") {
     super(message);
     this.name = "BudgetExceededError";
@@ -22,17 +32,17 @@ export class BudgetExceededError extends Error {
  *
  * @param {Function} requestFn - async () => result
  * @param {Object} options - policy options
- * @returns {Promise<any>}
+ * @returns {Promise<T>}
  */
-export async function executeWithRetryAndBudget(
-  requestFn,
+export async function executeWithRetryAndBudget<T>(
+  requestFn: (attempt: number) => Promise<T>,
   {
     maxAttempts = 3,
     budgetTracker = null,
-    sleepFn = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    sleepFn = (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
     onAttempt = null,
-  } = {}
-) {
+  }: { maxAttempts?: number; budgetTracker?: RequestBudgetTracker | null; sleepFn?: (ms: number) => Promise<void>; onAttempt?: ((attempt: number) => void) | null } = {}
+): Promise<T> {
   let attempt = 0;
 
   while (attempt < maxAttempts) {
@@ -46,10 +56,12 @@ export async function executeWithRetryAndBudget(
     try {
       const result = await requestFn(attempt);
       if (budgetTracker) {
-        budgetTracker.recordSuccess(result?.usage);
+        const usage = result && typeof result === "object" && "usage" in result ? result.usage : undefined;
+        budgetTracker.recordSuccess(usage);
       }
       return result;
-    } catch (err) {
+    } catch (value) {
+      const err = requestFailure(value);
       const statusCode = err.statusCode || err.status || (err.response && err.response.status);
       const is401or403 = statusCode === 401 || statusCode === 403;
       const isConfigError =
@@ -114,6 +126,11 @@ export async function executeWithRetryAndBudget(
  * Budget tracker to manage external request attempt limits.
  */
 export class RequestBudgetTracker {
+  maxBudget: number;
+  attempts: number;
+  knownTokens: number;
+  knownCost: number;
+  interruptedAttempts: number;
   constructor({ maxBudget = 12, currentAttempts = 0, knownTokens = 0, knownCost = 0, interruptedAttempts = 0 } = {}) {
     this.maxBudget = maxBudget;
     this.attempts = currentAttempts;
@@ -131,14 +148,16 @@ export class RequestBudgetTracker {
     this.attempts++;
   }
 
-  recordSuccess(usage = {}) {
-    if (usage) {
-      this.knownTokens += (usage.promptTokens || 0) + (usage.completionTokens || 0);
-      this.knownCost += usage.cost || 0;
+  recordSuccess(usage: unknown = {}) {
+    if (usage && typeof usage === "object") {
+      const prompt = "promptTokens" in usage && typeof usage.promptTokens === "number" ? usage.promptTokens : 0;
+      const completion = "completionTokens" in usage && typeof usage.completionTokens === "number" ? usage.completionTokens : 0;
+      this.knownTokens += prompt + completion;
+      this.knownCost += "cost" in usage && typeof usage.cost === "number" ? usage.cost : 0;
     }
   }
 
-  recordError(err, wasInterrupted = false) {
+  recordError(err: unknown, wasInterrupted = false) {
     if (wasInterrupted) {
       this.interruptedAttempts++;
     }

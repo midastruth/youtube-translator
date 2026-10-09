@@ -1,3 +1,11 @@
+# Generated TypeScript output and local verification scratch
+/dist/
+/tmp/
+minimal-extension/public/*.js
+minimal-extension/public/*.js.map
+/cache/
+/data/
+
 # Dependencies
 node_modules/
 backend/.venv/

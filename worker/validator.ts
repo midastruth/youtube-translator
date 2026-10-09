@@ -1,11 +1,19 @@
+import type { SourceCue, PublishedCue } from "./types.js";
+
+export type ValidationResult = {
+  valid: boolean; errors: string[]; mappings?: Map<string, string>; orderedCues?: PublishedCue[];
+};
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
+
 /**
  * Strictly validates candidate model output against expected cues.
  *
  * @param {Array} expectedCues - Array of expected cue objects ({ cue_id, start, end, text })
- * @param {any} candidate - Model output (string or object)
+ * @param {unknown} candidate - Model output (string or object)
  * @returns {{ valid: boolean, errors: string[], mappings?: Map<string, string>, orderedCues?: Array }}
  */
-export function validateOutputMapping(expectedCues, candidate) {
+export function validateOutputMapping(expectedCues: SourceCue[], candidate: unknown): ValidationResult {
   const errors = [];
   const expectedCueIds = new Set(expectedCues.map((c) => c.cue_id));
 
@@ -16,7 +24,7 @@ export function validateOutputMapping(expectedCues, candidate) {
     };
   }
 
-  let parsed = null;
+  let parsed: unknown = null;
   if (typeof candidate === "string") {
     const trimmed = candidate.trim();
     // Check for explanation-only or non-structured output
@@ -59,10 +67,10 @@ export function validateOutputMapping(expectedCues, candidate) {
   }
 
   // Normalize parsed into an array of { cue_id, translation }
-  let items = [];
+  let items: unknown[] = [];
   if (Array.isArray(parsed)) {
     items = parsed;
-  } else if (parsed && typeof parsed === "object") {
+  } else if (isRecord(parsed)) {
     if (Array.isArray(parsed.translations)) {
       items = parsed.translations;
     } else if (Array.isArray(parsed.cues)) {
@@ -71,7 +79,7 @@ export function validateOutputMapping(expectedCues, candidate) {
       // Map format { [cue_id]: translation }
       items = Object.entries(parsed).map(([k, v]) => ({
         cue_id: k,
-        translation: typeof v === "object" && v !== null ? v.translation : String(v),
+        translation: isRecord(v) ? v.translation : String(v),
       }));
     }
   }
@@ -83,11 +91,11 @@ export function validateOutputMapping(expectedCues, candidate) {
     };
   }
 
-  const seenIds = new Set();
-  const mappings = new Map();
+  const seenIds = new Set<string>();
+  const mappings = new Map<string, string>();
 
   for (const item of items) {
-    if (!item || typeof item !== "object") {
+    if (!isRecord(item)) {
       errors.push("Translation item is not an object");
       continue;
     }
@@ -95,7 +103,7 @@ export function validateOutputMapping(expectedCues, candidate) {
     const cueId = item.cue_id || item.id;
     const translation = item.translation ?? item.text;
 
-    if (!cueId) {
+    if (typeof cueId !== "string" || !cueId) {
       errors.push("Item is missing cue_id");
       continue;
     }
@@ -151,7 +159,7 @@ export function validateOutputMapping(expectedCues, candidate) {
   // Reorder strictly according to expectedCues order, preserving exact timestamps in milliseconds
   const orderedCues = expectedCues.map((c) => ({
     ...c,
-    translation: mappings.get(c.cue_id),
+    translation: mappings.get(c.cue_id)!,
   }));
 
   return {

@@ -7,21 +7,33 @@ import { openOwnedSqliteStorage } from "./storage.js";
 import { WHITELIST_TOOLS } from "./tools.js";
 import { SubtitleTranslationTask, SubtitleJobDoc, TaskMocks } from "./task-definition.js";
 import { calculateJobKey } from "./keys.js";
+import type { JobRecord, SubmitJobOptions, TaskResult, StreamEvent, PublishedCue } from "./types.js";
+import type { TaskId } from "@earendil-works/pi-durable";
 
 export class AgentWorker {
+  storagePath: string;
+  workerId: string;
+  context = BACKGROUND_CONTEXT;
+  harness: Harness | null = null;
+  storage: Awaited<ReturnType<typeof openOwnedSqliteStorage>>["storage"] | null = null;
+  ownershipManager: Awaited<ReturnType<typeof openOwnedSqliteStorage>>["ownershipManager"] | null = null;
+  registry: ReturnType<typeof createRegistry> | null = null;
+  models: ReturnType<typeof createModels> | null = null;
+  jobs = new Map<string, JobRecord>();
+  pendingJobs = new Map<string, Promise<JobRecord>>();
+  jobEvents = new Map<string, EventEmitter>();
+  extension: ReturnType<typeof defineExtension> | null = null;
+
+  private get activeHarness(): Harness {
+    if (!this.harness) throw new Error("Worker harness is not open");
+    return this.harness;
+  }
+
   constructor({ storagePath = "./data/durable-storage.db", workerId = `worker-${process.pid}` } = {}) {
     this.storagePath = storagePath;
     this.workerId = workerId;
     this.context = BACKGROUND_CONTEXT;
-    this.harness = null;
-    this.storage = null;
-    this.ownershipManager = null;
-    this.registry = null;
-    this.models = null;
-    this.jobs = new Map(); // jobKey -> JobRecord
-    this.pendingJobs = new Map(); // jobKey -> Promise<JobRecord>
-    this.jobEvents = new Map(); // jobId -> EventEmitter
-    this.extension = null;
+
   }
 
   async start({ registerDefinition = true } = {}) {
@@ -91,14 +103,14 @@ export class AgentWorker {
         blockedTasks: blocked.map((t) => ({
           id: t.record.id,
           kind: t.record.kind,
-          reason: t.state.reason,
+          reason: t.state.kind === "blocked" ? t.state.reason : undefined,
         })),
       };
     }
     return { ready: true };
   }
 
-  async getJob(jobKeyOrId) {
+  async getJob(jobKeyOrId: string): Promise<JobRecord | null> {
     for (const job of this.jobs.values()) {
       if (job.jobKey === jobKeyOrId || job.jobId === jobKeyOrId) {
         return job;
@@ -110,10 +122,10 @@ export class AgentWorker {
         const page = await this.storage.scanConversations({}, 100, undefined, this.context);
         for (const item of page.items || []) {
           const doc = await this.harness.snapshot(SubtitleJobDoc, item.id, this.context);
-          if (doc && (doc.job_key === jobKeyOrId || item.id === jobKeyOrId)) {
+          if (doc && (doc.job_key === jobKeyOrId || `job-${item.id}` === jobKeyOrId)) {
             const emitter = new EventEmitter();
             emitter.on("error", () => {});
-            const jobRecord = {
+            const jobRecord: JobRecord = {
               jobId: `job-${item.id}`,
               jobKey: doc.job_key,
               taskId: null,
@@ -157,7 +169,7 @@ export class AgentWorker {
     reviewerMock = null,
     revisorMock = null,
     initialGlossary = null,
-  }) {
+  }: SubmitJobOptions): Promise<JobRecord> {
     const effectiveJobKey =
       jobKey ||
       calculateJobKey({
@@ -173,14 +185,14 @@ export class AgentWorker {
 
     // Idempotency check: reuse active or finished job with same job_key
     if (this.jobs.has(effectiveJobKey)) {
-      return this.jobs.get(effectiveJobKey);
+      return this.jobs.get(effectiveJobKey)!;
     }
     if (this.pendingJobs.has(effectiveJobKey)) {
-      return await this.pendingJobs.get(effectiveJobKey);
+      return await this.pendingJobs.get(effectiveJobKey)!;
     }
 
     const createJobPromise = (async () => {
-      const conversation = await this.harness.createConversation(
+      const conversation = await this.activeHarness.createConversation(
         { ownership: { kind: "ownerless" } },
         this.context
       );
@@ -214,7 +226,7 @@ export class AgentWorker {
         initialGlossary: initialGlossary || {},
       };
 
-      let taskId = null;
+      let taskId: TaskId<TaskResult> | undefined;
       await conversation.commit(async (tx) => {
         taskId = await tx.createTask(SubtitleTranslationTask, taskInput, {
           ownership: { kind: "conversation" },
@@ -227,11 +239,13 @@ export class AgentWorker {
         d.to_lang = toLang;
       }, this.context);
 
+      if (taskId === undefined) throw new Error("Task creation did not return an ID");
+      const createdTaskId = taskId;
       if (translatorMock || reviewerMock || revisorMock) {
         TaskMocks.set(taskId, { translatorMock, reviewerMock, revisorMock });
       }
 
-      const jobRecord = {
+      const jobRecord: JobRecord = {
         jobId,
         jobKey: effectiveJobKey,
         taskId,
@@ -250,13 +264,13 @@ export class AgentWorker {
       // Monitor task completion in background
       jobRecord.taskPromise = (async () => {
         try {
-          const settled = await this.harness.waitForTask(taskId, this.context);
-          const doc = await this.harness.snapshot(SubtitleJobDoc, conversation.id, this.context);
-          jobRecord.status = doc.status || "succeeded";
-          jobRecord.finalResult = doc.final_result;
+          await this.activeHarness.waitForTask(createdTaskId, this.context);
+          const doc = await this.activeHarness.snapshot(SubtitleJobDoc, conversation.id, this.context);
+          jobRecord.status = doc?.status || "succeeded";
+          jobRecord.finalResult = doc?.final_result;
 
           // Emit final cues and done
-          const cuesList = doc.final_result?.cues || [];
+          const cuesList = doc?.final_result?.cues || [];
           for (const cue of cuesList) {
             if (cue.translation) {
               emitter.emit("cue", cue);
@@ -265,7 +279,7 @@ export class AgentWorker {
 
           emitter.emit("done", {
             total_cues: normalizedCues.length,
-            failed_cues: doc.final_result?.failed_cues || 0,
+            failed_cues: doc?.final_result?.failed_cues || 0,
           });
         } catch (err) {
           jobRecord.status = "failed";
@@ -286,7 +300,7 @@ export class AgentWorker {
     }
   }
 
-  async abortJob(jobId) {
+  async abortJob(jobId: string) {
     let target = null;
     for (const job of this.jobs.values()) {
       if (job.jobId === jobId) {
@@ -299,7 +313,7 @@ export class AgentWorker {
     target.aborted = true;
     target.status = "cancelled";
 
-    await this.harness.abortTask(target.taskId, this.context);
+    if (target.taskId !== null) await this.activeHarness.abortTask(target.taskId, this.context);
     target.emitter.emit("cancelled");
     return true;
   }
@@ -307,9 +321,9 @@ export class AgentWorker {
   /**
    * Observe job stream (SSE / WS style)
    */
-  async *observeJobStream(jobRecord, { heartbeatIntervalMs = 5000, signal = null } = {}) {
+  async *observeJobStream(jobRecord: JobRecord, { heartbeatIntervalMs = 5000, signal = null }: { heartbeatIntervalMs?: number; signal?: AbortSignal | null } = {}): AsyncGenerator<StreamEvent> {
     const total = jobRecord.cues.length;
-    const doc = await this.harness.snapshot(
+    const doc = await this.activeHarness.snapshot(
       SubtitleJobDoc,
       jobRecord.conversationId,
       this.context
@@ -381,10 +395,10 @@ export class AgentWorker {
     }
 
     // Listen for live events with heartbeats
-    const queue = [];
-    let resolveNext = null;
+    const queue: StreamEvent[] = [];
+    let resolveNext: ((value?: string) => void) | null = null;
 
-    const push = (item) => {
+    const push = (item: StreamEvent) => {
       queue.push(item);
       if (resolveNext) {
         const r = resolveNext;
@@ -393,9 +407,9 @@ export class AgentWorker {
       }
     };
 
-    const cueListener = (cue) => push({ type: "cue", index: cue.index, ...cue, cached: false });
-    const doneListener = (done) => push({ type: "done", ...done });
-    const errListener = (err) => push({ type: "error", detail: err.message });
+    const cueListener = (cue: PublishedCue) => push({ type: "cue", index: cue.index, ...cue, cached: false });
+    const doneListener = (done: { total_cues: number; failed_cues: number }) => push({ type: "done", ...done });
+    const errListener = (err: unknown) => push({ type: "error", detail: err instanceof Error ? err.message : String(err) });
 
     jobRecord.emitter.on("cue", cueListener);
     jobRecord.emitter.on("done", doneListener);
@@ -410,7 +424,7 @@ export class AgentWorker {
         }
 
         if (queue.length > 0) {
-          const item = queue.shift();
+          const item = queue.shift()!;
           yield item;
           if (item.type === "done" || item.type === "error") {
             isDone = true;
@@ -419,8 +433,8 @@ export class AgentWorker {
         }
 
         // Wait for next item or heartbeat
-        let timer = null;
-        const waitPromise = new Promise((resolve) => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const waitPromise = new Promise<string | undefined>((resolve) => {
           resolveNext = resolve;
           timer = setTimeout(() => {
             resolveNext = null;

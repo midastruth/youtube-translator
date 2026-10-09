@@ -110,6 +110,27 @@ test("a task exhausting its block budget retains already published cues", async 
   } finally { await worker.close(); await fs.rm(directory, { recursive: true, force: true }); }
 });
 
+test("stream cardinality is captured before the asynchronous snapshot", async t => {
+  const directory = await fs.mkdtemp("./tmp/stream-cardinality-");
+  const worker = new AgentWorker({ storagePath: `${directory}/db.sqlite` });
+  try {
+    await worker.start();
+    const job = await worker.submitOrAttachJob({ cues: [cue], translatorMock: async () => ({ c0: "你好" }) });
+    await job.taskPromise;
+    assert.ok(worker.harness);
+    const snapshot = worker.harness.snapshot.bind(worker.harness);
+    t.mock.method(worker.harness, "snapshot", async (...args: Parameters<typeof snapshot>) => {
+      const doc = await snapshot(...args);
+      job.cues.push({ ...cue, cue_id: "c1" });
+      return doc;
+    });
+    const stream = worker.observeJobStream(job);
+    const meta = await stream.next();
+    assert.equal(job.cues.length, 2); assert.equal(meta.value?.total_cues, 1);
+    await stream.return(undefined);
+  } finally { await worker.close(); await fs.rm(directory, { recursive: true, force: true }); }
+});
+
 test("HTTP snapshot reads the committed document, not a missing definition", async () => {
   await fs.mkdir("./tmp", { recursive: true });
   const directory = await fs.mkdtemp("./tmp/worker-unit-");

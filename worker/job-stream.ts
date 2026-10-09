@@ -2,9 +2,9 @@ import type { JobDocument, JobRecord, StreamEvent, PublishedCue } from "./types.
 
 /** Replays committed cues, then observes live events without owning the job lifecycle. */
 export async function* observeJobEvents(doc: JobDocument | null | undefined, job: JobRecord, {
-  heartbeatIntervalMs = 5000, signal = null,
-}: { heartbeatIntervalMs?: number; signal?: AbortSignal | null } = {}): AsyncGenerator<StreamEvent> {
-  const total = job.cues.length;
+  heartbeatIntervalMs = 5000, signal = null, sourceCueCount = job.cues.length,
+}: { heartbeatIntervalMs?: number; signal?: AbortSignal | null; sourceCueCount?: number } = {}): AsyncGenerator<StreamEvent> {
+  const total = sourceCueCount;
   const published = doc?.published_cues || {};
   yield {
     type: "meta", video_id: job.videoId, title: job.title, from_lang: job.fromLang, to_lang: job.toLang,

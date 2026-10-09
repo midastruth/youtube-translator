@@ -321,7 +321,9 @@ export class AgentWorker {
    * Observe job stream (SSE / WS style)
    */
   async *observeJobStream(jobRecord: JobRecord, { heartbeatIntervalMs = 5000, signal = null }: { heartbeatIntervalMs?: number; signal?: AbortSignal | null } = {}): AsyncGenerator<StreamEvent> {
+    // Preserve the original cardinality capture before the asynchronous snapshot.
+    const sourceCueCount = jobRecord.cues.length;
     const doc = await this.activeHarness.snapshot(SubtitleJobDoc, jobRecord.conversationId, this.context);
-    yield* observeJobEvents(doc, jobRecord, { heartbeatIntervalMs, signal });
+    yield* observeJobEvents(doc, jobRecord, { heartbeatIntervalMs, signal, sourceCueCount });
   }
 }

@@ -22,11 +22,26 @@ Mutation-site counts were reviewed for product, acceptance, and build sources. W
 
 ## Verification
 
-- `npm run verify`: 37 unit tests, 75 acceptance scenarios / 1192 steps, and 8 separately executed properties passed.
+- `npm run verify`: 38 unit tests, 75 acceptance scenarios / 1192 steps, and 8 separately executed properties passed.
 - Properties use fast-check with seed `20261009`, 200 cases each: partition conservation/context budgets; validator encodings/order/timestamps; cache normalization; budget conservation; cue lookup; millisecond formatting round trips; JSON3 normalization idempotence; SSE byte-boundary invariance.
 - `npm run test:coverage`: native Node unit coverage, excluding properties. Extracted subtitle request/stream/formatting modules, default draft, glossary, streaming, budget, review, and validator have 100% line coverage. Remaining adapter/workflow coverage is intentionally reported, not hidden.
 - `crap4ts worker minimal-extension/src/subtitles.ts minimal-extension/src/stream-request.ts minimal-extension/src/subtitle-stream.ts minimal-extension/src/types.ts features/generator.ts`: maximum CRAP 9.53, within the role's <=10 requirement. The tool exits 2 because its built-in threshold is the stricter 8.00; this is not represented as a clean tool exit.
 - `jscpd worker minimal-extension/src features scripts --format typescript --workers 4`: duplication reduced from four clones / 0.98% lines to one clone / 0.15% lines (existing acceptance assertions).
 - `ts-mutate <source> --scan`: source-site discovery only. Scan mode rejects execution flags, so no worker flag is passed; it creates no mutation workers.
+
+## Post-commit requirement audit
+
+| Requirement | Evidence / boundary |
+| --- | --- |
+| TS is the sole maintained product/step source | Toolchain-01 enumerates source files and `tsc --listFilesOnly`; no tracked worker, extension or step JS remains. Strict typecheck and both injected field-type failures execute in isolated copies. |
+| Clean, local build and runnable worker | Toolchain-02 performs two builds without old JS; worker-01 launches `npm run worker` with default and explicit ports and an isolated database. Existing dependency versions are unchanged; only fast-check and pure-rand are added for property testing. |
+| Preserve HTTP, cue identity, milliseconds, defaults and keys | Worker-02 exercises real HTTP submit/stream/snapshot; worker-03 asserts both frozen keys; unit/property tests cover ordering, failed output, retry classification, budgets and retained publications. |
+| Preserve browser entry paths, settings, rendering and export | Extension-01 executes all four built scripts and checks manifest/HTML/icons and MAIN-world timing; extension-02 checks the explicit legacy model fixture; extension-03 exercises duplicate cue updates and real VTT export. |
+| Preserve off-by-default navigation and fallback isolation | Extension-04 starts with an active old video and sends late old-stream events; extension-05 checks JSON3/XML, offsets, JSON string details, source identity and absence of Cookie. |
+| Do not change behavior through extraction | Full committed-diff review found the source cue count had moved across the asynchronous snapshot. It is captured before the await again, with a regression test that mutates the record during snapshot. Checkpoint issue resets, review ordering, placeholder rejection and API/settings shapes were reviewed against the inbound implementation. |
+| Preserve existing acceptance, isolate properties, do not run mutations | All 75 APS-generated scenarios remain; `verify` runs the eight property groups separately. Coverage and CRAP use `npm test` or unit commands without property execution. Scans only; no manifests manually edited. |
+| Avoid unrelated changes and overstated claims | Python and SwarmForge are untouched; only task code/tests/docs are committed. Scratch/bootstrap backup and generated output remain ignored. Browser installation and real-model quality remain explicitly unverified. |
+
+Root and extension developer instructions retain install/build/start/reload guidance. The complete inbound payload, scope documents, committed diff, test adapters, generated entry layout, reports, and working-tree state were reviewed. Remaining limitations are the documented stricter tool threshold, one retained assertion clone, environment-adapter source coverage exclusions, and the pre-existing mock/empty assertions in legacy acceptance—not new claims of completeness for the older translation-quality contract.
 
 Reports and generated acceptance output stay ignored in `./tmp/` and `./coverage/`. These checks do not claim real-browser installation, real-model translation quality, or Python-backend verification.

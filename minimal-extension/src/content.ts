@@ -4,7 +4,8 @@ import type { ExtensionSettings, StoredSettings, Subtitle, BrowserSubtitles, Str
 
 const CID = "yts-overlay";
 
-let videoEl: HTMLVideoElement | null = null, subtitles: Subtitle[] = [], ci = -1;
+type PendingSubtitle = Omit<Subtitle, "start" | "end"> & Partial<Pick<Subtitle, "start" | "end">>;
+let videoEl: HTMLVideoElement | null = null, subtitles: PendingSubtitle[] = [], ci = -1;
 let observer: MutationObserver | null = null;
 let settings: ExtensionSettings;
 let loadedVideoId = "", loadGeneration = 0;
@@ -298,8 +299,8 @@ function idxOf(ms: number) {
   let lo = 0, hi = subtitles.length - 1;
   while (lo <= hi) {
     const m = (lo + hi) >>> 1, s = subtitles[m];
-    if (ms >= s.start && ms <= s.end) return m;
-    if (ms < s.start) hi = m - 1; else lo = m + 1;
+    if (ms >= Number(s.start) && ms <= Number(s.end)) return m;
+    if (ms < Number(s.start)) hi = m - 1; else lo = m + 1;
   }
   return -1;
 }
@@ -438,8 +439,8 @@ async function load(pageUrl: string) {
           if (!Number.isInteger(index) || index < 0) return;
           const previous: Partial<Subtitle> = subtitles[index] || {};
           subtitles[index] = {
-            start: event.start ?? previous.start ?? 0,
-            end: event.end ?? previous.end ?? 0,
+            start: event.start ?? previous.start,
+            end: event.end ?? previous.end,
             text: event.text ?? previous.text ?? "",
             translation: event.translation ?? previous.translation ?? "",
           };
@@ -552,8 +553,8 @@ function vidFromUrl(url: string) { try { return new URL(url).searchParams.get("v
 // ── download VTT ───────────────────────────────────────────
 
 function downloadVtt() {
-  const exportable = subtitles.filter(s => (
-    s && Number.isFinite(Number(s.start)) && Number.isFinite(Number(s.end)) && s.text
+  const exportable = subtitles.filter((s): s is Subtitle => (
+    s && Number.isFinite(Number(s.start)) && Number.isFinite(Number(s.end)) && Boolean(s.text)
   ));
   if (!exportable.length) {
     const error = "还没有可导出的字幕，请先开启翻译并等待字幕加载";

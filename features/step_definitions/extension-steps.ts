@@ -127,7 +127,7 @@ Given(/^当前视频已开启翻译且后端流包含 index 为 0 的原字幕 "
 When(/^真实 content 脚本依次接收 source_cue、译文为 "([^"]+)" 的 cue、同一 cue 的重复事件和成功 done$/, async (translation: string) => {
   expectedCue.translation = translation;
   const cue = { index: 0, ...expectedCue };
-  fixture().send([{ type: "meta", total_cues: 1, completed_cues: 0 }, { type: "source_cue", ...cue, translation: undefined },
+  fixture().send([{ type: "meta", total_cues: 1, completed_cues: 0, failed_cues: 0 }, { type: "source_cue", ...cue, translation: undefined },
     { type: "cue", ...cue }, { type: "cue", ...cue }, { type: "done", total_cues: 1, failed_cues: 0 }]);
   fixture().finish();
   await eventually(() => fixture().dom.window.document.querySelector(".status")?.textContent?.includes("字幕翻译完成") === true);

@@ -13,10 +13,8 @@
             {:path feature :ir (json/parse-string (slurp output) true)}))
         features))
 
-;; APS IR drives the generated executable's selected scenarios and expected count.
-;; Cucumber is the runner adapter and retains original data-table arguments:
-;; the APS IR currently omits those arguments. No project Gherkin parser is used.
-(spit "./tmp/acceptance-runner.ts"
-      (str "import { runAcceptance } from '../features/runtime.ts';\n"
-           "await runAcceptance(" (json/generate-string sources) ");\n"))
+;; Generate concrete scenarios from APS IR, then execute them through the
+;; Cucumber adapter. Original data tables/tags are retained by its official AST.
+(spit "./tmp/acceptance-sources.json" (json/generate-string sources))
+(process/check (process/shell "node" "--import" "tsx" "scripts/generate-acceptance.ts"))
 (process/check (process/shell "node" "--import" "tsx" "./tmp/acceptance-runner.ts"))

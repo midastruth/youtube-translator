@@ -6,6 +6,7 @@ import { partitionCuesIntoBlocks } from "../worker/chunker.js";
 import { validateOutputMapping } from "../worker/validator.js";
 import { createWorkerServer } from "../worker/server.js";
 import { AgentWorker } from "../worker/agent-worker.js";
+import { executeWithRetryAndBudget, NetworkError } from "../worker/network.js";
 
 const cue = { cue_id: "c0", start: 100, end: 1100, text: "Hello" };
 
@@ -38,6 +39,36 @@ test("an unopened worker remains inspectable and reports not ready", async () =>
   assert.deepEqual(await worker.readinessCheck(), { ready: false, reason: "harness_not_open" });
   await worker.close();
   assert.equal(worker.harness, null);
+});
+
+test("plain transport errors retain authentication classification and Retry-After", async () => {
+  let attempts = 0;
+  await assert.rejects(executeWithRetryAndBudget(async () => {
+    attempts++; throw { status: 401, message: "Denied" };
+  }, { sleepFn: async () => {} }), error => error instanceof NetworkError && error.errorType === "auth_error");
+  assert.equal(attempts, 1);
+  const delays: number[] = [];
+  let call = 0;
+  const result = await executeWithRetryAndBudget(async () => {
+    if (call++ === 0) throw { response: { status: 429, headers: { "retry-after": "0.25" } }, message: "Rate limited" };
+    return "ok";
+  }, { sleepFn: async ms => { delays.push(ms); } });
+  assert.equal(result, "ok"); assert.deepEqual(delays, [250]);
+});
+
+test("a missing completion document remains a failed job, never empty success", async () => {
+  const directory = await fs.mkdtemp("./tmp/missing-document-");
+  const worker = new AgentWorker({ storagePath: `${directory}/db.sqlite` });
+  try {
+    await worker.start();
+    assert.ok(worker.harness);
+    worker.harness.snapshot = async () => undefined;
+    const job = await worker.submitOrAttachJob({ cues: [cue] });
+    await job.taskPromise;
+    assert.equal(job.status, "failed");
+    assert.ok(job.error instanceof Error);
+    assert.equal(job.finalResult, undefined);
+  } finally { await worker.close(); await fs.rm(directory, { recursive: true, force: true }); }
 });
 
 test("HTTP snapshot reads the committed document, not a missing definition", async () => {

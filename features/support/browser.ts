@@ -141,6 +141,9 @@ export class BrowserFixture {
   }
   navigate(id: string) {
     this.dom.reconfigure({ url: `https://www.youtube.com/watch?v=${id}` });
+    const previousVideo = this.dom.window.document.querySelector("video");
+    previousVideo?.replaceWith(this.dom.window.document.createElement("video"));
+    this.setPlayerResponse({ videoDetails: { videoId: id } });
     this.dom.window.dispatchEvent(new this.dom.window.Event("yt-navigate-finish"));
   }
   setPlayerResponse(response: PlayerResponse) {

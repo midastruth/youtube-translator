@@ -8,7 +8,7 @@ import { WHITELIST_TOOLS } from "./tools.js";
 import { SubtitleTranslationTask, SubtitleJobDoc, TaskMocks } from "./task-definition.js";
 import { calculateJobKey } from "./keys.js";
 import type { JobRecord, SubmitJobOptions, TaskResult, StreamEvent, PublishedCue } from "./types.js";
-import type { TaskId } from "@earendil-works/pi-durable";
+import type { TaskId, ConversationId } from "@earendil-works/pi-durable";
 
 export class AgentWorker {
   storagePath: string;
@@ -110,7 +110,7 @@ export class AgentWorker {
     return { ready: true };
   }
 
-  async getJob(jobKeyOrId: string): Promise<JobRecord | null> {
+  async getJob(jobKeyOrId: string | ConversationId): Promise<JobRecord | null> {
     for (const job of this.jobs.values()) {
       if (job.jobKey === jobKeyOrId || job.jobId === jobKeyOrId) {
         return job;
@@ -122,7 +122,7 @@ export class AgentWorker {
         const page = await this.storage.scanConversations({}, 100, undefined, this.context);
         for (const item of page.items || []) {
           const doc = await this.harness.snapshot(SubtitleJobDoc, item.id, this.context);
-          if (doc && (doc.job_key === jobKeyOrId || `job-${item.id}` === jobKeyOrId)) {
+          if (doc && (doc.job_key === jobKeyOrId || item.id === jobKeyOrId)) {
             const emitter = new EventEmitter();
             emitter.on("error", () => {});
             const jobRecord: JobRecord = {
@@ -266,8 +266,9 @@ export class AgentWorker {
         try {
           await this.activeHarness.waitForTask(createdTaskId, this.context);
           const doc = await this.activeHarness.snapshot(SubtitleJobDoc, conversation.id, this.context);
-          jobRecord.status = doc?.status || "succeeded";
-          jobRecord.finalResult = doc?.final_result;
+          if (!doc) throw new Error("Subtitle job document is missing");
+          jobRecord.status = doc.status || "succeeded";
+          jobRecord.finalResult = doc.final_result;
 
           // Emit final cues and done
           const cuesList = doc?.final_result?.cues || [];

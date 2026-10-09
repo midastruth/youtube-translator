@@ -119,7 +119,8 @@ worker 默认端口 `8788`，数据库默认 `./cache/worker-storage.db`；可�
 SwarmForge 环境可先运行 `swarm_tool.sh require gherkin-parser`，缺失时运行
 `swarm_tool.sh ensure gherkin-parser`。`npm run test:acceptance` 顺序执行构建、
 APS 解析、Babashka 入口生成及生成的可执行测试；Cucumber 是运行器适配层，
-保留原 feature 的数据表（APS IR 目前未携带这些表），并校验场景及 Examples 数量。
+测试的场景、步骤与 Examples 来自 APS IR；适配层保留原数据表和标签
+（APS IR 目前未携带这些信息），并校验生成场景数量。
 测试夹具在 `./tmp/` 隔离真实 HTTP/数据库以及受控 DOM、浏览器 API 与播放器边界，
 不请求真实模型，也不声称已在真实浏览器安装验证或证明翻译质量改善。
 

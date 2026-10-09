@@ -1,7 +1,23 @@
 export type Usage = { promptTokens?: number; completionTokens?: number; cost?: number };
 export type RequestFailure = Error & { statusCode?: number; status?: number; retryAfter?: string; response?: { status?: number; headers?: Record<string, string> } };
 export function requestFailure(value: unknown): RequestFailure {
-  return value instanceof Error ? value : new Error(String(value));
+  if (value instanceof Error) return value;
+  const error: RequestFailure = new Error(String(value));
+  if (!value || typeof value !== "object") return error;
+  if ("message" in value && typeof value.message === "string") error.message = value.message;
+  if ("statusCode" in value && typeof value.statusCode === "number") error.statusCode = value.statusCode;
+  if ("status" in value && typeof value.status === "number") error.status = value.status;
+  if ("retryAfter" in value && (typeof value.retryAfter === "string" || typeof value.retryAfter === "number")) error.retryAfter = String(value.retryAfter);
+  if ("response" in value && value.response && typeof value.response === "object") {
+    const response = value.response;
+    error.response = {};
+    if ("status" in response && typeof response.status === "number") error.response.status = response.status;
+    if ("headers" in response && response.headers && typeof response.headers === "object") {
+      error.response.headers = Object.fromEntries(Object.entries(response.headers)
+        .filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+    }
+  }
+  return error;
 }
 export class NetworkError extends Error {
   statusCode?: number;

@@ -29,7 +29,7 @@ test("duplicate cue replaces one subtitle; actual background action exports mill
     browser.execute("content"); browser.execute("background"); browser.toggle();
     await eventually(() => browser.streams.length === 1);
     const cue = { index: 0, start: 1000, end: 2500, text: "Hello", translation: "你好" };
-    browser.send([{ type: "meta", total_cues: 1 }, { type: "source_cue", ...cue }, { type: "cue", ...cue }, { type: "cue", ...cue }, { type: "done", total_cues: 1, failed_cues: 0 }]);
+    browser.send([{ type: "meta", total_cues: 1, failed_cues: 0 }, { type: "source_cue", ...cue }, { type: "cue", ...cue }, { type: "cue", ...cue }, { type: "done", total_cues: 1, failed_cues: 0 }]);
     browser.finish(); browser.seek(1500);
     await eventually(() => browser.dom.window.document.querySelector(".tran")?.textContent === "你好");
     browser.clickAction();
@@ -48,7 +48,9 @@ test("new page and SPA navigation start off despite legacy enabled; stale stream
     browser.send([{ type: "meta", total_cues: 1 }, { type: "source_cue", index: 0, start: 0, end: 2000, text: "old" }], old);
     browser.seek(100);
     await eventually(() => browser.dom.window.document.querySelector(".orig")?.textContent === "old");
+    const oldVideo = browser.dom.window.document.querySelector("video");
     browser.navigate("new-video");
+    assert.notEqual(browser.dom.window.document.querySelector("video"), oldVideo);
     browser.send([{ type: "cue", index: 0, start: 0, end: 2000, text: "late", translation: "迟到" }, { type: "done", total_cues: 1, failed_cues: 0 }], old);
     browser.finish(old);
     await new Promise(resolve => setTimeout(resolve, 20));
@@ -56,6 +58,19 @@ test("new page and SPA navigation start off despite legacy enabled; stale stream
     assert.equal(browser.dom.window.document.querySelector<HTMLElement>(".bg")?.style.display, "none");
     browser.toggle(); await eventually(() => browser.streams.length === 2);
     assert.match(browser.streams[1].body.url, /v=new-video$/);
+  } finally { browser.close(); }
+});
+
+test("a translation without source timing cannot invent an exportable zero-length cue", async () => {
+  const browser = new BrowserFixture();
+  try {
+    browser.execute("content"); browser.execute("background"); browser.toggle();
+    await eventually(() => browser.streams.length === 1);
+    browser.send([{ type: "meta", total_cues: 1, failed_cues: 0 }, { type: "cue", index: 0, text: "Hello", translation: "你好" }, { type: "done", total_cues: 1, failed_cues: 0 }]);
+    browser.finish();
+    await eventually(() => browser.dom.window.document.querySelector(".status")?.textContent?.includes("字幕翻译完成") === true);
+    browser.clickAction();
+    assert.equal(browser.response?.ok, false); assert.equal(browser.downloads.length, 0);
   } finally { browser.close(); }
 });
 

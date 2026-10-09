@@ -51,14 +51,16 @@ Feature: TypeScript extension compatibility
 
   Scenario Outline: TypeScript extension compatibility-04 页面翻译开关仍默认关闭
     Given 存储中残留 enabled 为 true 的旧设置
+    And 页面在事件前的状态为 "<previous_state>"
     When 生成的 content 脚本经历 "<page_event>"
     Then 当前视频的翻译开关为关闭且不自动请求后端字幕
+    And 页面不显示上一视频的字幕且忽略上一请求迟到的事件
     And 用户手动开启后才发送当前视频的请求
 
     Examples:
-      | page_event        |
-      | 首次加载视频页面  |
-      | yt-navigate-finish|
+      | previous_state   | page_event         |
+      | 尚未加载脚本     | 首次加载视频页面   |
+      | 已开启且有字幕   | yt-navigate-finish |
 
   Scenario Outline: TypeScript extension compatibility-05 MAIN world 字幕兜底协议兼容
     Given 后端轨道接口响应 400 且当前视频的播放器提供 "<payload>" 字幕

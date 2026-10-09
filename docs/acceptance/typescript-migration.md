@@ -32,6 +32,12 @@
 
 只使用 APS 支持的声明、步骤和 Examples，不扩展旧翻译质量规格的产品承诺。
 
+## 确定性边界夹具
+
+扩展设置兼容场景中的“旧翻译配置”固定包含 `toLang=zh-CN`、`segmentation=rule`、`translateModel=gpt-4o`、`translateBaseUrl=https://model.invalid/v1`、`translateApiKey=fixture-only-not-a-secret`。保存后逐项验证这些值仍在存储中，并分别映射到请求的 `translate_to`、`segmentation`、`translate_model`、`translate_base_url`、`translate_api_key`；不能以两端同时缺失当作兼容。
+
+页面首次加载夹具尚未执行 content 脚本；SPA 导航夹具先开启旧视频翻译、加载一条字幕并保留可发送迟到事件的旧请求，再改变 URL/播放器视频并触发 `yt-navigate-finish`。两种路径均验证新视频初始关闭。字幕/VTT 场景的 meta 和 done 均声明一条源 cue、零失败，不等待真实网络或模型。
+
 ## 验收连接要求
 
 - 命令场景运行实际项目命令，类型错误测试在 `./tmp/` 的隔离项目副本中进行，并确认错误来自被检查的迁移类型，不是启动失败或缺少依赖。

@@ -9,6 +9,7 @@ import { run } from "../core/proc.ts";
 import { sleepSync } from "../core/sleep.ts";
 import { isBlank, notEmpty, splitLines, splitOnce } from "../core/text.ts";
 import { isoInstant } from "../core/time.ts";
+import { submitKeys } from "../core/tmux-input.ts";
 import { script } from "./lib.ts";
 
 export const POLL_MS = 1000;
@@ -75,15 +76,15 @@ export class Daemon {
     return roles;
   }
 
-  notify(socket: string, session: string): void {
+  notify(socket: string, session: string, agent = ""): void {
     const text = run("tmux", ["-S", socket, "send-keys", "-t", session, "-l", WAKE_MESSAGE]);
-    sleepSync(150);
-    const cr = run("tmux", ["-S", socket, "send-keys", "-t", session, "C-m"]);
-    sleepSync(50);
-    const lf = run("tmux", ["-S", socket, "send-keys", "-t", session, "C-j"]);
     if (text.exit !== 0) throw new Error("tmux send text failed");
-    if (cr.exit !== 0) throw new Error("tmux send carriage return failed");
-    if (lf.exit !== 0) throw new Error("tmux send line feed failed");
+    sleepSync(150);
+    for (const key of submitKeys(agent)) {
+      const result = run("tmux", ["-S", socket, "send-keys", "-t", session, key]);
+      if (result.exit !== 0) throw new Error(`tmux send ${key} failed`);
+      sleepSync(50);
+    }
   }
 
   moveWithCollision(source: string, targetDir: string): void {
@@ -247,7 +248,8 @@ export class Daemon {
   private maybeNotifyUnblockedSender(roles: Roles, socket: string, headers: Headers, sender: string): void {
     const approvedGit = headers.get("type") === "git_handoff" && !isBlank(headers.get("approved"));
     if (approvedGit && this.senderReadyWork(roles, sender) && !(recipientList(headers) ?? []).includes(sender)) {
-      this.notify(socket, roles.get(sender)!.session);
+      const info = roles.get(sender)!;
+      this.notify(socket, info.session, info.agent);
       this.log("notified-unblocked-sender", sender);
     }
   }
@@ -272,7 +274,7 @@ export class Daemon {
       headers.set("enqueued_at", isoInstant());
       mkdirSync(dirname(target), { recursive: true });
       if (!existsSync(target)) writeFileSync(target, renderMessage(headers, message.body));
-      this.notify(socket, info.session);
+      this.notify(socket, info.session, info.agent);
     }
     this.moveWithCollision(path, this.sentDir(roles, sender));
     this.archiveSender(message.headers);

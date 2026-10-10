@@ -6,7 +6,8 @@ import { eprintln } from "../core/cli.ts";
 import { run } from "../core/proc.ts";
 import { sleepSync } from "../core/sleep.ts";
 import { isBlank } from "../core/text.ts";
-import { masterRow, paneTarget, roleRow, sessionName, tmuxSocket, type Row } from "./files.ts";
+import { submitKeys } from "../core/tmux-input.ts";
+import { backendName, masterRow, paneTarget, roleRow, sessionName, tmuxSocket, type Row } from "./files.ts";
 
 export const PANE_CAPTURE_LINES = 2000;
 
@@ -32,13 +33,14 @@ function sendKeys(socket: string, target: string, ...keys: string[]): void {
   if (result.exit !== 0) throw new Error("tmux send-keys failed");
 }
 
-export function injectTarget(socket: string, target: string, text: string): void {
+export function injectTarget(socket: string, target: string, text: string, agent = ""): void {
   if (isBlank(text)) return;
   sendKeys(socket, target, "-l", text);
   if (!tmuxStub()) sleepSync(150);
-  sendKeys(socket, target, "C-m");
-  if (!tmuxStub()) sleepSync(50);
-  sendKeys(socket, target, "C-j");
+  for (const key of submitKeys(agent)) {
+    sendKeys(socket, target, key);
+    if (!tmuxStub()) sleepSync(50);
+  }
 }
 
 export function injectRole(root: string, role: string | undefined, text: string): void {
@@ -47,7 +49,7 @@ export function injectRole(root: string, role: string | undefined, text: string)
     const row = roleRow(root, role);
     const target = row ? paneTarget(row) : undefined;
     if (!socket || !target) throw new Error("missing tmux target");
-    injectTarget(socket, target, text);
+    injectTarget(socket, target, text, backendName(row!));
   } catch (error) {
     eprintln(`inject failed role=${role} socket=${tmuxSocket(root)} error=${(error as Error).message}`);
   }

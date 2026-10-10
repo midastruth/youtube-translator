@@ -129,12 +129,20 @@ function grokCommandLine(row: RoleRow, promptFile: string, initialPrompt: boolea
     (initialPrompt ? ` --verbatim ${prompt}` : "");
 }
 
+function piCommandLine(row: RoleRow, promptFile: string, initialPrompt: boolean): string {
+  const prompt = `"$(cat ${sq(promptFile)})"`;
+  const tuiMode = extraHas(row, "--tui-mode") ? "" : "--tui-mode regular ";
+  return `pi --append-system-prompt ${sq(promptFile)} ${tuiMode}` +
+    `--name ${sq(`SwarmForge ${row.displayName}`)} ${extraArgsPrefix(row)}${initialPrompt ? prompt : ""}`;
+}
+
 type AgentCmd = (row: RoleRow, promptFile: string, initialPrompt: boolean) => string;
 const AGENT_COMMANDS: Record<string, AgentCmd> = {
   claude: claudeCommandLine,
   codex: codexCommandLine,
   copilot: copilotCommandLine,
   grok: grokCommandLine,
+  pi: piCommandLine,
 };
 
 function cleanupSuffix(ctx: Ctx): string {

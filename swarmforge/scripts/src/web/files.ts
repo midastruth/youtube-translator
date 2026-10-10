@@ -52,7 +52,8 @@ export function sessionName(row: Row): string {
 
 export function paneTarget(row: Row): string {
   const session = sessionName(row);
-  return isBlank(row[4]) ? session : `${session}:${row[4]}.0`;
+  // Each agent owns a window; let tmux select its pane regardless of pane-base-index.
+  return isBlank(row[4]) ? session : `${session}:${row[4]}`;
 }
 
 export const backendName = (row: Row): string => (row[5] ?? "").toLowerCase();

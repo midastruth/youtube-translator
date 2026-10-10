@@ -136,7 +136,7 @@ export function visibleWindow(directive: string, lineNo: number): boolean {
 
 const receiveModes = new Set(["task", "batch"]);
 const propagationModes = new Set(["forward-only", "back-one", "back-all"]);
-export const knownAgents = new Set(["claude", "codex", "copilot", "grok"]);
+export const knownAgents = new Set(["claude", "codex", "copilot", "grok", "pi"]);
 
 function receiveFields(trailing: string[]): [string, string, string[]] {
   let rest = trailing;
@@ -218,7 +218,7 @@ function readConfigFileLines(file: string): string[] {
 }
 
 export function parseLieutenantConfig(ctx: Ctx): { agent: string; extraArgs: string | undefined } {
-  const fallback = (process.env.SWARMFORGE_LIEUTENANT_AGENT || "grok").toLowerCase();
+  const fallback = (process.env.SWARMFORGE_LIEUTENANT_AGENT || "pi").toLowerCase();
   for (const raw of readConfigFileLines(ctx.configFile)) {
     const line = raw.trim();
     if (skipConfigLine(line)) continue;

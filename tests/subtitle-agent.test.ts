@@ -336,7 +336,10 @@ test("default document budget is unlimited beyond 128 calls and still counts act
   const f = await fixture(t, { intercept: async (payload, res) => {
     const manifest = JSON.parse(payload.messages.find(m => m.role === "user")!.content!);
     assert.equal(manifest.request_budget, "unlimited");
-    if (extraReads-- > 0) {
+    // Unlimited aggregate budget is distinct from the main-agent no-progress
+    // watchdog. Exercise the budget across a child session, not stuck planning.
+    const main = payload.tools?.some(t => t.function.name === "dispatch_subagents");
+    if (!main && extraReads-- > 0) {
       sendAgentTools(res, [{ name: "read_file", args: { path: "source.json", offset: 0, count: 100 } }]);
       return true;
     }
@@ -348,6 +351,55 @@ test("default document budget is unlimited beyond 128 calls and still counts act
   assert.equal(doc?.budget_limit, 0);
   assert.equal(doc?.network_attempts, f.requests.length);
   assert.equal(job.finalResult?.cues.length, cues.length);
+});
+
+test("stalled main review stops paid requests, retains submitted children in SQLite, and resumes after restart", { timeout: 15000 }, async t => {
+  let stall = true;
+  const f = await fixture(t, { intercept: async (payload, res) => {
+    if (!payload.tools?.some(tool => tool.function.name === "dispatch_subagents")) return;
+    const live = payload.messages.filter(m => m.role === "user").map(m => {
+      try { return JSON.parse(m.content || "{}"); } catch { return {}; }
+    }).find(m => m.type === "workspace_status");
+    if (!live?.subagents?.length || live.subagents.some((c: { status: string }) => c.status === "running")) return;
+    const progress = live.main_progress;
+    if (!progress.bilingual_read_cues) {
+      sendAgentTools(res, [{ name: "read_bilingual", args: { offset: 0, count: 1 } }]);
+    } else if (!progress.reviewed_cues) {
+      sendAgentTools(res, [{ name: "record_review", args: { offset: 0, count: 1, revision: progress.review_revision, summary: "First page checked; negation preserved. Continue at position 1." } }]);
+    } else if (stall) {
+      sendAgentTools(res, [{ name: "read_bilingual", args: { offset: 0, count: 1 } }]);
+    } else {
+      assert.equal(progress.next_review_offset, 1, "explicit semantic review survives SQLite persistence and restart");
+      assert.match(progress.review_summary, /negation preserved/);
+      sendAgentTools(res, progress.bilingual_read_cues === 1 ? [{ name: "read_bilingual", args: { offset: 1, count: 1 } }] : [
+        { name: "record_review", args: { offset: 1, count: 1, revision: progress.review_revision, summary: "Both pages checked; no unresolved meaning or terminology problems." } },
+        { name: "accept_translation", args: { review: "Rechecked source meaning and submitted sections; numbers and terminology consistent." } },
+        { name: "close_subagents", args: {} }, { name: "validate_translation", args: {} }, { name: "finish_translation", args: {} },
+      ]);
+    }
+    return true;
+  } });
+  const job = await f.worker.submitOrAttachJob({ ...f.jobOptions, budgetLimit: 0 }); await job.taskPromise;
+  assert.equal(job.status, "failed");
+  assert.match(String(job.error), /主 Agent 验收无进展.*检查点已保留/);
+  const saved = await f.worker.harness!.snapshot(DocumentResumeDoc, job.conversationId, f.worker.context);
+  const workspace = saved?.document as unknown as { draft: Record<string, string>; children: { status: string }[]; mainProgress: { guard: { stalled: number }; reviewed: number[][] } };
+  assert.equal(Object.keys(workspace.draft).length, cues.length);
+  assert.ok(workspace.children.every(c => c.status === "completed"));
+  assert.equal(workspace.mainProgress.guard.stalled, 12);
+  assert.deepEqual(workspace.mainProgress.reviewed, [[0, 1]]);
+  const before = f.requests.length;
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(f.requests.length, before, "failed job must not keep spending requests");
+  assert.deepEqual((await f.worker.snapshotJob(job)).published_cues, []);
+  stall = false;
+  await f.restart();
+  const resumed = await f.worker.submitOrAttachJob({ ...f.jobOptions, budgetLimit: 0 }); await resumed.taskPromise;
+  assert.equal(resumed.jobId, job.jobId);
+  assert.equal(resumed.status, "succeeded");
+  assert.equal(f.requests.length, before + 2, "manual resume resets only the watchdog and reviews only the remaining page, without respawning children");
+  const doc = await f.worker.harness!.snapshot(SubtitleJobDoc, resumed.conversationId, f.worker.context);
+  assert.equal(doc?.network_attempts, f.requests.length);
 });
 
 test("reasoning effort is stable across agent turns, separates cache keys and survives restart", { timeout: 15000 }, async t => {

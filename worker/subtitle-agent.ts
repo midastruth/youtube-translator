@@ -203,6 +203,9 @@ export type AgentHooks = {
   /** Must only add byte-stable content (role/system prompt); volatile data belongs in status. */
   context?: (context: Context) => Context;
   status?: () => Record<string, unknown>;
+  /** Main agents also have durable planning/review checkpoints; keep a bounded
+   * complete last turn so they can finish interpreting the most recent page. */
+  retainLastTurnOnCompaction?: boolean;
   tool?: (state: SubtitleAgentState, name: string, args: unknown) => unknown;
 };
 
@@ -222,8 +225,18 @@ export function subtitleAgentContext(input: DocumentInput, state: SubtitleAgentS
   let context = buildAgentContext(input, state, hooks);
   // Compact only between complete tool turns, including role-specific prompts in accounting.
   if (tokenEstimate(context) > inputBudget(input.config) * 0.8 && state.messages.length) {
-    state.messages = []; state.compactions++;
+    let lastAssistant = state.messages.length - 1;
+    while (lastAssistant >= 0 && state.messages[lastAssistant].role !== "assistant") lastAssistant--;
+    const tail = hooks.retainLastTurnOnCompaction && lastAssistant >= 0 ? state.messages.slice(lastAssistant) : [];
+    state.messages = tokenEstimate(tail) <= inputBudget(input.config) * 0.3 ? tail : [];
+    state.compactions++;
     context = buildAgentContext(input, state, hooks);
+    // Leave room for another tool page; never retain an orphan tool result or
+    // let a large last turn defeat compaction.
+    if (tokenEstimate(context) > inputBudget(input.config) * 0.65 && state.messages.length) {
+      state.messages = [];
+      context = buildAgentContext(input, state, hooks);
+    }
   }
   if (tokenEstimate(context) > inputBudget(input.config)) throw new DocumentPermanentError("configuration", "Agent instructions/tools exceed the configured context budget");
   return context;

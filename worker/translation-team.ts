@@ -11,6 +11,8 @@ import { createDocumentTask } from "./document-task.js";
 import { READ_BILINGUAL_TOOL, REVIEW_CHECKLIST_TOOL, readBilingual, reviewChecklist } from "./translation-review.js";
 import type { DocumentAdvanceControl } from "./document-task.js";
 import { setTimeout as delay } from "node:timers/promises";
+import { MAIN_PROGRESS_TOOLS, addRange, invalidateReview, mainProgress, progressStatus, progressTool, rangeCount } from "./team-progress.js";
+import type { MainProgress } from "./team-progress.js";
 
 export const TRANSLATION_TEAM_VERSION = "subtitle-translation-team-v2-streaming";
 export const MAX_SUBAGENTS = 9; // Remainder agents; the dedicated opening is additional.
@@ -29,6 +31,33 @@ export function openingTarget(cues: DocumentInput["cues"]) {
   // Short videos: a 1/6 slice is too small to justify a separate agent; keep ~30 cues.
   const suggested = Math.min(max, Math.max(at(target), Math.min(cues.length, OPENING_SMALL_CUES) - 1));
   return { min, max, suggested, duration, target };
+}
+/** Complete deterministic coverage, NOT a semantic chapter plan. The model only
+ * needs representative context and can adjust nearby boundaries if necessary. */
+export function dispatchSuggestion(input: DocumentInput) {
+  const openingEnd = input.streamOpening ? openingTarget(input.cues).suggested : -1;
+  const start = openingEnd + 1, remaining = input.cues.length - start;
+  const count = Math.min(MAX_SUBAGENTS, Math.ceil(remaining / 160));
+  let cursor = start;
+  const assignments: Assignment[] = [];
+  for (let i = 0; i < count; i++) {
+    const target = start + Math.round(remaining * (i + 1) / count) - 1;
+    let end = target;
+    if (i < count - 1) {
+      // Prefer a nearby sentence end or pause, while leaving every later child
+      // at least one cue. Treat punctuation as data, never as instructions.
+      const candidates = Array.from({ length: 13 }, (_, j) => target + j - 6)
+        .filter(n => n >= cursor && n < input.cues.length - (count - i - 1));
+      end = candidates.filter(n => /[.!?。！？]["'”’)]?\s*$/u.test(input.cues[n].text) || input.cues[n + 1].start - input.cues[n].end >= 1000)
+        .sort((a, b) => Math.abs(a - target) - Math.abs(b - target))[0] ?? target;
+    }
+    assignments.push({ start_id: input.cues[cursor].cue_id, end_id: input.cues[end].cue_id, instructions: "Translate this contiguous section using the shared brief; consult full-source context as needed." });
+    cursor = end + 1;
+  }
+  return {
+    ...(openingEnd >= 0 ? { opening: { end_id: input.cues[openingEnd].cue_id, instructions: "Translate and self-review the opening promptly using the shared brief." } } : {}),
+    assignments,
+  };
 }
 function openingTargetSummary(input: DocumentInput) {
   const t = openingTarget(input.cues), id = (i: number) => input.cues[i].cue_id;
@@ -56,17 +85,19 @@ export type TranslationChild = Assignment & {
 };
 export type TranslationTeamState = SubtitleAgentState & {
   brief: string; children: TranslationChild[]; acceptedRevision: number; acceptance: string;
+  /** Optional for existing running/failed checkpoints; initialized lazily. */
+  mainProgress?: MainProgress;
 };
 
 export const TEAM_PROMPT = `${SUBTITLE_AGENT_PROMPT}
 You are the MAIN agent coordinating a translation team, not the bulk translator.
-Quickly read representative source (opening plus later definitions) to assess subject, audience, tone, subtitle style and terminology; do not spend many turns exhaustively reading before delegation. Save useful notes. Then call dispatch_subagents with a shared style/terminology brief, a dedicated opening assignment, and 0 to 9 further contiguous, non-overlapping semantic assignments covering the REMAINDER. The opening always starts at the first source cue. Its size is proportional to video length: about the first 1/6 of the video (e.g. a 1-hour video needs roughly the first 10 minutes). The host reports opening_target with suggested_end_id and the allowed end_id range; choose end_id within that range at a nearby sentence/topic boundary. For tiny sources the opening may cover everything and assignments may be empty. Do not allocate the opening to any other child. Choose the remaining parallelism proportional to source length/complexity, at most 9. Avoid splitting sentences or dependent explanations. All children receive the same immutable brief and can read the whole source for context. Put explicit term decisions in the brief as "source term = target term", one per line or separated by semicolons, so the host can check them. Assignments can be large: children paginate and translate incrementally. Historical tasks without stream_opening may still use assignments covering the whole source without opening.
+Quickly read representative source (opening plus later definitions) to assess subject, audience, tone, subtitle style and terminology; do not spend many turns exhaustively reading before delegation. The role message includes source_bounds and a dispatch_suggestion with complete valid coverage: use it as a starting point, not a claim of semantic boundaries. Read near proposed boundaries only as needed and adjust without gaps. Aim to dispatch within a few turns, not read the whole document first. After interpreting each source page, call save_plan with a compact CUMULATIVE understanding, style, term decisions and unresolved questions BEFORE fetching more pages. This durable summary and source-read ranges survive compaction; notes.md is also available. Then call dispatch_subagents with a shared style/terminology brief, a dedicated opening assignment, and 0 to 9 further contiguous, non-overlapping semantic assignments covering the REMAINDER. The opening always starts at the first source cue. Its size is proportional to video length: about the first 1/6 of the video (e.g. a 1-hour video needs roughly the first 10 minutes). The host reports opening_target with suggested_end_id and the allowed end_id range; choose end_id within that range at a nearby sentence/topic boundary. For tiny sources the opening may cover everything and assignments may be empty. Do not allocate the opening to any other child. Choose the remaining parallelism proportional to source length/complexity, at most 9. Avoid splitting sentences or dependent explanations. All children receive the same immutable brief and can read the whole source for context. Put explicit term decisions in the brief as "source term = target term", one per line or separated by semicolons, so the host can check them. Assignments can be large: children paginate and translate incrementally. Historical tasks without stream_opening may still use assignments covering the whole source without opening.
 The host runs every child independently and checkpoints each completed turn; a fast child never waits for a slow sibling's turn. Each child's self-checked submission is shown to viewers as a provisional preview while other children keep translating (the opening first). Previews are not final main-agent acceptance. The host returns control after all translations are complete. Do not translate the whole source yourself before delegation. You can inspect live team status in the latest workspace_status message.
-Review efficiently. When all children complete, the host appends a review_checklist: heuristic flags (missing cues, numbers absent from translations, untranslated copies, length outliers, brief term violations) plus bilingual rows around every assignment boundary. Fix real flagged problems first; flags can be false positives. Then read the merged result with read_bilingual in large pages (it shows source and translation side by side; prefer it over separate source/translations reads) and check meaning, negation, terminology and references. Children already self-reviewed their sections: spend your effort on cross-section consistency and on sections where you find problems; skim sections that read well. Use search_file/edit_file to fix problems; call review_checklist again after edits or context compaction. You are responsible for semantic acceptance; structure validation alone is NOT review.
+Review efficiently. When all children complete, the host appends a review_checklist: heuristic flags (missing cues, numbers absent from translations, untranslated copies, length outliers, brief term violations) plus bilingual rows around every assignment boundary. Fix real flagged problems first; flags can be false positives. Then read the merged result with read_bilingual in large pages (it shows source and translation side by side; prefer it over separate source/translations reads) and check meaning, negation, terminology and references. After reviewing each returned page, call record_review with its actual offset/returned_count, revision and a compact CUMULATIVE summary of decisions and remaining issues BEFORE reading the next page. Reading alone is not semantic confirmation. Children already self-reviewed their sections: spend your effort on cross-section consistency and on sections where you find problems; skim sections that read well. Use search_file/edit_file to fix problems; edits invalidate review evidence for affected cues. Re-read and recheck those cues; other confirmed ranges remain valid. Recompute review_checklist after edits, not merely because the conversation compacted: the checklist revision, counts and issue/boundary offsets persist in workspace_status.main_progress. After restart/compaction, resume from that durable plan/review summary and next_review_offset, NEVER automatically restart from the first page. You do not need to re-read confirmed ranges of the unchanged translation. You are responsible for semantic acceptance; structure validation alone is NOT review.
 When satisfied, finish in ONE turn by calling, in order: accept_translation (concrete review summary), close_subagents, validate_translation, finish_translation. Any translation edit invalidates acceptance. You cannot submit until all children are completed, accepted and closed. Ordinary chat is not completion.`;
 
 export const TEAM_TOOLS: Tool[] = [
-  ...SUBTITLE_AGENT_TOOLS, READ_BILINGUAL_TOOL, REVIEW_CHECKLIST_TOOL,
+  ...SUBTITLE_AGENT_TOOLS, READ_BILINGUAL_TOOL, REVIEW_CHECKLIST_TOOL, ...MAIN_PROGRESS_TOOLS,
   { name: "dispatch_subagents", description: "Launch a dedicated opening agent plus up to 9 independent translation agents. Opening starts at the first cue and covers about the first 1/6 of the video (end_id within opening_target's allowed range); assignments cover the remainder exactly once in source order. Required opening for stream_opening tasks; optional only for historical tasks. One immutable shared brief. Can be called only once.", parameters: Type.Object({
     brief: Type.String({ minLength: 1, maxLength: 12000 }),
     opening: Type.Optional(Type.Object({ end_id: Type.String(), instructions: Type.String({ minLength: 1, maxLength: 2000 }) }, { additionalProperties: false })),
@@ -132,10 +163,20 @@ export function translationTeamTool(input: DocumentInput, state: TranslationTeam
     state.brief = a.brief; state.children = children;
     return { dispatched: children.map(({ id, start_id, end_id }) => ({ id, start_id, end_id })), shared_brief: state.brief };
   }
-  if (name === "read_bilingual") return readBilingual(input, state, args);
+  if (name === "save_plan" || name === "record_review") {
+    if (name === "save_plan" && state.children.length) throw new WorkspaceError("Planning already dispatched; review the merged translation instead");
+    if (name === "record_review" && !completed(state)) throw new WorkspaceError("Wait for all subagents to complete before review");
+    return progressTool(input, state, name, a ?? {});
+  }
+  if (name === "read_bilingual") {
+    const page = readBilingual(input, state, args);
+    const p = mainProgress(state), offset = (a?.offset as number | undefined) ?? 0;
+    p.reviewRead = addRange(p.reviewRead, offset, offset + page.rows.length);
+    return { ...page, revision: state.revision, offset, returned_count: page.rows.length };
+  }
   if (name === "review_checklist") {
     if (!completed(state)) throw new WorkspaceError("Wait for all subagents to complete before review");
-    return reviewChecklist(input, state, state.brief, state.children);
+    return teamReviewChecklist(input, state);
   }
   if (name === "accept_translation") {
     if (!completed(state)) throw new WorkspaceError("Wait for all subagents to complete before acceptance");
@@ -156,23 +197,49 @@ export function translationTeamTool(input: DocumentInput, state: TranslationTeam
   }
   if (name === "finish_translation" && (!accepted(state) || state.children.some(c => c.status !== "closed"))) throw new WorkspaceError("Review and accept the current translation, then close all subagents before submitting");
   if ((name === "write_file" || name === "edit_file") && a?.path === "translations.json" && !completed(state)) throw new WorkspaceError("Delegate translation first; edit merged translations after subagents complete");
-  return subtitleAgentTool(input, state, name, args);
+  const before = state.draft;
+  const result = subtitleAgentTool(input, state, name, args);
+  if (state.draft !== before) {
+    invalidateReview(state, input.cues.flatMap((c, i) => before[c.cue_id] !== state.draft[c.cue_id] ? [i] : []));
+  }
+  if (name === "read_file" && (a?.path === "source.json" || a?.path === "translations.json")) {
+    const page = result as { content: string }, p = mainProgress(state);
+    if (a.path === "source.json") {
+      const offset = (a.offset as number | undefined) ?? 0;
+      p.sourceRead = addRange(p.sourceRead, offset, offset + (JSON.parse(page.content) as unknown[]).length);
+    } else {
+      const entries = JSON.parse(page.content) as Record<string, string>;
+      input.cues.forEach((c, i) => { if (Object.hasOwn(entries, c.cue_id)) p.translationRead = addRange(p.translationRead, i, i + 1); });
+    }
+  }
+  return result;
+}
+function teamReviewChecklist(input: DocumentInput, state: TranslationTeamState) {
+  const report = reviewChecklist(input, state, state.brief, state.children);
+  mainProgress(state).checklist = {
+    revision: report.revision, flagged_total: report.flagged_total, issue_counts: report.issue_counts,
+    flagged_offsets: report.flagged.map(f => f.offset), boundary_offsets: report.boundaries.map(b => b.offset),
+  };
+  return report;
 }
 // Cache layout: the role message changes only once (at dispatch); live team
 // progress is volatile and goes into the trailing workspace_status instead.
 function mainHooks(input: DocumentInput, state: TranslationTeamState): AgentHooks {
   return {
-    tools: TEAM_TOOLS, cacheKey: "main",
+    tools: TEAM_TOOLS, cacheKey: "main", retainLastTurnOnCompaction: true,
     context: context => ({ ...context, systemPrompt: TEAM_PROMPT, messages: [
       ...context.messages.slice(0, 1),
       { role: "user", timestamp: 0, content: JSON.stringify({ role: "main", stream_opening: !!input.streamOpening,
-        ...(input.streamOpening ? { opening_target: openingTargetSummary(input) } : {}), shared_brief: state.brief,
+        ...(input.streamOpening ? { opening_target: openingTargetSummary(input) } : {}),
+        source_bounds: { first_id: input.cues[0].cue_id, last_id: input.cues.at(-1)!.cue_id, total_cues: input.cues.length },
+        dispatch_suggestion: dispatchSuggestion(input), shared_brief: state.brief,
         subagents: state.children.map(c => ({ id: c.id, kind: c.kind, start_id: c.start_id, end_id: c.end_id, instructions: c.instructions })),
       }) }, ...context.messages.slice(1),
     ] }),
     status: () => ({
       subagents: state.children.map(c => ({ id: c.id, status: c.status, translated_cues: Object.keys(c.agent.draft).length })),
       accepted_revision: state.acceptedRevision, acceptance: state.acceptance,
+      main_progress: progressStatus(state, input.cues.length),
     }),
     tool: (s, name, args) => translationTeamTool(input, s as TranslationTeamState, name, args),
   };
@@ -224,7 +291,7 @@ async function advanceChild(input: DocumentInput, state: TranslationTeamState, c
       child.status = "completed";
       // Saved with the same checkpoint as the last submission, so the main agent
       // always resumes with its review checklist in history.
-      if (completed(state)) state.messages.push({ role: "user", timestamp: Date.now(), content: JSON.stringify(reviewChecklist(input, state, state.brief, state.children)) });
+      if (completed(state)) state.messages.push({ role: "user", timestamp: Date.now(), content: JSON.stringify(teamReviewChecklist(input, state)) });
     }
   } catch (error) {
     child.failures++;
@@ -245,7 +312,24 @@ export async function stepTranslationTeam(input: DocumentInput, previous: Transl
   const state = structuredClone(previous);
   const running = state.children.filter(c => c.status === "running");
   if (!running.length) {
-    return await advanceSubtitleAgent(input, state, call, mainHooks(input, state)) as TranslationTeamState;
+    if (state.stage === "publish") return state;
+    const p = mainProgress(state), phase = state.children.length ? "review" : "planning";
+    if (p.guard.phase !== phase) p.guard = { phase, turns: 0, stalled: 0 };
+    const limit = phase === "planning" ? 24 : Math.max(48, Math.ceil(input.cues.length / 20) * 4);
+    // Check BEFORE another network request. The preceding completed turn was
+    // checkpointed normally, so the durable task boundary can retain all work.
+    if (p.guard.turns >= limit || p.guard.stalled >= 12) {
+      throw new DocumentPermanentError("convergence", `主 Agent ${phase === "planning" ? "规划" : "验收"}无进展或达到阶段轮数上限，已停止自动请求；草稿和检查点已保留，可检查模型工具调用后重新开启续翻`);
+    }
+    const before = mainProgressMeasure(state);
+    const next = await advanceSubtitleAgent(input, state, call, mainHooks(input, state)) as TranslationTeamState;
+    const progress = mainProgress(next);
+    progress.guard.turns++;
+    progress.guard.stalled = mainProgressMeasure(next) !== before ? 0 : progress.guard.stalled + 1;
+    if (progress.guard.stalled >= 4 && !next.children.some(c => c.status === "running") && next.stage !== "publish") {
+      next.feedback = "Main agent is repeating work. Resume from workspace_status.main_progress; do not restart at offset 0 after compaction. Persist a cumulative save_plan / record_review summary. Use dispatch_suggestion for exact coverage, or complete semantic acceptance when satisfied. Automatic requests stop after 12 no-progress turns.";
+    }
+    return next;
   }
   const failed = failedChild(state);
   if (failed) throw new DocumentPermanentError("convergence", `${failed.id}: ${failed.error}`);
@@ -253,6 +337,13 @@ export async function stepTranslationTeam(input: DocumentInput, previous: Transl
   state.cursor++;
   updateFeedback(state);
   return state;
+}
+
+function mainProgressMeasure(state: TranslationTeamState) {
+  const p = mainProgress(state);
+  // Summary/note rewrites, repeated reads, validation and failed tool calls do
+  // not reset the watchdog. Translation corrections do; a phase cap still bounds them.
+  return JSON.stringify([rangeCount(p.sourceRead), rangeCount(p.reviewRead), rangeCount(p.translationRead), rangeCount(p.reviewed), state.children.map(c => c.status), state.draft, state.acceptedRevision, state.stage]);
 }
 
 /** Production driver: each child loops independently, saving EVERY completed turn.
@@ -310,6 +401,9 @@ export function translationTeamProgress(input: DocumentInput, state: Translation
   const parts = [phase, `${running.length ? "已保存草稿" : "已合并"} ${saved.size}/${input.cues.length}（未发布）`];
   if (state.children.length) parts.push(`Subagent 已提交 ${state.children.length - running.length}/${state.children.length}`);
   parts.push(`已完成 ${state.cursor} 轮`);
+  if (!running.length && state.children.length && state.mainProgress?.reviewRevision === state.revision) {
+    parts.push(`已确认审阅 ${rangeCount(state.mainProgress.reviewed)}/${input.cues.length} 条`);
+  }
   const opening = state.children.find(c => c.kind === "opening");
   if (opening?.status === "running") parts.push("开头优先翻译中");
   const previews = translationTeamPreviewCues(input, state).length;
@@ -328,7 +422,10 @@ export const TranslationTeamTask = createDocumentTask({
   }, context, options),
   finalCues: finalTranslationTeamCues,
   previewCues: translationTeamPreviewCues,
-  resume: state => ({ ...state, children: state.children.map(c => ({ ...c, failures: 0, error: "", terminal: false, retryAt: 0 })) }),
+  resume: state => ({ ...state,
+    ...(state.mainProgress ? { mainProgress: { ...state.mainProgress, guard: { ...state.mainProgress.guard, turns: 0, stalled: 0 } } } : {}),
+    children: state.children.map(c => ({ ...c, failures: 0, error: "", terminal: false, retryAt: 0 })),
+  }),
   wakeAt: state => {
     const running = state.children.filter(c => c.status === "running");
     return running.length && running.every(c => !c.terminal && c.failures <= 2 && c.retryAt > Date.now()) ? Math.min(...running.map(c => c.retryAt)) : 0;

@@ -25,8 +25,8 @@ Mutation-site counts were reviewed for product, acceptance, and build sources. W
 - `npm run verify`: 40 unit tests, 75 acceptance scenarios / 1192 steps, and 8 separately executed properties passed.
 - Properties use fast-check with seed `20261009`, 200 cases each: partition conservation/context budgets; validator encodings/order/timestamps; cache normalization; budget conservation; cue lookup; millisecond formatting round trips; JSON3 normalization idempotence; SSE byte-boundary invariance.
 - `npm run test:coverage`: native Node unit coverage, excluding properties. Extracted subtitle request/stream/formatting modules, default draft, glossary, streaming, budget, review, and validator have 100% line coverage. Remaining adapter/workflow coverage is intentionally reported, not hidden.
-- `crap4ts worker minimal-extension/src/subtitles.ts minimal-extension/src/stream-request.ts minimal-extension/src/subtitle-stream.ts minimal-extension/src/types.ts features/generator.ts`: maximum CRAP 9.53, within the role's <=10 requirement. The tool exits 2 because its built-in threshold is the stricter 8.00; this is not represented as a clean tool exit.
-- `jscpd worker minimal-extension/src features scripts --format typescript --workers 4`: duplication reduced from four clones / 0.98% lines to one clone / 0.15% lines (existing acceptance assertions).
+- `crap4ts worker extension/src/subtitles.ts extension/src/stream-request.ts extension/src/subtitle-stream.ts extension/src/types.ts features/generator.ts`: maximum CRAP 9.53, within the role's <=10 requirement. The tool exits 2 because its built-in threshold is the stricter 8.00; this is not represented as a clean tool exit.
+- `jscpd worker extension/src features scripts --format typescript --workers 4`: duplication reduced from four clones / 0.98% lines to one clone / 0.15% lines (existing acceptance assertions).
 - `ts-mutate <source> --scan`: source-site discovery only. Scan mode rejects execution flags, so no worker flag is passed; it creates no mutation workers.
 
 ## Post-commit requirement audit

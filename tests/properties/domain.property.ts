@@ -5,10 +5,10 @@ import { calculateJobKey } from "../../worker/keys.js";
 import { estimateTokens, partitionCuesIntoBlocks } from "../../worker/chunker.js";
 import { validateOutputMapping } from "../../worker/validator.js";
 import { BudgetExceededError, RequestBudgetTracker } from "../../worker/network.js";
-import { formatVttTime, subtitleIndexAt } from "../../minimal-extension/src/subtitles.js";
-import { normalizeJson3, parseBrowserSubtitles } from "../../minimal-extension/src/types.js";
-import { consumeSubtitleStream } from "../../minimal-extension/src/subtitle-stream.js";
-import type { SubtitleEvent } from "../../minimal-extension/src/types.js";
+import { formatVttTime, subtitleIndexAt } from "../../extension/src/subtitles.js";
+import { normalizeJson3, parseBrowserSubtitles } from "../../extension/src/types.js";
+import { consumeSubtitleStream } from "../../extension/src/subtitle-stream.js";
+import type { SubtitleEvent } from "../../extension/src/types.js";
 
 const options = { seed: 20261009, numRuns: 200 };
 const texts = fc.array(fc.string({ maxLength: 400 }), { maxLength: 50 });

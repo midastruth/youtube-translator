@@ -2,8 +2,8 @@
 /dist/
 /tmp/
 /coverage/
-minimal-extension/public/*.js
-minimal-extension/public/*.js.map
+extension/public/*.js
+extension/public/*.js.map
 /cache/
 /data/
 /cookies/

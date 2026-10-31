@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { BrowserFixture, eventually, OLD_SETTINGS as oldSettings } from "../features/support/browser.js";
-import { normalizeJson3, parseBrowserSubtitles } from "../minimal-extension/src/types.js";
+import { normalizeJson3, parseBrowserSubtitles } from "../extension/src/types.js";
 
 test("settings page saves existing values, trims backend, and sends real content request", async () => {
   const browser = new BrowserFixture(oldSettings);

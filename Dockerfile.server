@@ -8,7 +8,7 @@ COPY package.json package-lock.json tsconfig.json ./
 RUN npm ci --ignore-scripts
 COPY worker ./worker
 COPY server ./server
-COPY minimal-extension ./minimal-extension
+COPY extension ./extension
 COPY features ./features
 COPY tests ./tests
 COPY scripts ./scripts

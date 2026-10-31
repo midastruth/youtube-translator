@@ -3,7 +3,7 @@
 YouTube 字幕获取、智能分句、翻译后端服务。
 
 ```
-浏览器 (minimal-extension)
+浏览器 (extension)
         │
         │ HTTP
         ▼

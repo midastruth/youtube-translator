@@ -11,9 +11,9 @@ if (!extensionOnly) {
   const serverEntries = (await readdir("server/src")).filter(name => name.endsWith(".ts")).map(name => `server/src/${name}`);
   await build({ entryPoints: serverEntries, outdir: "dist/server/src", platform: "node", format: "esm", target: "node22", sourcemap: true });
 }
-await mkdir("minimal-extension/public", { recursive: true });
+await mkdir("extension/public", { recursive: true });
 await build({
-  entryPoints: ["background", "bridge", "content", "options"].map(name => `minimal-extension/src/${name}.ts`),
-  outdir: "minimal-extension/public", bundle: true, platform: "browser", format: "iife",
+  entryPoints: ["background", "bridge", "content", "options"].map(name => `extension/src/${name}.ts`),
+  outdir: "extension/public", bundle: true, platform: "browser", format: "iife",
   target: ["chrome121", "firefox128"], sourcemap: true,
 });

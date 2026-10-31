@@ -1,6 +1,6 @@
 import { JSDOM } from "jsdom";
 import fs from "node:fs";
-import type { ExtensionSettings, StreamRequest, SubtitleEvent, PlayerResponse } from "../../minimal-extension/src/types.js";
+import type { ExtensionSettings, StreamRequest, SubtitleEvent, PlayerResponse } from "../../extension/src/types.js";
 
 export const OLD_SETTINGS = {
   toLang: "zh-CN", segmentation: "rule", translateModel: "gpt-4o", translateBaseUrl: "https://model.invalid/v1",
@@ -39,7 +39,7 @@ export class BrowserFixture {
   private actionListener?: (tab: { id?: number }) => void;
   private storageListeners: ((changes: { ytsSettings: { oldValue: Partial<ExtensionSettings>; newValue: Partial<ExtensionSettings> } }) => void)[] = [];
 
-  constructor(settings: Partial<ExtensionSettings> = {}, scriptDirectory = "minimal-extension/public") {
+  constructor(settings: Partial<ExtensionSettings> = {}, scriptDirectory = "extension/public") {
     this.scriptDirectory = scriptDirectory;
     this.settings = { ...settings };
     const w = this.dom.window;

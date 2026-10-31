@@ -14,7 +14,7 @@ Feature: TypeScript toolchain
     Examples:
       | scope                       |
       | worker                      |
-      | minimal-extension           |
+      | extension                   |
       | features/step_definitions   |
 
   Scenario: TypeScript toolchain-02 干净构建与类型检查

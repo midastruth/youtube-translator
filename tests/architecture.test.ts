@@ -21,7 +21,7 @@ test("browser subtitle policies cannot import browser entrypoints or worker fram
   const browserCore = ["captions", "subtitles", "stream-request", "subtitle-stream", "types"];
   const allowed = new Set(browserCore.map(name => `./${name}.js`));
   for (const name of browserCore) {
-    for (const dependency of moduleImports(`minimal-extension/src/${name}.ts`)) {
+    for (const dependency of moduleImports(`extension/src/${name}.ts`)) {
       assert.ok(allowed.has(dependency), `${name} must not depend on ${dependency}`);
     }
   }

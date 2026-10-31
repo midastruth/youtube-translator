@@ -10,7 +10,7 @@
 
 ```mermaid
 flowchart TD
-    U[用户在 YouTube 播放器开启双语字幕] --> E[浏览器扩展 minimal-extension]
+    U[用户在 YouTube 播放器开启双语字幕] --> E[浏览器扩展 extension]
     E --> T[GET /api/subtitle/tracks]
     T -->|有可用字幕轨道：人工优先，再自动字幕| Y[服务端 yt-dlp CLI 提取 JSON3]
     T -->|无字幕轨道 / 后端被拦截| B[bridge.ts 读取播放器自身字幕]
@@ -102,8 +102,8 @@ flowchart TD
 
 | 层级 | 文件路径 | 职责与技术栈 |
 | --- | --- | --- |
-| **浏览器前端** | `minimal-extension/src/content.ts` | 播放器 UI 交互、SSE/WS 客户端、毫秒时钟渲染 |
-| **浏览器字幕** | `minimal-extension/src/bridge.ts` | 播放器内部 json3 字幕窃听与兜底抓取 |
+| **浏览器前端** | `extension/src/content.ts` | 播放器 UI 交互、SSE/WS 客户端、毫秒时钟渲染 |
+| **浏览器字幕** | `extension/src/bridge.ts` | 播放器内部 json3 字幕窃听与兜底抓取 |
 | **网关服务端** | `server/src/server.ts` | 单体统一服务端入口，负责进程初始化与端口监听 |
 | **路由编排** | `server/src/app.ts` | 原生 Node HTTP 路由、SSE 长连接分发、内置 Worker 调度 |
 | **缓存层** | `server/src/cache.ts` | 目录隔离、原子写入、LRU 淘汰与 TTL 维护（无死锁设计） |

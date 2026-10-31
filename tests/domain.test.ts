@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { validateOutputMapping } from "../worker/validator.js";
 import { BudgetExceededError, executeWithRetryAndBudget, NetworkError, RequestBudgetTracker } from "../worker/network.js";
-import { exportableSubtitles, formatVtt, formatVttTime, subtitleIndexAt, videoIdFromUrl } from "../minimal-extension/src/subtitles.js";
-import { buildStreamRequest, hasBrowserSubtitles, selectBackendTrack } from "../minimal-extension/src/stream-request.js";
-import { apiStream, consumeSubtitleStream } from "../minimal-extension/src/subtitle-stream.js";
-import type { ExtensionSettings, StreamRequest, SubtitleEvent } from "../minimal-extension/src/types.js";
+import { exportableSubtitles, formatVtt, formatVttTime, subtitleIndexAt, videoIdFromUrl } from "../extension/src/subtitles.js";
+import { buildStreamRequest, hasBrowserSubtitles, selectBackendTrack } from "../extension/src/stream-request.js";
+import { apiStream, consumeSubtitleStream } from "../extension/src/subtitle-stream.js";
+import type { ExtensionSettings, StreamRequest, SubtitleEvent } from "../extension/src/types.js";
 
 const cue = { cue_id: "c0", start: 123, end: 987, text: "Hello" };
 

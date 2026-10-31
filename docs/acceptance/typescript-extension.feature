@@ -18,8 +18,8 @@ Feature: TypeScript extension compatibility
 
     Examples:
       | browser      | entry                                    |
-      | Chrome 121+  | minimal-extension/public/                |
-      | Firefox 128+ | minimal-extension/public/manifest.json   |
+      | Chrome 121+  | extension/public/                       |
+      | Firefox 128+ | extension/public/manifest.json          |
 
   Scenario Outline: TypeScript extension compatibility-02 已存设置与请求参数兼容
     Given chrome.storage.local 的 ytsSettings 已含 positionY 为 18 且含旧翻译配置

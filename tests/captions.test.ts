@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { captionLanguageRank, originalCaptionInfo, selectPlayerCaptionTrack } from "../minimal-extension/src/captions.js";
+import { captionLanguageRank, originalCaptionInfo, selectPlayerCaptionTrack } from "../extension/src/captions.js";
 
 test("caption preference distinguishes exact, related, unmatched and automatic languages", () => {
   const languages = ["en-US", "zh-Hans"];

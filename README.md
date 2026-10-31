@@ -6,7 +6,7 @@ YouTube 双语字幕翻译系统 — 统一 TypeScript 服务端 + 轻量浏览�
 youtube-translator/
 ├── server/              统一 TypeScript 服务端（单端口 8787，内置 Worker）
 ├── worker/              全文高质量翻译 AgentWorker（pi-durable 状态机引擎）
-├── minimal-extension/   轻量浏览器扩展（Chrome 121+ / Firefox 128+）
+├── extension/           轻量浏览器扩展（Chrome 121+ / Firefox 128+）
 ├── backend/             [历史兼容] Python FastAPI 后端 (youtube-ingest)
 ├── docker-compose.yml
 ├── Makefile
@@ -16,7 +16,7 @@ youtube-translator/
 ## 架构
 
 ```text
-浏览器 (minimal-extension)
+浏览器 (extension)
   │  调用 HTTP / SSE / WebSocket（默认单一地址 http://localhost:8787）
   ▼
 统一 TypeScript 服务端 (server/src)
@@ -112,10 +112,10 @@ npm run typecheck
 make build-extension
 ```
 
-扩展源码在 `minimal-extension/src/*.ts`；生成的 JS 产物位于 `minimal-extension/public/*.js`。支持 Chrome 121+ 和 Firefox 128+。
+扩展源码在 `extension/src/*.ts`；生成的 JS 产物位于 `extension/public/*.js`。支持 Chrome 121+ 和 Firefox 128+。
 
-- **Chrome**：打开 `chrome://extensions`，开启「开发者模式」，选择「加载已解压的扩展程序」，选择 `minimal-extension/public/`。
-- **Firefox**：打开 `about:debugging#/runtime/this-firefox`，选择「临时载入附加组件」，选择 `minimal-extension/public/manifest.json`。
+- **Chrome**：打开 `chrome://extensions`，开启「开发者模式」，选择「加载已解压的扩展程序」，选择 `extension/public/`。
+- **Firefox**：打开 `about:debugging#/runtime/this-firefox`，选择「临时载入附加组件」，选择 `extension/public/manifest.json`。
 
 加载后，在扩展选项页确认后端地址为 `http://localhost:8787`。
 

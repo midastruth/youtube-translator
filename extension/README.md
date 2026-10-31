@@ -3,7 +3,7 @@
 扩展以严格检查的 TypeScript 维护，浏览器直接执行构建生成的 JavaScript。
 
 ```text
-minimal-extension/
+extension/
 ├── src/             background、bridge、content、options 与类型边界
 └── public/          manifest、options.html、图标及生成的 JS（加载入口）
 ```
@@ -23,13 +23,13 @@ make build-extension
 ### Chrome 121+
 
 1. 打开 `chrome://extensions`，开启右上角「开发者模式」。
-2. 点击「加载已解压的扩展程序」→ 选择 `minimal-extension/public/` 目录。
+2. 点击「加载已解压的扩展程序」→ 选择 `extension/public/` 目录。
 3. 打开扩展的「选项」页面，配置后端地址（默认 `http://localhost:8787`）和翻译引擎。
 
 ### Firefox 128+
 
 1. 打开 `about:debugging#/runtime/this-firefox`。
-2. 点击「临时载入附加组件」，选择 `minimal-extension/public/manifest.json` 文件。
+2. 点击「临时载入附加组件」，选择 `extension/public/manifest.json` 文件。
 3. 打开扩展选项页完成设置。
 
 Firefox 临时扩展在浏览器重启后自动移除；长期安装需打包并经 Mozilla 签名。

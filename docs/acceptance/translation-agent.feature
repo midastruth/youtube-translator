@@ -6,7 +6,7 @@
 # 依据：
 # - backend/src/youtube_ingest/translate.py
 # - backend/src/youtube_ingest/server.py
-# - minimal-extension/public/content.js
+# - extension/public/content.js
 # - https://github.com/earendil-works/pi/tree/main/packages/durable
 # - https://github.com/earendil-works/pi/blob/main/packages/durable/README.md
 #

@@ -15,7 +15,7 @@
     "test": "npm run build && node --import ./scripts/register-typescript.ts --test tests/*.test.ts && npm run test:acceptance",
     "verify": "npm test && npm run test:property",
     "test:property": "node --import ./scripts/register-typescript.ts --test tests/properties/*.property.ts",
-    "test:coverage": "npm run build && node --import ./scripts/register-typescript.ts --experimental-test-coverage --test-coverage-include='worker/**/*.ts' --test-coverage-include='minimal-extension/src/types.ts' --test-coverage-include='minimal-extension/src/subtitles.ts' --test-coverage-include='minimal-extension/src/stream-request.ts' --test-coverage-include='minimal-extension/src/subtitle-stream.ts' --test tests/*.test.ts",
+    "test:coverage": "npm run build && node --import ./scripts/register-typescript.ts --experimental-test-coverage --test-coverage-include='worker/**/*.ts' --test-coverage-include='extension/src/types.ts' --test-coverage-include='extension/src/subtitles.ts' --test-coverage-include='extension/src/stream-request.ts' --test-coverage-include='extension/src/subtitle-stream.ts' --test tests/*.test.ts",
     "test:unit": "npm run build && node --import ./scripts/register-typescript.ts --test tests/*.test.ts",
     "test:acceptance": "npm run build && MISE_BABASHKA_VERSION=1.13.225 bb scripts/acceptance.bb",
     "test:backend": "cd backend && uv run pytest",

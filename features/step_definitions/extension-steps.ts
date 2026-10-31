@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
-import type { SubtitleEvent } from "../../minimal-extension/src/types.js";
+import type { SubtitleEvent } from "../../extension/src/types.js";
 import { After, Given, When, Then } from "@cucumber/cucumber";
 import { BrowserFixture, eventually, OLD_SETTINGS } from "../support/browser.js";
 import { cleanProjectCopy, command, installLockedDependencies, succeeds } from "../support/project.js";
@@ -24,7 +24,7 @@ const jsonEvents = [{ tStartMs: 100, dDurationMs: 1000, segs: [{ utf8: "Hello", 
 const xmlCues = [{ start: 100, end: 1100, text: "Hello world" }];
 let built = false;
 function fixture() { assert.ok(browser); return browser; }
-function publicDirectory() { return path.join(copy, "minimal-extension/public"); }
+function publicDirectory() { return path.join(copy, "extension/public"); }
 function input(document: Document, id: string) {
   const element = document.getElementById(id);
   assert.ok(element && "value" in element);
@@ -61,7 +61,7 @@ Then("manifest 与 options.html 引用的全部 JS、HTML 和图标均存在", (
 });
 Then("background、bridge、content、options 的执行入口为生成的 JavaScript", () => {
   for (const name of ["background", "bridge", "content", "options"]) {
-    assert.ok(fs.existsSync(path.join(copy, `minimal-extension/src/${name}.ts`)));
+    assert.ok(fs.existsSync(path.join(copy, `extension/src/${name}.ts`)));
     assert.ok(fs.existsSync(path.join(publicDirectory(), `${name}.js`)));
     assert.equal(fs.existsSync(path.join(publicDirectory(), `${name}.ts`)), false);
   }

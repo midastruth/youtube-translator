@@ -7,7 +7,7 @@
 迁移当前产品中全部手写 JavaScript，包括：
 
 - `worker/` 的 11 个模块：agent-worker、chunker、keys、network、quality-eval、reviewer、server、storage、task-definition、tools、validator。
-- `minimal-extension/public/` 中的 background、bridge、content、options 脚本。
+- `extension/public/` 中的 background、bridge、content、options 脚本。
 - `features/step_definitions/steps.js` 及本任务新增的验收步骤。
 
 以上逻辑以 `.ts` 为唯一维护源，不保留一套手写 JS 副本；源码位置和构建工具由实现选择。浏览器仍执行构建生成的 JavaScript，并非把 manifest 的脚本后缀改为 `.ts`。Python 后端不改语言；依赖、构建产物、SwarmForge 基础设施不在迁移范围内。
@@ -17,7 +17,7 @@
 - 从干净 checkout 执行 `npm ci` 后，提供 `npm run typecheck` 和 `npm run build`。所有产品 TS 和验收步骤都参与严格类型检查；不能靠排除模块、整文件关闭检查、全面使用 `any` 或双重断言绕过迁移。外部动态数据允许在边界使用 `unknown` 并收窄。
 - `npm run build` 产生可运行 worker 和扩展；`npm run worker` 保留启动入口和原环境变量语义，允许自行构建，不依赖提交的旧 JS 或全局 TS 工具。
 - `npm test`、`npm run test:acceptance` 保留已有验收场景，并执行新增迁移验收；不得通过跳过场景、改写预期或仅扫描文件来宣称运行时兼容。
-- `make build-extension` 完成真实构建。现有 Chrome 加载目录 `minimal-extension/public/` 和 Firefox manifest 路径保持可用，静态 HTML、图标及跨浏览器配置仍包含在该目录。
+- `make build-extension` 完成真实构建。Chrome 加载目录为 `extension/public/`，Firefox manifest 位于同一目录，静态 HTML、图标及跨浏览器配置仍包含在该目录。
 - 更新根目录和扩展开发说明，明确安装、类型检查、构建、启动及扩展重载步骤。构建产物和缓存不作为手写源码提交。
 
 ## 行为与边界

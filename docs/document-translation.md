@@ -54,9 +54,9 @@ validate_translation → finish_translation → 宿主复核、原子发布
 | `translations.json` | 自己片段的 `{"cue_id":"译文"}` | 可编辑 |
 | `notes.md` | 计划、术语和进度笔记 | 可编辑，有大小限制 |
 
-- 文件工具包括 `read_file`、`search_file`、`write_file`、`edit_file`。
+- 文件工具包括 `read_file`、`search_file`、`write_file`、`edit_file`。`read_file` 没有默认读取量，Agent 必须显式选择 `count`：原文/译文每次 1～200 条字幕，笔记每次 1～4000 字符；超出范围会报错，内容过长时仍按上下文预算缩小实际返回量，按 `next_offset` 续读。
 - `write_file` 的 `merge=true` 支持分批追加；精确编辑要求唯一匹配且不重叠。
-- `read_context` 可以按全局字幕位置分页读取或搜索全文，查找前后定义；全文始终只读。
+- `read_context` 可以按全局字幕位置分页读取或搜索全文，查找前后定义；分页读取同样必须由子 Agent 显式选择 `count`（1～200 条，无默认值），关键词搜索无需 `count`；全文始终只读。
 - 子 Agent **不能写入其他片段编号**，也没有分派更多子 Agent 的工具。
 - 子 Agent 校验并显式提交自己片段后，宿主复核再合并。未提交草稿不合并，更不会发布给浏览器。
 - **开头优先预览**：只有开头 Agent 完成自查、结构校验和显式提交后，宿主才将结果与检查点同事务保存到 `preview_cues`，发送 `provisional: true` 的 `cue`。它尚未通过主 Agent 全文审校，不计为全文成功；其他子 Agent 的片段仍不提前发布。

@@ -154,7 +154,7 @@ test("child context compaction retains assignment, shared terminology, notes and
   translationTeamTool(document, state, "dispatch_subagents", dispatch(document));
   state.children[0].agent.notes = "Checked later definitions; transaction means database transaction.";
   state.children[0].agent.draft = { c0: "数据库事务" };
-  const old = response("read_file", { path: "source.json" });
+  const old = response("read_file", { path: "source.json", count: 100 });
   old.content = [{ type: "text", text: "long history ".repeat(10000) }];
   state.children[0].agent.messages = [old];
   state = await advanceTranslationTeam(document, state, async context => {
@@ -165,10 +165,28 @@ test("child context compaction retains assignment, shared terminology, notes and
       assert.equal(task.assignment.start_id, "c0");
       assert.doesNotMatch(JSON.stringify(context), /long history/);
     }
-    return response("read_file", { path: "translations.json" });
+    return response("read_file", { path: "translations.json", count: 100 });
   });
   assert.equal(state.children[0].agent.compactions, 1);
   assert.equal(state.children[0].agent.draft.c0, "数据库事务");
+});
+
+test("child global-context reads require a chosen count up to 200, while searches need no count", async () => {
+  const document = input(), initial = initialTranslationTeamState(document);
+  translationTeamTool(document, initial, "dispatch_subagents", dispatch());
+  for (const args of [{ count: 200 }, {}, { count: 201 }, { query: "transaction 8" }]) {
+    const state = await advanceTranslationTeam(document, initial, async () => response("read_context", args));
+    for (const child of state.children) {
+      const result = child.agent.messages.at(-1);
+      assert.equal(result?.role, "toolResult");
+      if (result?.role !== "toolResult") assert.fail("missing tool result");
+      assert.equal(!!result.isError, !("query" in args || args.count === 200));
+      if (args.count === 200) {
+        const page = JSON.parse((result.content[0] as { text: string }).text);
+        assert.equal(JSON.parse(page.content).length, 9);
+      }
+    }
+  }
 });
 
 test("one failed child retains siblings' committed work and retries only its own turn", async () => {

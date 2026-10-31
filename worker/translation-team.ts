@@ -2,7 +2,7 @@ import { Type } from "@earendil-works/pi-ai";
 import type { AssistantMessage, Context, Tool } from "@earendil-works/pi-ai";
 import {
   advanceSubtitleAgent, finalSubtitleAgentCues, initialSubtitleAgentState,
-  SUBTITLE_AGENT_PROMPT, SUBTITLE_AGENT_TOOLS, subtitleAgentContext, subtitleAgentTool, WorkspaceError,
+  SUBTITLE_AGENT_PROMPT, SUBTITLE_AGENT_TOOLS, subtitleAgentContext, subtitleAgentTool, WorkspaceError, MAX_READ_CUES,
 } from "./subtitle-agent.js";
 import type { SubtitleAgentState } from "./subtitle-agent.js";
 import { callDocumentTurn, DocumentModelError, DocumentPermanentError, inputBudget, parseReasoningEffort, tokenEstimate } from "./document-translation.js";
@@ -54,8 +54,8 @@ export const TEAM_TOOLS: Tool[] = [
   { name: "close_subagents", description: "Close all completed child sessions after MAIN acceptance. Releases their conversation memory, preserves submitted results. Required before final publication.", parameters: Type.Object({}, { additionalProperties: false }) },
 ];
 const CHILD_TOOLS: Tool[] = [...SUBTITLE_AGENT_TOOLS, {
-  name: "read_context", description: "Read/search the entire read-only source for context outside your assignment. Offsets are global cue positions. Never translate IDs outside your assignment.",
-  parameters: Type.Object({ offset: Type.Optional(Type.Integer({ minimum: 0 })), count: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })), query: Type.Optional(Type.String({ minLength: 1 })) }, { additionalProperties: false }),
+  name: "read_context", description: "Read/search the entire read-only source for context outside your assignment. For reading, explicitly choose count (1-200 cues), no default. For query searches count is not used. Offsets are global cue positions. Never translate IDs outside your assignment.",
+  parameters: Type.Object({ offset: Type.Optional(Type.Integer({ minimum: 0 })), count: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_READ_CUES })), query: Type.Optional(Type.String({ minLength: 1 })) }, { additionalProperties: false }),
 }];
 
 export function initialTranslationTeamState(input: DocumentInput): TranslationTeamState {

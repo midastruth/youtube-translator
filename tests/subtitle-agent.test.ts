@@ -78,7 +78,7 @@ test("agent workspace reads paginated immutable timed source and searches later 
   const document = input(), state = initialSubtitleAgentState(document);
   const page = subtitleAgentTool(document, state, "read_file", { path: "source.json", count: 1 }) as { content: string; next_offset: number };
   assert.deepEqual(JSON.parse(page.content), [cues[0]]); assert.equal(page.next_offset, 1);
-  const next = subtitleAgentTool(document, state, "read_file", { path: "source.json", offset: 1 }) as { content: string; next_offset: null };
+  const next = subtitleAgentTool(document, state, "read_file", { path: "source.json", offset: 1, count: 1 }) as { content: string; next_offset: null };
   assert.deepEqual(JSON.parse(next.content), [cues[1]]); assert.equal(next.next_offset, null);
   const found = subtitleAgentTool(document, state, "search_file", { path: "source.json", query: "not a payment" }) as { matches: { cue_id: string }[] };
   assert.equal(found.matches[0].cue_id, "b");
@@ -86,10 +86,40 @@ test("agent workspace reads paginated immutable timed source and searches later 
     assert.throws(() => subtitleAgentTool(document, state, "write_file", { path, content: "{}" }));
   }
   assert.throws(() => subtitleAgentTool(document, state, "bash", { command: "pwd" }));
-  assert.throws(() => subtitleAgentTool(document, state, "read_file", { path: "source.json", offset: -1 }));
-  const empty = subtitleAgentTool(document, state, "read_file", { path: "translations.json" }) as { content: string };
+  assert.throws(() => subtitleAgentTool(document, state, "read_file", { path: "source.json", offset: -1, count: 1 }));
+  const empty = subtitleAgentTool(document, state, "read_file", { path: "translations.json", count: 2 }) as { content: string };
   assert.deepEqual(JSON.parse(empty.content), {}, "reading an empty file must not invent editable placeholder entries");
   assert.deepEqual(document.cues, cues);
+});
+
+test("read size is agent-selected and required, with a 200-cue limit and budget-aware pagination", async () => {
+  const source = Array.from({ length: 221 }, (_, i) => ({ cue_id: `c${i}`, start: i * 1000, end: i * 1000 + 900, text: `Sentence ${i}.` }));
+  const document = input({ cues: source }), state = initialSubtitleAgentState(document);
+  const read = (path: string, count?: unknown, offset = 0) => subtitleAgentTool(document, state, "read_file", { path, count, offset }) as { content: string; next_offset: number | null };
+  for (const count of [undefined, null, 0, -1, 201, 1.5, "40"]) {
+    assert.throws(() => read("source.json", count), /explicit count/);
+    assert.throws(() => read("translations.json", count), /explicit count/);
+  }
+  const large = read("source.json", 200);
+  assert.equal(JSON.parse(large.content).length, 200); assert.equal(large.next_offset, 200);
+  const small = read("source.json", 17);
+  assert.equal(JSON.parse(small.content).length, 17); assert.equal(small.next_offset, 17);
+  const tail = read("source.json", 200, 200);
+  assert.equal(JSON.parse(tail.content).length, 21); assert.equal(tail.next_offset, null);
+  state.draft = Object.fromEntries(source.map(c => [c.cue_id, "事务"]));
+  assert.equal(Object.keys(JSON.parse(read("translations.json", 200).content)).length, 200);
+  state.notes = "a".repeat(4000);
+  assert.throws(() => read("notes.md"), /explicit count/);
+  assert.equal(read("notes.md", 4000).content.length, 4000, "notes count remains measured in characters");
+
+  const limited = input({ cues: source, config: modelConfig({ contextTokens: 24000, outputTokens: 1024 }) });
+  const page = subtitleAgentTool(limited, initialSubtitleAgentState(limited), "read_file", { path: "source.json", count: 200 }) as { content: string; next_offset: number };
+  const actual = JSON.parse(page.content).length;
+  assert.ok(actual > 0 && actual < 200); assert.equal(page.next_offset, actual);
+  const missing = await advanceSubtitleAgent(document, state, async () => assistant([{ name: "read_file", args: { path: "source.json" } }]));
+  const result = missing.messages.at(-1);
+  assert.equal(result?.role, "toolResult");
+  assert.equal(result?.role === "toolResult" && result.isError, true);
 });
 
 test("translation writes and exact edits are atomic; invalid IDs, values, duplicates and overlapping edits are rejected", () => {

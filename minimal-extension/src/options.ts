@@ -27,7 +27,7 @@ function loadSettings() {
     setVal("languages", settings.languages || "en,zh-Hans,zh-Hant,zh");
     setVal("toLang", settings.toLang || "zh-CN");
     setVal("segmentation", settings.segmentation || "rule");
-    setVal("translateEngine", settings.translateEngine || "legacy");
+    setVal("translateEngine", settings.translateEngine || "document");
     setVal("translateApiKey", settings.translateApiKey || "");
     setVal("translateBaseUrl", settings.translateBaseUrl || "");
     setVal("translateModel", settings.translateModel || "");

@@ -7,20 +7,25 @@ services:
     expose:
       - "4416"
 
-  backend:
-    build: ./backend
+  # 统一 TypeScript 服务端（单一对外 8787 端口，进程内直连 Worker）
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    init: true
     depends_on:
       - pot-provider
     ports:
       - "${PORT:-8787}:8787"
     volumes:
-      - ./backend/cache:/app/cache
+      - server-data:/app/cache
       # Optional Netscape-format YouTube cookies can be placed here.
-      - ./backend/cookies:/run/secrets:ro
+      - ./cookies:/run/secrets:ro
     environment:
       - HOST=0.0.0.0
       - PORT=8787
       - CACHE_DIR=/app/cache
+      - TRANSLATION_AGENT_STORAGE=/app/cache/worker-storage.db
       - CACHE_METADATA_TTL_SECONDS=${CACHE_METADATA_TTL_SECONDS:-86400}
       - CACHE_JSON3_TTL_SECONDS=${CACHE_JSON3_TTL_SECONDS:-2592000}
       - CACHE_CUES_TTL_SECONDS=${CACHE_CUES_TTL_SECONDS:-0}
@@ -33,8 +38,13 @@ services:
       - OPENAI_BASE_URL=${OPENAI_BASE_URL:-}
       - TRANSLATE_API_KEY=${TRANSLATE_API_KEY:-}
       - DEEPL_API_KEY=${DEEPL_API_KEY:-}
+      - TRANSLATION_AGENT_MODEL=${TRANSLATION_AGENT_MODEL:-gpt-4o}
       - WHISPER_API_KEY=${WHISPER_API_KEY:-}
+      - WHISPER_BASE_URL=${WHISPER_BASE_URL:-}
+      - WHISPER_MODEL=${WHISPER_MODEL:-whisper-large-v3}
       - GROQ_API_KEY=${GROQ_API_KEY:-}
+      - TRANSLATION_CONTEXT_TOKENS=${TRANSLATION_CONTEXT_TOKENS:-128000}
+      - TRANSLATION_OUTPUT_TOKENS=${TRANSLATION_OUTPUT_TOKENS:-16384}
       - YTDLP_POT_PROVIDER_URL=http://pot-provider:4416
       - YTDLP_YOUTUBE_CLIENT=android,mweb
       # Optional Netscape-format cookies file on the host. Set YTDLP_COOKIES_FILE
@@ -42,8 +52,33 @@ services:
       - YTDLP_COOKIES_FILE=${YTDLP_COOKIES_FILE:-}
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8787/api/health', timeout=5)"]
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8787/api/health').then(r => r.ok ? process.exit(0) : process.exit(1)).catch(() => process.exit(1))"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 10s
+
+  # 历史兼容实现：独立 Worker（单体统一服务已内置 Worker，保留此服务作为备选）
+  worker:
+    profiles:
+      - legacy
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    init: true
+    volumes:
+      - worker-data:/app/cache
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - TRANSLATE_API_KEY=${TRANSLATE_API_KEY:-}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-}
+      - TRANSLATION_AGENT_MODEL=${TRANSLATION_AGENT_MODEL:-gpt-4o}
+      - TRANSLATION_CONTEXT_TOKENS=${TRANSLATION_CONTEXT_TOKENS:-128000}
+      - TRANSLATION_OUTPUT_TOKENS=${TRANSLATION_OUTPUT_TOKENS:-16384}
+    restart: unless-stopped
+    expose:
+      - "8788"
+
+volumes:
+  server-data:
+  worker-data:

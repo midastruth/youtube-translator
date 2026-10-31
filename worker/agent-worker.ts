@@ -9,6 +9,9 @@ import { SubtitleTranslationTask, SubtitleJobDoc, TaskMocks } from "./task-defin
 import { calculateJobKey } from "./keys.js";
 import type { JobRecord, SubmitJobOptions, TaskResult, StreamEvent, JobDocument } from "./types.js";
 import { observeJobEvents } from "./job-stream.js";
+import { DocumentTranslationTask, documentCredentials } from "./document-task.js";
+import { DOCUMENT_WORKFLOW_VERSION, initialDocumentState, modelConfig } from "./document-translation.js";
+import { observeDocumentJob } from "./document-stream.js";
 import type { TaskId, ConversationId } from "@earendil-works/pi-durable";
 
 export class AgentWorker {
@@ -52,7 +55,7 @@ export class AgentWorker {
       this.extension = defineExtension({
         name: "translation_agent",
         tools: WHITELIST_TOOLS,
-        tasks: [SubtitleTranslationTask],
+        tasks: [SubtitleTranslationTask, DocumentTranslationTask],
       });
       this.registry.install(this.extension);
     }
@@ -71,6 +74,11 @@ export class AgentWorker {
   }
 
   async close() {
+    for (const job of this.jobs.values()) {
+      if (job.engine === "document") {
+        documentCredentials.delete(job.jobKey);
+      }
+    }
     if (this.harness) {
       try {
         const closeCtx = withAbortSignal(AbortSignal.timeout(1000), this.context);
@@ -122,16 +130,16 @@ export class AgentWorker {
 
   private async findStoredJob(jobKeyOrId: string | ConversationId): Promise<JobRecord | null> {
     if (!this.storage || !this.harness) return null;
-    try {
-      const page = await this.storage.scanConversations({}, 100, undefined, this.context);
+    let page = await this.storage.scanConversations({ order: "descending" }, 100, undefined, this.context);
+    while (true) {
       for (const item of page.items || []) {
         const doc = await this.harness.snapshot(SubtitleJobDoc, item.id, this.context);
-        if (doc && (doc.job_key === jobKeyOrId || item.id === jobKeyOrId)) {
+        if (doc && (doc.job_key === jobKeyOrId || doc.job_id === jobKeyOrId || item.id === jobKeyOrId)) {
           return this.restoreJob(item.id, doc);
         }
       }
-    } catch {
-      // Preserve the existing best-effort storage lookup.
+      if (!page.next) break;
+      page = await this.storage.scanConversations({ order: "descending" }, 100, page.next, this.context);
     }
     return null;
   }
@@ -140,8 +148,9 @@ export class AgentWorker {
     const emitter = new EventEmitter();
     emitter.on("error", () => {});
     const jobRecord: JobRecord = {
-      jobId: `job-${conversationId}`, jobKey: doc.job_key, taskId: null, conversationId,
-      videoId: doc.video_id, title: "", fromLang: doc.from_lang, toLang: doc.to_lang,
+      jobId: doc.job_id || `job-${conversationId}`, jobKey: doc.job_key,
+      taskId: doc.task_id ? doc.task_id as TaskId<TaskResult> : null, conversationId, engine: doc.engine,
+      videoId: doc.video_id, title: doc.title || "", fromLang: doc.from_lang, toLang: doc.to_lang,
       cues: doc.source_cues || [], status: doc.status || "succeeded", emitter,
       finalResult: doc.final_result, aborted: doc.cancelled || false,
     };
@@ -158,16 +167,21 @@ export class AgentWorker {
     toLang = "zh-CN",
     segmentation = "rule",
     provider = "openai",
-    model = "gpt-4o",
-    baseUrl = "https://api.openai.com/v1",
+    model = process.env.TRANSLATION_AGENT_MODEL || "gpt-4o",
+    baseUrl = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1",
     requestId = null,
-    budgetLimit = 12,
+    budgetLimit,
     maxCuesPerBlock = 10,
     translatorMock = null,
     reviewerMock = null,
     revisorMock = null,
     initialGlossary = null,
+    engine, apiKey, contextTokens, outputTokens,
   }: SubmitJobOptions): Promise<JobRecord> {
+    if (engine === "document") return this.submitDocumentJob({
+      cues, videoId, title, fromLang, toLang, segmentation, provider, model, baseUrl,
+      apiKey, contextTokens, outputTokens, budgetLimit: budgetLimit ?? 128,
+    });
     const effectiveJobKey =
       jobKey ||
       calculateJobKey({
@@ -219,7 +233,7 @@ export class AgentWorker {
         fromLang,
         toLang,
         cues: normalizedCues,
-        budgetLimit,
+        budgetLimit: budgetLimit ?? 12,
         maxCuesPerBlock,
         initialGlossary: initialGlossary || {},
       };
@@ -299,6 +313,88 @@ export class AgentWorker {
     }
   }
 
+  private async submitDocumentJob(options: SubmitJobOptions): Promise<JobRecord> {
+    if (options.provider && options.provider !== "openai") throw new Error("全文高质量模式需要 OpenAI-compatible provider");
+    const config = modelConfig({ model: options.model, baseUrl: options.baseUrl, contextTokens: options.contextTokens, outputTokens: options.outputTokens });
+    const cues = (options.cues || []).map((c, index) => ({
+      cue_id: c.cue_id || `c${index}`, start: typeof c.start === "number" ? c.start : NaN,
+      end: typeof c.end === "number" ? c.end : NaN, text: String(c.text || ""),
+    }));
+    const jobKey = calculateJobKey({
+      videoId: options.videoId, sourceCues: cues, fromLang: options.fromLang, toLang: options.toLang,
+      segmentationVersion: options.segmentation, engine: "document", provider: "openai", model: config.model, baseUrl: config.baseUrl,
+      workflowVersion: DOCUMENT_WORKFLOW_VERSION, promptVersion: DOCUMENT_WORKFLOW_VERSION, reviewVersion: DOCUMENT_WORKFLOW_VERSION,
+      styleConfig: JSON.stringify({ context: config.contextTokens, output: config.outputTokens, title: options.title || "" }),
+    });
+    if (options.apiKey) documentCredentials.set(jobKey, options.apiKey);
+    if (this.pendingJobs.has(jobKey)) return this.pendingJobs.get(jobKey)!;
+    const pending = (async () => {
+      const existing = await this.getJob(jobKey);
+      if (existing) {
+        // Restored jobs have no in-process completion watcher. Persistence is
+        // authoritative, including failures that occurred since restoration.
+        const doc = await this.activeHarness.snapshot(SubtitleJobDoc, existing.conversationId, this.context);
+        if (!doc) throw new Error("Document job state missing");
+        existing.status = doc.status;
+        existing.finalResult = doc.final_result;
+        existing.aborted = !!doc.cancelled;
+        if (doc.error) existing.error = new Error(doc.error);
+      }
+      if (existing && !["failed", "cancelled"].includes(existing.status)) {
+        if (existing.status === "succeeded") documentCredentials.delete(jobKey);
+        return existing;
+      }
+      if (existing) this.jobs.delete(jobKey);
+      const input = {
+        jobId: `doc-${crypto.randomUUID()}`, jobKey, videoId: options.videoId || "", title: options.title || "",
+        fromLang: options.fromLang || "en", toLang: options.toLang || "zh-CN", cues, config, budgetLimit: options.budgetLimit ?? 128,
+      };
+      if (!Number.isSafeInteger(input.budgetLimit) || input.budgetLimit < 1 || input.budgetLimit > 1000) throw new Error("Invalid document request budget");
+      initialDocumentState(input); // Validate before creating durable state.
+      if (!documentCredentials.get(jobKey) && !process.env.OPENAI_API_KEY && !process.env.TRANSLATE_API_KEY) {
+        throw new Error("全文翻译需要 API Key；请在扩展或 Worker 环境变量中配置");
+      }
+      const conversation = await this.activeHarness.createConversation({ ownership: { kind: "ownerless" } }, this.context);
+      let taskId: TaskId<TaskResult> | undefined;
+      await conversation.commit(async tx => {
+        taskId = await tx.createTask(DocumentTranslationTask, input, { ownership: { kind: "conversation" } });
+        const doc = await tx.doc(SubtitleJobDoc, conversation.id);
+        doc.job_key = jobKey; doc.job_id = input.jobId; doc.task_id = taskId;
+        doc.engine = "document"; doc.title = input.title; doc.video_id = input.videoId;
+        doc.from_lang = input.fromLang; doc.to_lang = input.toLang; doc.source_cues = cues;
+        doc.status = "running"; doc.stage = "analyze"; doc.budget_limit = input.budgetLimit;
+      }, this.context);
+      if (!taskId) throw new Error("Document task creation failed");
+      const id = taskId;
+      const emitter = new EventEmitter(); emitter.on("error", () => {});
+      const job: JobRecord = {
+        jobId: input.jobId, jobKey, taskId: id, conversationId: conversation.id, engine: "document",
+        videoId: input.videoId, title: input.title, fromLang: input.fromLang, toLang: input.toLang,
+        cues, status: "running", emitter, aborted: false,
+      };
+      this.jobs.set(jobKey, job);
+      job.taskPromise = (async () => {
+        try {
+          await this.activeHarness.waitForTask(id, this.context);
+          const doc = await this.activeHarness.snapshot(SubtitleJobDoc, conversation.id, this.context);
+          if (!doc) throw new Error("Document job state missing");
+          job.status = doc.status; job.finalResult = doc.final_result;
+          if (doc.error) job.error = new Error(doc.error);
+        } catch (error) {
+          // Completion-observer boundary: retain a failed record and its cause
+          // rather than letting a background promise reject unobserved.
+          job.status = "failed"; job.error = error;
+        }
+      })();
+      return job;
+    })();
+    this.pendingJobs.set(jobKey, pending);
+    try { return await pending; }
+    // Submission cleanup only; initialization/storage failures still propagate.
+    catch (error) { documentCredentials.delete(jobKey); throw error; }
+    finally { this.pendingJobs.delete(jobKey); }
+  }
+
   async abortJob(jobId: string) {
     let target = null;
     for (const job of this.jobs.values()) {
@@ -335,6 +431,10 @@ export class AgentWorker {
   async *observeJobStream(jobRecord: JobRecord, { heartbeatIntervalMs = 5000, signal = null }: { heartbeatIntervalMs?: number; signal?: AbortSignal | null } = {}): AsyncGenerator<StreamEvent> {
     // Preserve the original cardinality capture before the asynchronous snapshot.
     const sourceCueCount = jobRecord.cues.length;
+    if (jobRecord.engine === "document") {
+      yield* observeDocumentJob(jobRecord, () => this.activeHarness.snapshot(SubtitleJobDoc, jobRecord.conversationId, this.context), { heartbeatIntervalMs, signal });
+      return;
+    }
     const doc = await this.activeHarness.snapshot(SubtitleJobDoc, jobRecord.conversationId, this.context);
     yield* observeJobEvents(doc, jobRecord, { heartbeatIntervalMs, signal, sourceCueCount });
   }

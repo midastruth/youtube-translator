@@ -19,8 +19,9 @@ class AgentWorkerError(RuntimeError):
 
 
 class AgentWorkerClient:
-    def __init__(self, base_url: str = DEFAULT_WORKER_URL, timeout: float = 60.0):
-        self.base_url = base_url.rstrip("/")
+    def __init__(self, base_url: str | None = None, timeout: float = 60.0):
+        # Resolve after server.load_dotenv(), not only at module import time.
+        self.base_url = (base_url or os.getenv("TRANSLATION_AGENT_WORKER_URL") or DEFAULT_WORKER_URL).rstrip("/")
         self.timeout = timeout
 
     async def check_health(self) -> dict[str, Any]:
@@ -44,6 +45,9 @@ class AgentWorkerClient:
         model: str = "gpt-4o",
         base_url: str | None = None,
         api_key: str | None = None,
+        engine: str = "agent",
+        context_tokens: int | None = None,
+        output_tokens: int | None = None,
     ) -> dict[str, Any]:
         payload = {
             "jobKey": job_key,
@@ -55,10 +59,20 @@ class AgentWorkerClient:
             "segmentation": segmentation,
             "provider": provider,
             "model": model,
-            "baseUrl": base_url or "https://api.openai.com/v1",
+            "baseUrl": base_url or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1",
+            "engine": engine,
+            # Request credentials stay in Worker memory, never in durable task state.
+            "apiKey": api_key or os.getenv("OPENAI_API_KEY") or os.getenv("TRANSLATE_API_KEY"),
         }
+        if context_tokens is not None:
+            payload["contextTokens"] = context_tokens
+        if output_tokens is not None:
+            payload["outputTokens"] = output_tokens
         async with httpx.AsyncClient(timeout=self.timeout) as client:
-            resp = await client.post(f"{self.base_url}/internal/jobs", json=payload)
+            try:
+                resp = await client.post(f"{self.base_url}/internal/jobs", json=payload)
+            except httpx.HTTPError as exc:
+                raise AgentWorkerError("无法连接翻译 Worker，请启动 npm run worker 或 Docker worker 服务") from exc
             if resp.status_code >= 400:
                 raise AgentWorkerError(f"Worker job submission failed ({resp.status_code}): {resp.text}")
             return resp.json()

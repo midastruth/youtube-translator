@@ -1,0 +1,103 @@
+import { defineTask } from "@earendil-works/pi-durable";
+import { SubtitleJobDoc } from "./task-definition.js";
+import { advanceDocument, callDocumentModel, DocumentModelError, DocumentPermanentError, finalDocumentCues, initialDocumentState } from "./document-translation.js";
+import type { DocumentInput, DocumentState } from "./document-translation.js";
+import type { TaskResult } from "./domain-types.js";
+
+// Credentials deliberately never enter task inputs, checkpoints, SQLite or model context.
+export const documentCredentials = new Map<string, string>();
+type Checkpoint = { phase: string; document: DocumentState; failures: number };
+
+export const DocumentTranslationTask = defineTask<DocumentInput, Checkpoint, TaskResult>({
+  name: "document_subtitle_translation",
+  version: 1,
+  initial: input => ({ phase: "run", document: initialDocumentState(input), failures: 0 }),
+  phases: {
+    run: async (task, runtime, context) => {
+      const input = task.input;
+      const checkpoint = task.state.checkpoint;
+      const current = await runtime.snapshot(SubtitleJobDoc, runtime.conversationId, context);
+      if (current?.cancelled) return;
+      try {
+        if (checkpoint.document.stage === "publish") {
+          const cues = finalDocumentCues(input, checkpoint.document);
+          const result = { status: "succeeded", total_cues: cues.length, failed_cues: 0, published_cues: cues.length, cues };
+          await runtime.commit(async tx => {
+            const doc = await tx.doc(SubtitleJobDoc, runtime.conversationId);
+            if (doc.cancelled) return { status: "terminal", outcome: { status: "completed", result: { cancelled: true, published_cues: [] } } };
+            // Atomic publication: never expose an unreviewed draft as final subtitles.
+            doc.published_cues = Object.fromEntries(cues.map(c => [c.cue_id, c]));
+            doc.final_result = result; doc.status = "succeeded"; doc.stage = "published";
+            return { status: "terminal", outcome: { status: "completed", result } };
+          }, context);
+          documentCredentials.delete(input.jobKey);
+          return;
+        }
+        while (!documentCredentials.get(input.jobKey) && !process.env.OPENAI_API_KEY && !process.env.TRANSLATE_API_KEY) {
+          // After restart, a browser-only key must be supplied again by reattaching.
+          await runtime.commit(async tx => {
+            const doc = await tx.doc(SubtitleJobDoc, runtime.conversationId);
+            doc.stage = "awaiting_credentials";
+          }, context);
+          await runtime.sleep(runtime.now() + 1000, context);
+        }
+        await runtime.commit(async tx => {
+          const doc = await tx.doc(SubtitleJobDoc, runtime.conversationId);
+          doc.status = "running"; doc.stage = checkpoint.document.stage;
+          doc.progress = `${checkpoint.document.cursor + 1}`;
+        }, context);
+        const next = await advanceDocument(input, checkpoint.document, request => callDocumentModel(input, checkpoint.document, request, {
+          apiKey: documentCredentials.get(input.jobKey), signal: runtime.signal,
+          reserve: async () => {
+            await runtime.commit(async tx => {
+              const doc = await tx.doc(SubtitleJobDoc, runtime.conversationId);
+              if (doc.cancelled) throw new Error("Task cancelled");
+              if (doc.network_attempts >= input.budgetLimit) throw new DocumentPermanentError("budget", "Document translation exhausted its model request budget");
+              doc.network_attempts++;
+            }, context);
+          },
+        }));
+        await runtime.commit(async tx => {
+          const doc = await tx.doc(SubtitleJobDoc, runtime.conversationId);
+          if (doc.cancelled) return { status: "terminal", outcome: { status: "completed", result: { cancelled: true, published_cues: [] } } };
+          doc.stage = next.stage;
+          return { status: "running", checkpoint: { phase: "run", document: next, failures: 0 } };
+        }, context);
+      } catch (error) {
+        // Durable task boundary: provider/schema failures receive bounded repair;
+        // permanent failures become an explicit terminal failed job, never success.
+        if (runtime.signal.aborted) return;
+        const message = (error instanceof Error ? error.message : "Document translation failed").slice(0, 2000);
+        const terminal = error instanceof DocumentPermanentError ||
+          (error instanceof DocumentModelError && error.status >= 400 && error.status < 500 && error.status !== 429);
+        if (!terminal && checkpoint.failures < 2) {
+          if (error instanceof DocumentModelError) await runtime.sleep(runtime.now() + error.retryAfterMs * (checkpoint.failures + 1), context);
+          await runtime.commit(async () => ({
+            status: "running", checkpoint: {
+              ...checkpoint, failures: checkpoint.failures + 1,
+              document: { ...checkpoint.document, feedback: message },
+            },
+          }), context);
+          return;
+        }
+        await runtime.commit(async tx => {
+          const doc = await tx.doc(SubtitleJobDoc, runtime.conversationId);
+          doc.status = "failed"; doc.stage = "failed"; doc.error = message;
+          doc.failed_cues = input.cues.map(c => c.cue_id);
+          const result = { status: "failed", total_cues: input.cues.length, failed_cues: input.cues.length, published_cues: 0, cues: [] };
+          doc.final_result = result;
+          return { status: "terminal", outcome: { status: "completed", result } };
+        }, context);
+        documentCredentials.delete(input.jobKey);
+      }
+    },
+  },
+  abort: async (task, runtime, context) => {
+    documentCredentials.delete(task.input.jobKey);
+    await runtime.commit(async tx => {
+      const doc = await tx.doc(SubtitleJobDoc, runtime.conversationId);
+      doc.cancelled = true; doc.status = "cancelled"; doc.stage = "cancelled";
+      return { status: "terminal", outcome: { status: "completed", result: { cancelled: true, published_cues: [] } } };
+    }, context);
+  },
+});

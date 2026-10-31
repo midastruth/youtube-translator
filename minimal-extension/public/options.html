@@ -58,19 +58,21 @@
     <div class="section-title">🔑 翻译 API（可选，留空用服务端 .env）</div>
     <label>翻译引擎</label>
     <select id="translateEngine">
-      <option value="legacy">标准引擎 (Legacy)</option>
-      <option value="agent">Durable Agent (上下文审校与恢复)</option>
+      <option value="document">全文高质量 — 全文理解、语义规划、翻译与审校（较慢）</option>
+      <option value="legacy">快速模式 — 独立逐句 / 小块翻译</option>
+      <option value="agent">旧 Agent 框架（脚本占位，仅开发测试）</option>
     </select>
+    <div class="hint">全文高质量模式需启动 Worker，支持 OpenAI-compatible 模型；原文先显示，译文审校完成后发布。不会自动降级为逐句翻译。</div>
     <label>OpenAI API Key</label>
     <input type="password" id="translateApiKey" placeholder="sk-...">
     <label>API 地址</label>
     <input type="text" id="translateBaseUrl" placeholder="https://api.openai.com/v1">
     <label>翻译模型</label>
     <input type="text" id="translateModel" placeholder="gpt-4o">
-    <label>全文一次翻译</label>
+    <label>快速模式：块内上下文翻译（全文高质量模式忽略此项）</label>
     <select id="translateWhole">
-      <option value="false">否 — 逐句并行（快）</option>
-      <option value="true">是 — 全文一次（术语统一）</option>
+      <option value="false">否 — 逐句并行；长视频仍使用小块上下文</option>
+      <option value="true">是 — 每 10 条一起翻译（不是全文）</option>
     </select>
   </div>
 

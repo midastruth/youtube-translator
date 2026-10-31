@@ -24,7 +24,7 @@ export type StreamRequest = {
 export type SubtitleEvent = {
   type: string; total_cues?: number; completed_cues?: number; failed_cues?: number; index?: number;
   start?: number; end?: number; text?: string; translation?: string; cached?: boolean;
-  detail?: string; code?: string; hide_after_ms?: number;
+  detail?: string; code?: string; hide_after_ms?: number; stage?: string; progress?: string;
 };
 export type DisplayError = Error & { code?: string; hideAfterMs?: number };
 export function displayError(value: unknown): DisplayError {

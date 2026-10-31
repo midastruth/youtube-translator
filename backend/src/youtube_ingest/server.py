@@ -17,7 +17,7 @@ import subprocess
 import tempfile
 import threading
 from pathlib import Path
-from typing import Any, AsyncGenerator
+from typing import Any, AsyncGenerator, Literal
 from urllib.parse import parse_qs, urlparse
 
 from dotenv import load_dotenv
@@ -402,12 +402,14 @@ class SubtitleRequest(BaseModel):
     allow_automatic: bool = True
     segmentation: str = "rule"  # "rule" | "statistical"
     translate_to: str | None = None
-    translate_engine: str = "legacy"  # "legacy" | "agent"
+    translate_engine: Literal["legacy", "agent", "document"] = "legacy"
     translate_provider: str = "openai"
     translate_api_key: str | None = None
     translate_base_url: str | None = None
     translate_model: str | None = None
-    translate_whole: bool = False  # True = 全文一次性翻译，保证术语/上下文一致
+    translate_whole: bool = False  # Legacy SSE: contextual chunks, NOT document translation.
+    translate_context_tokens: int | None = None
+    translate_output_tokens: int | None = None
     # Whisper 兜底 — 无字幕时自动转音频
     whisper_enabled: bool = False
     whisper_api_key: str | None = None
@@ -758,6 +760,8 @@ async def get_tracks(
 @app.post("/api/subtitle/process", response_model=SubtitleResponse)
 async def process_subtitle(req: SubtitleRequest):
     """Fetch subtitle, segment, and optionally translate."""
+    if req.translate_engine == "document":
+        raise HTTPException(status_code=422, detail="全文高质量模式为后台任务，请使用 /api/subtitle/stream 获取进度与结果")
     try:
         meta, cues = await run_in_threadpool(
             _process_subtitle_sync,
@@ -979,7 +983,9 @@ async def process_subtitle_stream(req: SubtitleRequest):
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    if req.translate_engine == "agent":
+    if req.translate_engine in ("agent", "document"):
+        if req.translate_engine == "document" and req.translate_provider != "openai":
+            raise HTTPException(status_code=422, detail="全文高质量模式需要 OpenAI-compatible 模型，不支持逐句 DeepL 翻译")
         if req.translate_provider not in ("openai", "deepl", "mock"):
             raise HTTPException(
                 status_code=400,
@@ -998,6 +1004,9 @@ async def process_subtitle_stream(req: SubtitleRequest):
                 model=req.translate_model or "gpt-4o",
                 base_url=req.translate_base_url,
                 api_key=req.translate_api_key,
+                engine=req.translate_engine,
+                context_tokens=req.translate_context_tokens,
+                output_tokens=req.translate_output_tokens,
             )
             job_id = job_res["job_id"]
         except AgentWorkerError as exc:
@@ -1198,7 +1207,7 @@ async def ws_subtitle_process(ws: WebSocket):
     })
 
     if to_lang and cues:
-        if req.translate_engine == "agent":
+        if req.translate_engine in ("agent", "document"):
             agent_client = AgentWorkerClient()
             try:
                 job_res = await agent_client.submit_or_attach(
@@ -1212,6 +1221,9 @@ async def ws_subtitle_process(ws: WebSocket):
                     model=req.translate_model or "gpt-4o",
                     base_url=req.translate_base_url,
                     api_key=req.translate_api_key,
+                    engine=req.translate_engine,
+                    context_tokens=req.translate_context_tokens,
+                    output_tokens=req.translate_output_tokens,
                 )
                 job_id = job_res["job_id"]
                 async for event in agent_client.stream_job(job_id):

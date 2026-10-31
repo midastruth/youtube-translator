@@ -24,10 +24,13 @@ export function installLockedDependencies() {
 export function cleanProjectCopy() {
   fs.mkdirSync(path.join(root, "tmp"), { recursive: true });
   const copy = fs.mkdtempSync(path.join(root, "tmp/migration-project-"));
-  for (const name of ["worker", "minimal-extension", "features", "tests", "scripts", "docs", "package.json", "package-lock.json", "tsconfig.json", "Makefile"]) {
-    fs.cpSync(path.join(root, name), path.join(copy, name), { recursive: true,
-      filter: source => !(source.startsWith(path.join(root, "minimal-extension/public") + path.sep) && /\.js(?:\.map)?$/.test(source)),
-    });
+  for (const name of ["server", "worker", "minimal-extension", "features", "tests", "scripts", "docs", "package.json", "package-lock.json", "tsconfig.json", "Makefile"]) {
+    const sourcePath = path.join(root, name);
+    if (fs.existsSync(sourcePath)) {
+      fs.cpSync(sourcePath, path.join(copy, name), { recursive: true,
+        filter: source => !(source.startsWith(path.join(root, "minimal-extension/public") + path.sep) && /\.js(?:\.map)?$/.test(source)),
+      });
+    }
   }
   fs.symlinkSync(path.join(root, "node_modules"), path.join(copy, "node_modules"), "dir");
   return copy;

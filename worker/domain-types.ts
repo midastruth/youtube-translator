@@ -17,6 +17,7 @@ export type JobDocument = {
   source_cues: SourceCue[]; published_cues: Record<string, PublishedCue>; failed_cues: string[];
   glossary: Draft; network_attempts: number; budget_limit: number; revisions: Record<string, number>;
   cancelled: boolean; final_result: FinalResult | null;
+  engine?: string; job_id?: string; title?: string; task_id?: number; error?: string; progress?: string;
 };
 export type TaskInput = {
   jobId: string; jobKey: string; videoId: string; title: string; fromLang: string; toLang: string;

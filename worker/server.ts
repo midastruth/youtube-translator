@@ -32,9 +32,19 @@ export async function createWorkerServer({ storagePath = STORAGE_PATH, port = PO
       }
 
       if (req.method === "POST" && url.pathname === "/internal/jobs") {
-        let body = "";
-        for await (const chunk of req) body += chunk;
-        const data: SubmitJobOptions = JSON.parse(body || "{}");
+        const chunks: Buffer[] = [];
+        let bytes = 0;
+        for await (const chunk of req) {
+          const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          bytes += data.length;
+          if (bytes > 16 * 1024 * 1024) {
+            res.writeHead(413, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Subtitle document exceeds 16 MiB" })); return;
+          }
+          chunks.push(data);
+        }
+        // Decode once: network chunks can split a multi-byte subtitle character.
+        const data: SubmitJobOptions = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
 
         const job = await worker.submitOrAttachJob(data);
         res.writeHead(200, { "Content-Type": "application/json" });
@@ -68,7 +78,7 @@ export async function createWorkerServer({ storagePath = STORAGE_PATH, port = PO
           });
 
           const abortController = new AbortController();
-          req.on("close", () => abortController.abort());
+          res.on("close", () => abortController.abort());
 
           for await (const event of worker.observeJobStream(job, {
             signal: abortController.signal,
@@ -112,7 +122,7 @@ export async function createWorkerServer({ storagePath = STORAGE_PATH, port = PO
 
 if (process.argv[1] && process.argv[1].endsWith("server.js")) {
   createWorkerServer().then(({ server }) => {
-    server.listen(PORT, () => {
+    server.listen(PORT, process.env.TRANSLATION_AGENT_HOST || "127.0.0.1", () => {
       console.log(`Durable translation worker listening on port ${PORT}`);
     });
   });

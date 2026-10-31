@@ -22,7 +22,7 @@ const DEF: ExtensionSettings = {
   languages: "en,zh-Hans,zh-Hant,zh",
   toLang: "zh-CN",
   segmentation: "rule",
-  translateEngine: "legacy", translateProvider: "openai",
+  translateEngine: "document", translateProvider: "openai",
   translateApiKey: "", translateBaseUrl: "", translateModel: "",
   translateWhole: false, autoTranslate: true, enabled: false,
   // Whisper fallback (no subtitle track → transcribe audio)
@@ -347,6 +347,17 @@ async function load(pageUrl: string) {
           } else {
             showStatus(totalCues ? `字幕已获取，正在翻译 0/${totalCues}…` : "正在翻译字幕…");
           }
+          return;
+        }
+
+        if (event.type === "progress") {
+          const stages: Record<string, string> = {
+            analyze: "正在阅读全文并规划语义章节", consolidate: "正在整合全文理解", brief: "正在统一术语与上下文",
+            translate: "正在进行文档级翻译", audit: "正在检查全文术语与语义一致性", review: "正在进行双语审校与修订",
+            final_audit: "正在复查修订后的全文一致性",
+            publish: "正在校验并发布最终字幕", awaiting_credentials: "Worker 已恢复任务，等待 API Key；请配置密钥后重新开启翻译",
+          };
+          showStatus(`${stages[event.stage || ""] || "正在处理全文翻译"}${event.progress ? `（${event.progress}）` : ""}…`);
           return;
         }
 

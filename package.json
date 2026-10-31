@@ -7,6 +7,8 @@
     "node": "^22.22.2 || ^24.15.0 || >=26.0.0"
   },
   "scripts": {
+    "start": "npm run build && node --env-file-if-exists=.env dist/server/src/server.js",
+    "server": "npm run build && node --env-file-if-exists=.env dist/server/src/server.js",
     "typecheck": "tsc --pretty false",
     "build": "tsx scripts/build.ts",
     "build:extension": "tsx scripts/build.ts --extension",
@@ -17,12 +19,13 @@
     "test:unit": "npm run build && node --import ./scripts/register-typescript.ts --test tests/*.test.ts",
     "test:acceptance": "npm run build && MISE_BABASHKA_VERSION=1.13.225 bb scripts/acceptance.bb",
     "test:backend": "cd backend && uv run pytest",
-    "worker": "npm run build && node dist/worker/server.js"
+    "worker": "npm run build && node --env-file-if-exists=.env dist/worker/server.js"
   },
   "dependencies": {
     "@earendil-works/chord": "1.1.0",
     "@earendil-works/pi-ai": "1.1.0",
-    "@earendil-works/pi-durable": "1.1.0"
+    "@earendil-works/pi-durable": "1.1.0",
+    "ws": "^8.22.1"
   },
   "devDependencies": {
     "@cucumber/cucumber": "^13.3.0",
@@ -31,6 +34,7 @@
     "@types/chrome": "^0.3.4",
     "@types/jsdom": "^30.0.0",
     "@types/node": "^26.6.4",
+    "@types/ws": "^8.18.2",
     "esbuild": "^0.28.2",
     "fast-check": "^4.10.2",
     "jsdom": "^30.1.2",

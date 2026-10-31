@@ -13,7 +13,7 @@ import { DocumentTranslationTask, DocumentResumeDoc, documentCredentials } from 
 import { modelConfig } from "./document-translation.js";
 import type { DocumentInput } from "./document-translation.js";
 import { SubtitleEditingTask } from "./subtitle-agent.js";
-import { TRANSLATION_TEAM_VERSION, TranslationTeamTask, initialTranslationTeamState } from "./translation-team.js";
+import { TRANSLATION_TEAM_VERSION, TranslationTeamTask, initialTranslationTeamState, translationTeamReasoning } from "./translation-team.js";
 import { observeDocumentJob } from "./document-stream.js";
 import type { TaskId, ConversationId } from "@earendil-works/pi-durable";
 
@@ -319,6 +319,7 @@ export class AgentWorker {
   private async submitDocumentJob(options: SubmitJobOptions): Promise<JobRecord> {
     if (options.provider && options.provider !== "openai") throw new Error("全文高质量模式需要 OpenAI-compatible provider");
     const config = modelConfig({ model: options.model, baseUrl: options.baseUrl, contextTokens: options.contextTokens, outputTokens: options.outputTokens });
+    const teamReasoning = translationTeamReasoning(config);
     const cues = (options.cues || []).map((c, index) => ({
       cue_id: c.cue_id || `c${index}`, start: typeof c.start === "number" ? c.start : NaN,
       end: typeof c.end === "number" ? c.end : NaN, text: String(c.text || ""),
@@ -331,6 +332,7 @@ export class AgentWorker {
         context: config.contextTokens, output: config.outputTokens, title: options.title || "",
         // Preserve existing cache keys when reasoning is not explicitly enabled.
         ...(config.reasoningEffort !== "off" ? { reasoningEffort: config.reasoningEffort } : {}),
+        ...(teamReasoning.main !== config.reasoningEffort || teamReasoning.subagent !== config.reasoningEffort ? { teamReasoning } : {}),
       }),
     });
     if (options.apiKey) documentCredentials.set(jobKey, options.apiKey);
@@ -358,7 +360,7 @@ export class AgentWorker {
       if (existing) this.jobs.delete(jobKey);
       const input = {
         jobId: `doc-${crypto.randomUUID()}`, jobKey, videoId: options.videoId || "", title: options.title || "",
-        fromLang: options.fromLang || "en", toLang: options.toLang || "zh-CN", cues, config, budgetLimit: options.budgetLimit ?? 128,
+        fromLang: options.fromLang || "en", toLang: options.toLang || "zh-CN", cues, config, teamReasoning, budgetLimit: options.budgetLimit ?? 128,
       };
       if (!Number.isSafeInteger(input.budgetLimit) || input.budgetLimit < 1 || input.budgetLimit > 1000) throw new Error("Invalid document request budget");
       initialTranslationTeamState(input); // Validate before creating durable state.

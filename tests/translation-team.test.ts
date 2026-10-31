@@ -5,7 +5,7 @@ import fs from "node:fs/promises";
 import type { AssistantMessage, Context, ToolCall } from "@earendil-works/pi-ai";
 import {
   advanceTranslationTeam, finalTranslationTeamCues, initialTranslationTeamState,
-  translationTeamTool, MAX_SUBAGENTS,
+  translationTeamTool, translationTeamReasoning, translationTeamModelConfig, MAX_SUBAGENTS,
 } from "../worker/translation-team.js";
 import { DocumentModelError, modelConfig } from "../worker/document-translation.js";
 import type { DocumentInput } from "../worker/document-translation.js";
@@ -29,6 +29,40 @@ function dispatch(document = input()) {
 function manifest(context: Context) {
   return JSON.parse((context.messages[1] as { content: string }).content) as { id: string; shared_brief: string; assignment: { start_id: string } };
 }
+
+test("role reasoning inherits global settings, validates overrides and never changes restored inputs", () => {
+  const names = ["TRANSLATION_MAIN_REASONING_EFFORT", "TRANSLATION_SUBAGENT_REASONING_EFFORT"] as const;
+  const previous = names.map(name => process.env[name]);
+  try {
+    for (const name of names) delete process.env[name];
+    const config = modelConfig({ reasoningEffort: "low" });
+    assert.deepEqual(translationTeamReasoning(config), { main: "low", subagent: "low" });
+    process.env.TRANSLATION_MAIN_REASONING_EFFORT = "high";
+    process.env.TRANSLATION_SUBAGENT_REASONING_EFFORT = "medium";
+    const document = { ...input(), config, teamReasoning: translationTeamReasoning(config) };
+    process.env.TRANSLATION_MAIN_REASONING_EFFORT = "off";
+    process.env.TRANSLATION_SUBAGENT_REASONING_EFFORT = "off";
+    const restored = JSON.parse(JSON.stringify(document)) as DocumentInput;
+    assert.equal(translationTeamModelConfig(restored, "main").reasoningEffort, "high");
+    assert.equal(translationTeamModelConfig(restored, "subagent").reasoningEffort, "medium");
+    assert.deepEqual(translationTeamReasoning(config), { main: "off", subagent: "off" });
+    delete restored.teamReasoning;
+    assert.equal(translationTeamModelConfig(restored, "main").reasoningEffort, "low");
+    assert.equal(translationTeamModelConfig(restored, "subagent").reasoningEffort, "low");
+    delete restored.config.reasoningEffort;
+    assert.equal(translationTeamModelConfig(restored, "main").reasoningEffort, "off");
+    for (const name of names) {
+      process.env[name] = "invalid-private-value";
+      assert.throws(() => translationTeamReasoning(config), error => {
+        assert.ok(error instanceof Error); assert.match(error.message, new RegExp(name));
+        assert.doesNotMatch(error.message, /invalid-private-value/); return true;
+      });
+      process.env[name] = "";
+    }
+  } finally {
+    names.forEach((name, i) => { if (previous[i] === undefined) delete process.env[name]; else process.env[name] = previous[i]; });
+  }
+});
 
 test("main dispatch validates exact ordered coverage and hard cap of nine, atomically", () => {
   const document = input(), state = initialTranslationTeamState(document), plan = dispatch(document);
@@ -129,12 +163,20 @@ test("one failed child retains siblings' committed work and retries only its own
 });
 
 test("durable HTTP workflow runs nine concurrent model sessions, enforces aggregate budget, resumes and publishes only after main acceptance", { timeout: 15000 }, async t => {
+  const names = ["TRANSLATION_MAIN_REASONING_EFFORT", "TRANSLATION_SUBAGENT_REASONING_EFFORT"] as const;
+  const previous = names.map(name => process.env[name]);
+  t.after(() => names.forEach((name, i) => { if (previous[i] === undefined) delete process.env[name]; else process.env[name] = previous[i]; }));
+  process.env.TRANSLATION_MAIN_REASONING_EFFORT = "high";
+  process.env.TRANSLATION_SUBAGENT_REASONING_EFFORT = "medium";
+  const settings: { main: boolean; effort: unknown; cap: unknown; temperature: unknown }[] = [];
   let active = 0, peak = 0, requests = 0;
   const server = http.createServer(async (req, res) => {
     let body = ""; for await (const chunk of req) body += chunk;
     const payload = JSON.parse(body) as AgentPayload;
     requests++;
-    const main = payload.tools?.some(t => t.function.name === "dispatch_subagents");
+    const main = !!payload.tools?.some(t => t.function.name === "dispatch_subagents");
+    const wire = payload as unknown as Record<string, unknown>;
+    settings.push({ main, effort: wire.reasoning_effort, cap: wire.max_completion_tokens, temperature: wire.temperature });
     if (!main) {
       active++; peak = Math.max(peak, active);
       await new Promise(resolve => setTimeout(resolve, 10)); active--;
@@ -150,12 +192,17 @@ test("durable HTTP workflow runs nine concurrent model sessions, enforces aggreg
   let worker = new AgentWorker({ storagePath: `${directory}/state.db` }); await worker.start();
   t.after(async () => { await worker.close(); restore(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await fs.rm(directory, { recursive: true, force: true }); });
   const options = { engine: "document", cues: source, apiKey: "private-team-key", baseUrl: `http://127.0.0.1:${address.port}/v1`, budgetLimit: 15 };
-  const failed = await worker.submitOrAttachJob(options); await failed.taskPromise;
+  const failed = await worker.submitOrAttachJob(options);
+  process.env.TRANSLATION_MAIN_REASONING_EFFORT = "off";
+  process.env.TRANSLATION_SUBAGENT_REASONING_EFFORT = "off";
+  await failed.taskPromise;
   assert.equal(failed.status, "failed");
   assert.equal(requests, 15, "all children and main share a single hard request budget");
   assert.equal(peak, 9);
   assert.deepEqual((await worker.snapshotJob(failed)).published_cues, []);
   await worker.close(); worker = new AgentWorker({ storagePath: `${directory}/state.db` }); await worker.start();
+  process.env.TRANSLATION_MAIN_REASONING_EFFORT = "high";
+  process.env.TRANSLATION_SUBAGENT_REASONING_EFFORT = "medium";
   const resumed = await worker.submitOrAttachJob({ ...options, budgetLimit: 100 }); await resumed.taskPromise;
   assert.equal(resumed.jobId, failed.jobId);
   assert.equal(resumed.status, "succeeded");
@@ -166,5 +213,19 @@ test("durable HTTP workflow runs nine concurrent model sessions, enforces aggreg
   const before = requests;
   assert.equal((await worker.submitOrAttachJob({ ...options, budgetLimit: 100 })).status, "succeeded");
   assert.equal(requests, before);
+  assert.ok(settings.some(s => s.main) && settings.some(s => !s.main));
+  for (const setting of settings) {
+    assert.equal(setting.effort, setting.main ? "high" : "medium");
+    assert.equal(setting.cap, 16384); assert.equal(setting.temperature, undefined);
+  }
+  process.env.TRANSLATION_SUBAGENT_REASONING_EFFORT = "low";
+  const low = await worker.submitOrAttachJob({ ...options, budgetLimit: 100 }); await low.taskPromise;
+  assert.equal(low.status, "succeeded"); assert.notEqual(low.jobKey, resumed.jobKey);
+  for (const setting of settings.slice(before)) assert.equal(setting.effort, setting.main ? "high" : "low");
+  const highStart = settings.length;
+  process.env.TRANSLATION_MAIN_REASONING_EFFORT = "medium";
+  const mediumMain = await worker.submitOrAttachJob({ ...options, budgetLimit: 100 }); await mediumMain.taskPromise;
+  assert.equal(mediumMain.status, "succeeded"); assert.notEqual(mediumMain.jobKey, low.jobKey);
+  for (const setting of settings.slice(highStart)) assert.equal(setting.effort, setting.main ? "medium" : "low");
   for (const name of await fs.readdir(directory)) if (name.startsWith("state.db")) assert.equal((await fs.readFile(`${directory}/${name}`)).includes(Buffer.from(options.apiKey)), false);
 });

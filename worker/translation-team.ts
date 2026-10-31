@@ -5,12 +5,27 @@ import {
   SUBTITLE_AGENT_PROMPT, SUBTITLE_AGENT_TOOLS, subtitleAgentContext, subtitleAgentTool, WorkspaceError,
 } from "./subtitle-agent.js";
 import type { SubtitleAgentState } from "./subtitle-agent.js";
-import { callDocumentTurn, DocumentModelError, DocumentPermanentError, inputBudget, tokenEstimate } from "./document-translation.js";
-import type { DocumentInput } from "./document-translation.js";
+import { callDocumentTurn, DocumentModelError, DocumentPermanentError, inputBudget, parseReasoningEffort, tokenEstimate } from "./document-translation.js";
+import type { DocumentInput, ModelConfig } from "./document-translation.js";
 import { createDocumentTask } from "./document-task.js";
 
 export const TRANSLATION_TEAM_VERSION = "subtitle-translation-team-v1";
 export const MAX_SUBAGENTS = 9;
+
+/** Resolve deployment overrides once, before caching or persisting the task. */
+export function translationTeamReasoning(config: ModelConfig): NonNullable<DocumentInput["teamReasoning"]> {
+  const fallback = config.reasoningEffort ?? "off";
+  return {
+    main: parseReasoningEffort(process.env.TRANSLATION_MAIN_REASONING_EFFORT || fallback, "TRANSLATION_MAIN_REASONING_EFFORT"),
+    subagent: parseReasoningEffort(process.env.TRANSLATION_SUBAGENT_REASONING_EFFORT || fallback, "TRANSLATION_SUBAGENT_REASONING_EFFORT"),
+  };
+}
+
+export function translationTeamModelConfig(input: DocumentInput, role: "main" | "subagent"): ModelConfig {
+  // Never consult the current environment while executing/restoring a task.
+  const effort = input.teamReasoning?.[role] ?? input.config.reasoningEffort ?? "off";
+  return { ...input.config, reasoningEffort: parseReasoningEffort(effort) };
+}
 type Assignment = { start_id: string; end_id: string; instructions: string };
 export type TranslationChild = Assignment & {
   id: string; status: "running" | "completed" | "closed";
@@ -41,6 +56,8 @@ const CHILD_TOOLS: Tool[] = [...SUBTITLE_AGENT_TOOLS, {
 }];
 
 export function initialTranslationTeamState(input: DocumentInput): TranslationTeamState {
+  translationTeamModelConfig(input, "main");
+  translationTeamModelConfig(input, "subagent");
   const state: TranslationTeamState = { ...initialSubtitleAgentState(input), brief: "", children: [], acceptedRevision: -1, acceptance: "" };
   const context = teamContext(subtitleAgentContext(input, state), state);
   context.tools = TEAM_TOOLS;
@@ -166,7 +183,9 @@ export function finalTranslationTeamCues(input: DocumentInput, state: Translatio
 }
 export const TranslationTeamTask = createDocumentTask({
   name: "subtitle_translation_team", initial: initialTranslationTeamState, advance: advanceTranslationTeam,
-  call: (input, _state, context, options) => callDocumentTurn(input, context, options),
+  call: (input, state, context, options) => callDocumentTurn({
+    ...input, config: translationTeamModelConfig(input, state.children.some(c => c.status === "running") ? "subagent" : "main"),
+  }, context, options),
   finalCues: finalTranslationTeamCues,
   resume: state => ({ ...state, children: state.children.map(c => ({ ...c, failures: 0, error: "", terminal: false, retryAt: 0 })) }),
   wakeAt: state => {

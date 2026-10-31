@@ -22,6 +22,8 @@ export type ModelConfig = {
 export type DocumentInput = {
   jobId: string; jobKey: string; videoId: string; title: string; fromLang: string; toLang: string;
   cues: SourceCue[]; config: ModelConfig; budgetLimit: number;
+  // Snapshotted per-role settings. Older tasks inherit their persisted global effort.
+  teamReasoning?: { main: ReasoningEffort; subagent: ReasoningEffort };
   // Explicit retry of a failed task restores its conversation's saved checkpoint.
   resume?: boolean;
 };
@@ -47,9 +49,9 @@ export function inputBudget(config: ModelConfig) {
   return Math.floor(config.contextTokens * 0.8) - config.outputTokens - 1500;
 }
 export function outputBudget(config: ModelConfig) { return Math.floor(config.outputTokens * 0.7); }
-function parseReasoningEffort(value: unknown): ReasoningEffort {
+export function parseReasoningEffort(value: unknown, setting = "TRANSLATION_REASONING_EFFORT"): ReasoningEffort {
   if (!["off", "minimal", "low", "medium", "high", "xhigh"].includes(value as string)) {
-    throw new DocumentPermanentError("configuration", "Invalid TRANSLATION_REASONING_EFFORT; use off, minimal, low, medium, high or xhigh");
+    throw new DocumentPermanentError("configuration", `Invalid ${setting}; use off, minimal, low, medium, high or xhigh`);
   }
   return value as ReasoningEffort;
 }

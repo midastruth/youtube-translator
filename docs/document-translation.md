@@ -18,7 +18,7 @@ accept_translation → close_subagents
 validate_translation → finish_translation → 宿主复核、原子发布
 ```
 
-主 Agent 根据内容与任务大小决定子 Agent 数量，不是每次固定启动 9 个。主、子 Agent 使用同一模型配置，但有独立工具会话和工作区。子 Agent 是独立模型会话，不是宿主机子进程；宿主并发执行模型调用，不授予 shell 或任意外网权限。
+主 Agent 根据内容与任务大小决定子 Agent 数量，不是每次固定启动 9 个。主、子 Agent 使用同一模型和 token 配置，但可分别设置推理强度，并有独立工具会话和工作区。子 Agent 是独立模型会话，不是宿主机子进程；宿主并发执行模型调用，不授予 shell 或任意外网权限。
 
 入口不变：扩展选择 `document`，通过 `POST /api/subtitle/stream` 或 WebSocket 提交。`legacy` 快速模式保持原样。`agent` 枚举仍是历史规则原型，不是正式翻译团队。
 
@@ -71,7 +71,8 @@ validate_translation → finish_translation → 宿主复核、原子发布
 
 ## 模型、安全与发布
 
-- 使用 `pi-ai` 的 OpenAI-compatible Chat Completions SSE + Function Calling，不强制 `response_format`。主、子 Agent 使用同一模型、推理强度和 token 配置。
+- 使用 `pi-ai` 的 OpenAI-compatible Chat Completions SSE + Function Calling，不强制 `response_format`。主、子 Agent 使用同一模型和 token 配置；推理强度可分别用 `TRANSLATION_MAIN_REASONING_EFFORT=high` 和 `TRANSLATION_SUBAGENT_REASONING_EFFORT=medium` 设置。
+- 角色推理设置未指定或留空时继承 `TRANSLATION_REASONING_EFFORT`（默认 `off`），显式 `off` 表示该角色不发送推理强度参数。有效设置在任务创建时持久化，修改任一角色档位会隔离新任务缓存；重启、续翻仍使用任务原设置，旧任务不受新增环境变量影响。支持 `off` / `minimal` / `low` / `medium` / `high` / `xhigh`，实际档位需模型支持。
 - 模型优先采用请求设置，再采用 `TRANSLATION_AGENT_MODEL`，最后回退为 `sol`。端点需允许最多 9 个并发请求；限流可能降低收益，真实加速比取决于模型服务与任务分段。
 - 默认上下文 128,000 tokens、最大输出 16,384 tokens；由 `TRANSLATION_CONTEXT_TOKENS` / `TRANSLATION_OUTPUT_TOKENS` 配置。预算采用保守估算，不是精确 tokenizer。
 - 单次模型请求总时限 10 分钟。截断或缺少完整结束标记的调用不会执行工具。

@@ -50,7 +50,7 @@ export function buildStreamRequest({ pageUrl, languages, track, browserSubtitles
 function applyTranslationSettings(body: StreamRequest, settings: ExtensionSettings) {
   if (settings.autoTranslate === false || !settings.toLang) return;
   body.translate_to = settings.toLang;
-  body.translate_engine = settings.translateEngine || "legacy";
+  body.translate_engine = !settings.translateEngine || settings.translateEngine === "legacy" ? "legacy" : "document";
   body.translate_provider = settings.translateProvider || "openai";
   if (settings.translateApiKey) body.translate_api_key = settings.translateApiKey;
   if (settings.translateBaseUrl) body.translate_base_url = settings.translateBaseUrl;

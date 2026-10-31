@@ -2,9 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import fc from "fast-check";
 import { calculateJobKey } from "../../worker/keys.js";
-import { estimateTokens, partitionCuesIntoBlocks } from "../../worker/chunker.js";
 import { validateOutputMapping } from "../../worker/validator.js";
-import { BudgetExceededError, RequestBudgetTracker } from "../../worker/network.js";
 import { formatVttTime, subtitleIndexAt } from "../../extension/src/subtitles.js";
 import { normalizeJson3, parseBrowserSubtitles } from "../../extension/src/types.js";
 import { consumeSubtitleStream } from "../../extension/src/subtitle-stream.js";
@@ -15,28 +13,6 @@ const texts = fc.array(fc.string({ maxLength: 400 }), { maxLength: 50 });
 const sourceCues = texts.map(values => values.map((text, index) => ({
   cue_id: `c${index}`, start: index * 1000 + 123, end: index * 1000 + 987, text,
 })));
-
-test("property: partition conserves source order and respects context budgets", () => {
-  fc.assert(fc.property(sourceCues, fc.integer({ min: 1, max: 20 }), fc.integer({ min: 1, max: 8000 }),
-    (cues, maxCuesPerBlock, contextWindow) => {
-      const blocks = partitionCuesIntoBlocks(cues, { maxCuesPerBlock, contextWindow });
-      const budget = Math.max(500, contextWindow - 1024 - 512);
-      assert.deepEqual(blocks.flatMap(block => block.cues), cues);
-      let offset = 0;
-      for (const [index, block] of blocks.entries()) {
-        assert.equal(block.blockIndex, index);
-        assert.equal(block.isLastBlock, index === blocks.length - 1);
-        assert.equal(block.totalCuesInBlock, block.cues.length);
-        assert.ok(block.cues.length > 0 && block.cues.length <= maxCuesPerBlock);
-        assert.deepEqual(block.contextBefore, cues.slice(offset - block.contextBefore.length, offset));
-        offset += block.cues.length;
-        assert.deepEqual(block.contextAfter, cues.slice(offset, offset + block.contextAfter.length));
-        const tokens = [...block.contextBefore, ...block.cues, ...block.contextAfter]
-          .reduce((total, cue) => total + estimateTokens(cue.text), 0);
-        assert.ok(tokens <= budget || (block.cues.length === 1 && !block.contextBefore.length && !block.contextAfter.length));
-      }
-    }), options);
-});
 
 test("property: output encodings and shuffled IDs preserve source order and milliseconds", () => {
   fc.assert(fc.property(sourceCues.filter(cues => cues.length > 0), cues => {
@@ -60,24 +36,6 @@ test("property: cache keys normalize endpoints/languages but retain cue timeline
     const key = calculateJobKey(base);
     assert.equal(calculateJobKey({ ...base, sourceCues: structuredClone(cues), provider: " OPENAI ", fromLang: "EN", toLang: "ZH-CN", baseUrl: ` ${base.baseUrl}${"/".repeat(trailingSlashes)} `, model: " gpt-4o " }), key);
     if (cues.length) assert.notEqual(calculateJobKey({ ...base, sourceCues: cues.map((cue, i) => i ? cue : { ...cue, start: cue.start + 1 }) }), key);
-  }), options);
-});
-
-test("property: reservation never exceeds budget and usage is conserved", () => {
-  fc.assert(fc.property(fc.integer({ min: 0, max: 30 }), fc.array(fc.record({
-    promptTokens: fc.integer({ min: 0, max: 1000 }), completionTokens: fc.integer({ min: 0, max: 1000 }), cost: fc.integer({ min: 0, max: 10 }),
-  }), { maxLength: 40 }), (maxBudget, usages) => {
-    const tracker = new RequestBudgetTracker({ maxBudget });
-    let tokens = 0, cost = 0;
-    for (const usage of usages) {
-      if (tracker.attempts === maxBudget) { assert.throws(() => tracker.checkAndReserve(), BudgetExceededError); continue; }
-      tracker.checkAndReserve(); tracker.recordSuccess(usage);
-      tokens += usage.promptTokens + usage.completionTokens; cost += usage.cost;
-    }
-    const report = tracker.getUsageReport();
-    assert.equal(report.totalAttempts, Math.min(maxBudget, usages.length));
-    assert.equal(report.remainingAttempts + report.totalAttempts, maxBudget);
-    assert.equal(report.knownTokens, tokens); assert.equal(report.knownCost, cost);
   }), options);
 });
 

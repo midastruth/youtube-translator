@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { moduleImports } from "./support/module-imports.js";
 
-const workerCore = ["domain-types", "chunker", "default-draft", "glossary", "keys", "network", "request-budget", "quality-eval", "reviewer", "revision-prompt", "validator"];
+const workerCore = ["domain-types", "keys", "validator"];
 
 test("worker core cannot import lifecycle, persistence, transport or framework types", () => {
   const allowed = new Set([...workerCore.map(name => `./${name}.js`), "node:crypto"]);

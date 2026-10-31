@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import http from "node:http";
+import { trustModelEndpoint } from "../../tests/support/model-endpoint.js";
+import { respondAsSubtitleAgent } from "../../tests/support/subtitle-agent-model.js";
 import { pathToFileURL } from "node:url";
 import { spawn, type ChildProcess } from "node:child_process";
 import { After, Given, When, Then } from "@cucumber/cucumber";
@@ -24,6 +27,9 @@ let events: StreamEvent[] = [];
 let snapshot: { published_cues: SourceCue[]; final_result: { cues: SourceCue[] } };
 let key = "";
 let built = false;
+let modelServer: http.Server | undefined;
+let modelUrl = "";
+let restoreEndpoint: (() => void) | undefined;
 
 After(async () => {
   if (service) {
@@ -36,6 +42,12 @@ After(async () => {
     const exited = new Promise<void>(resolve => child.once("exit", () => resolve()));
     try { process.kill(-child.pid!, "SIGTERM"); } catch {}
     await exited; processWorker = undefined;
+  }
+  restoreEndpoint?.(); restoreEndpoint = undefined;
+  if (modelServer) {
+    modelServer.closeAllConnections();
+    await new Promise<void>(resolve => modelServer!.close(() => resolve()));
+    modelServer = undefined;
   }
   if (directory) fs.rmSync(directory, { recursive: true, force: true });
   directory = "";
@@ -76,18 +88,20 @@ Given("构建后的内部 HTTP 服务使用场景独占数据库且就绪", asyn
   base = `http://127.0.0.1:${address.port}`;
   assert.equal((await fetch(`${base}/internal/health`)).status, 200);
 });
-Given(/^脚本化模型将源文 "([^"]+)" 翻译为 "([^"]+)" 并通过审校$/, (source: string, target: string) => {
+Given(/^脚本化模型将源文 "([^"]+)" 翻译为 "([^"]+)" 并通过审校$/, async (source: string, target: string) => {
   text = source; translation = target;
-  assert.ok(service);
-  const original = service.worker.submitOrAttachJob.bind(service.worker);
-  service.worker.submitOrAttachJob = options => original({ ...options,
-    translatorMock: async ({ cues }) => Object.fromEntries(cues.map(c => [c.cue_id, translation])),
-    reviewerMock: async () => ({ passed: true, issues: [] }),
+  modelServer = http.createServer(async (req, res) => {
+    let body = ""; for await (const chunk of req) body += chunk;
+    assert.equal(respondAsSubtitleAgent(JSON.parse(body), res, () => translation), true);
   });
+  await new Promise<void>(resolve => modelServer!.listen(0, "127.0.0.1", resolve));
+  const address = modelServer.address(); assert.ok(address && typeof address !== "string");
+  modelUrl = `http://127.0.0.1:${address.port}/v1`;
+  restoreEndpoint = trustModelEndpoint(modelUrl);
 });
 When(/^向 POST \/internal\/jobs 提交 cue_id 为 "([^"]+)"、start 为 (\d+)、end 为 (\d+) 的该源字幕$/, async (cue_id: string, start: string, end: string) => {
   cue = { cue_id, start: Number(start), end: Number(end), text };
-  const response = await fetch(`${base}/internal/jobs`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ videoId: "migration-video", cues: [cue] }) });
+  const response = await fetch(`${base}/internal/jobs`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ engine: "document", videoId: "migration-video", cues: [cue], baseUrl: modelUrl, apiKey: "acceptance-model-key" }) });
   assert.equal(response.status, 200);
   submitted = await response.json();
 });
@@ -116,13 +130,13 @@ Then(/^使用返回的 job_id 读取快照响应为 200 且 status 为 "([^"]+)"
   const data = await response.json(); assert.equal(data.status, status); snapshot = data;
 });
 Then("快照的 published_cues 与 final_result 包含同一条完整字幕", () => {
-  assert.deepEqual(snapshot.published_cues, [{ ...cue, translation }]);
+  assert.deepEqual(snapshot.published_cues, [{ ...cue, index: 0, translation }]);
   assert.deepEqual(snapshot.final_result.cues, [{ ...cue, index: 0, translation }]);
 });
 Given(/^视频为 "([^"]+)" 且源字幕为 c0、100 毫秒到 1100 毫秒、文本 "([^"]+)"$/, (video: string, source: string) => {
   cue = { cue_id: "c0", start: 100, end: 1100, text: source };
   assert.equal(video, "migration-video");
 });
-Given("任务缓存配置使用迁移前 keys 模块的默认值", () => {});
+Given("任务缓存配置使用 document 引擎的默认值", () => {});
 When("使用迁移后的实际缓存键函数计算 job_key", () => { key = calculateJobKey({ videoId: "migration-video", sourceCues: [cue] }); });
-Then(/^job_key 精确等于迁移前冻结的 "([^"]+)"$/, (expected: string) => { assert.equal(key, expected); });
+Then(/^job_key 精确等于 document 引擎的 "([^"]+)"$/, (expected: string) => { assert.equal(key, expected); });

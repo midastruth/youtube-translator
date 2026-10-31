@@ -25,7 +25,7 @@ export type SubtitleRequest = {
   allow_automatic?: boolean;
   segmentation?: "rule" | "statistical";
   translate_to?: string;
-  translate_engine?: "legacy" | "agent" | "document";
+  translate_engine?: "legacy" | "document";
   translate_provider?: string;
   translate_api_key?: string;
   translate_base_url?: string;

@@ -91,6 +91,13 @@ class DocumentStreamTest(unittest.TestCase):
             self.assertEqual(response.status_code, 503)
             legacy.assert_not_called()
 
+    def test_removed_agent_engine_is_rejected_before_ingestion(self):
+        with patch("youtube_ingest.server._process_subtitle_sync") as ingest:
+            for route in ("/api/subtitle/process", "/api/subtitle/stream"):
+                response = self.client.post(route, json={**self.request, "translate_engine": "agent"})
+                self.assertEqual(response.status_code, 422)
+            ingest.assert_not_called()
+
     def test_document_mode_rejects_legacy_rest_and_sentence_only_provider(self):
         self.assertEqual(self.client.post("/api/subtitle/process", json=self.request).status_code, 422)
         with patch("youtube_ingest.server._process_subtitle_sync", return_value=(self.meta, self.cues)):

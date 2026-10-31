@@ -1,12 +1,10 @@
 import { Type, validateToolCall } from "@earendil-works/pi-ai";
 import type { AssistantMessage, Context, Tool } from "@earendil-works/pi-ai";
-import { callDocumentTurn, DocumentPermanentError, inputBudget, modelConfig, tokenEstimate } from "./document-translation.js";
+import { DocumentPermanentError, inputBudget, modelConfig, tokenEstimate } from "./document-translation.js";
 import type { DocumentInput } from "./document-translation.js";
 import type { Draft } from "./domain-types.js";
-import { createDocumentTask } from "./document-task.js";
 import { validateOutputMapping } from "./validator.js";
 
-export const SUBTITLE_AGENT_VERSION = "subtitle-editor-agent-v1";
 export const MAX_READ_CUES = 200;
 export type SubtitleAgentState = {
   stage: "editing" | "publish"; cursor: number; feedback: string;
@@ -21,7 +19,7 @@ Your goal is to translate the complete source into the requested target language
 You decide how to read, plan, translate, review and revise. There are no mandatory analysis/chapter/review stages. Use tools to do the work, not a final chat response containing the transcript.
 Files:
 - source.json: read-only array of {cue_id,start,end,text}. IDs, original text and timing are immutable.
-- translations.json: editable JSON object mapping exact cue IDs to nonempty translated strings. Start with a small write_file, then use write_file with merge=true to add more cues, or edit_file for exact text corrections. Never invent IDs or put timestamps/source text into this file.
+- translations.json: editable JSON object mapping exact cue IDs to nonempty translated strings. Use write_file with merge=true to add/update cues in batches that fit the output budget, or edit_file for exact text corrections. Never invent IDs or put timestamps/source text into this file.
 - notes.md: editable scratchpad for your plan, terminology, context and progress. Keep useful notes here for context compaction and restart recovery.
 read_file is paginated by cue position for JSON files, by character for notes. You MUST choose and explicitly supply count for every read: 1-200 cues for JSON files, 1-4000 characters for notes. There is no default page size. Choose according to content length and your current context; pages can shrink to fit the reading budget. Follow next_offset until you have read the necessary context. translations.json pages contain only saved entries, not placeholders for missing cues. For precise JSON edits include the cue key and its value to avoid ambiguous matches; page wrapper braces are not part of a middle-file excerpt. search_file helps find distant definitions and inconsistent translations.
 Review your actual translations, correct mistakes using edit_file, then call validate_translation. Fix reported problems. Only finish_translation after a successful validation of the current revision and your own semantic review. Validation checks structure and coverage, NOT translation quality. finish_translation is the only way to submit; ordinary text never publishes subtitles.
@@ -271,11 +269,3 @@ export function finalSubtitleAgentCues(input: DocumentInput, state: SubtitleAgen
   if (!validation.valid) throw new Error("Submitted translation failed final validation");
   return validation.orderedCues!.map((cue, index) => ({ ...cue, index }));
 }
-
-export const SubtitleEditingTask = createDocumentTask({
-  name: "subtitle_editing_agent", initial: initialSubtitleAgentState,
-  advance: (input: DocumentInput, state: SubtitleAgentState, call: AgentCall) => advanceSubtitleAgent(input, state, call),
-  call: (input, _state, context, options) => callDocumentTurn(input, context, options),
-  finalCues: finalSubtitleAgentCues,
-  progress: (input, state) => `${Object.keys(state.draft).length}/${input.cues.length}，已执行 ${state.cursor} 轮`,
-});

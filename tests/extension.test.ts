@@ -10,16 +10,16 @@ test("settings page saves existing values, trims backend, and sends real content
     const url = document.getElementById("backendUrl");
     const engine = document.getElementById("translateEngine");
     assert.ok(url && "value" in url && engine && "value" in engine);
-    url.value = "http://localhost:8791///"; engine.value = "agent";
+    url.value = "http://localhost:8791///"; engine.value = "document";
     document.getElementById("saveButton")!.click();
-    assert.deepEqual(browser.settings, { ...browser.settings, ...oldSettings, backendUrl: "http://localhost:8791", translateEngine: "agent" });
+    assert.deepEqual(browser.settings, { ...browser.settings, ...oldSettings, backendUrl: "http://localhost:8791", translateEngine: "document" });
     browser.execute("content");
     assert.equal(browser.streams.length, 0);
     browser.toggle();
     await eventually(() => browser.streams.length === 1);
     assert.equal(browser.streams[0].url, "http://localhost:8791/api/subtitle/stream");
     assert.equal(browser.streams[0].body.translate_api_key, oldSettings.translateApiKey);
-    assert.equal(browser.streams[0].body.translate_engine, "agent");
+    assert.equal(browser.streams[0].body.translate_engine, "document");
   } finally { browser.close(); }
 });
 
@@ -126,7 +126,7 @@ test("opening preview renders while the stream is live, then final review replac
       { type: "cue", ...opening, translation: "开头预览", provisional: true }]);
     browser.seek(1500);
     await eventually(() => browser.dom.window.document.querySelector(".tran")?.textContent === "开头预览");
-    assert.match(browser.dom.window.document.querySelector(".status")!.textContent!, /开头字幕已可观看.*全文审校后/);
+    assert.match(browser.dom.window.document.querySelector(".status")!.textContent!, /已提交片段可先观看.*全文审校后/);
     browser.send([{ type: "cue", ...opening, translation: "统一审校后的事务", provisional: false },
       { type: "cue", ...later, translation: "后续定义", provisional: false }, { type: "done", total_cues: 2, failed_cues: 0 }]);
     browser.finish();

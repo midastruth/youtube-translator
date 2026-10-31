@@ -47,7 +47,7 @@ git diff --check
 
 ## 保留边界
 
-- `document` 与 `legacy` 支持真实外部模型 API；旧 `agent` 引擎的默认规则/示例实现不代表已产品化的真实模型翻译。
+- 当前仅支持 `document` 多 Agent 团队与 `legacy` 快速模式；旧 `agent` 原型、单 Agent 和固定阶段流程已移除。
 - 测试中的模型端点为受控本地服务，验证真实服务与 Worker 的集成，不证明未见视频的翻译质量。
 - 扩展选项中的密钥仍存于 `chrome.storage.local`；不持久化请求密钥的保证针对 Worker 任务数据库，不等于扩展不保存用户配置。
 - 改动未自动提交；已有用户改动和历史 Python 源码未删除。

@@ -4,15 +4,12 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import { createRegistry, defineExtension, Harness } from "@earendil-works/pi-durable";
 
 import { openOwnedSqliteStorage } from "./storage.js";
-import { WHITELIST_TOOLS } from "./tools.js";
-import { SubtitleTranslationTask, SubtitleJobDoc, TaskMocks } from "./task-definition.js";
+import { SubtitleJobDoc } from "./job-document.js";
 import { calculateJobKey } from "./keys.js";
 import type { JobRecord, SubmitJobOptions, TaskResult, StreamEvent, JobDocument } from "./types.js";
-import { observeJobEvents } from "./job-stream.js";
-import { DocumentTranslationTask, DocumentResumeDoc, documentCredentials } from "./document-task.js";
+import { DocumentResumeDoc, documentCredentials } from "./document-task.js";
 import { modelConfig } from "./document-translation.js";
 import type { DocumentInput } from "./document-translation.js";
-import { SubtitleEditingTask } from "./subtitle-agent.js";
 import { TRANSLATION_TEAM_VERSION, TranslationTeamTask, initialTranslationTeamState, translationTeamReasoning } from "./translation-team.js";
 import { observeDocumentJob } from "./document-stream.js";
 import type { TaskId, ConversationId } from "@earendil-works/pi-durable";
@@ -38,7 +35,6 @@ export class AgentWorker {
   models: ReturnType<typeof createModels> | null = null;
   jobs = new Map<string, JobRecord>();
   pendingJobs = new Map<string, Promise<JobRecord>>();
-  jobEvents = new Map<string, EventEmitter>();
   extension: ReturnType<typeof defineExtension> | null = null;
 
   private get activeHarness(): Harness {
@@ -67,8 +63,7 @@ export class AgentWorker {
     if (registerDefinition) {
       this.extension = defineExtension({
         name: "translation_agent",
-        tools: WHITELIST_TOOLS,
-        tasks: [SubtitleTranslationTask, DocumentTranslationTask, SubtitleEditingTask, TranslationTeamTask],
+        tasks: [TranslationTeamTask],
       });
       this.registry.install(this.extension);
     }
@@ -171,159 +166,12 @@ export class AgentWorker {
     return jobRecord;
   }
 
-  async submitOrAttachJob({
-    jobKey,
-    cues = [],
-    videoId = "",
-    title = "",
-    fromLang = "en",
-    toLang = "zh-CN",
-    segmentation = "rule",
-    provider = "openai",
-    model = process.env.TRANSLATION_AGENT_MODEL || "sol",
-    baseUrl = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1",
-    requestId = null,
-    budgetLimit,
-    maxCuesPerBlock = 10,
-    translatorMock = null,
-    reviewerMock = null,
-    revisorMock = null,
-    initialGlossary = null,
-    engine, apiKey, contextTokens, outputTokens,
-  }: SubmitJobOptions): Promise<JobRecord> {
-    if (engine === "document") return this.submitDocumentJob({
-      cues, videoId, title, fromLang, toLang, segmentation, provider, model, baseUrl,
-      apiKey, contextTokens, outputTokens, budgetLimit,
-    });
-    const effectiveJobKey =
-      jobKey ||
-      calculateJobKey({
-        videoId,
-        sourceCues: cues,
-        fromLang,
-        toLang,
-        segmentationVersion: segmentation,
-        provider,
-        baseUrl,
-        model,
-      });
-
-    // Idempotency check: reuse active or finished job with same job_key
-    if (this.jobs.has(effectiveJobKey)) {
-      return this.jobs.get(effectiveJobKey)!;
+  async submitOrAttachJob(options: SubmitJobOptions): Promise<JobRecord> {
+    if (options.engine !== undefined && options.engine !== "document") {
+      throw new Error("Worker only supports the document engine; use the server for legacy translation");
     }
-    if (this.pendingJobs.has(effectiveJobKey)) {
-      return await this.pendingJobs.get(effectiveJobKey)!;
-    }
-
-    const createJobPromise = (async () => {
-      const conversation = await this.activeHarness.createConversation(
-        { ownership: { kind: "ownerless" } },
-        this.context
-      );
-
-      const emitter = new EventEmitter();
-      emitter.on("error", () => {});
-      const jobId = `job-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-      this.jobEvents.set(jobId, emitter);
-
-      const normalizedCues = cues.map((c, i) => {
-        const s = Number(c.start);
-        const e = Number(c.end);
-        return {
-          cue_id: c.cue_id || `c${i}`,
-          start: Number.isFinite(s) ? s : i * 1000,
-          end: Number.isFinite(e) ? e : (i + 1) * 1000,
-          text: String(c.text || ""),
-        };
-      });
-
-      const taskInput = {
-        jobId,
-        jobKey: effectiveJobKey,
-        videoId,
-        title,
-        fromLang,
-        toLang,
-        cues: normalizedCues,
-        budgetLimit: budgetLimit ?? 12,
-        maxCuesPerBlock,
-        initialGlossary: initialGlossary || {},
-      };
-
-      let taskId: TaskId<TaskResult> | undefined;
-      await conversation.commit(async (tx) => {
-        taskId = await tx.createTask(SubtitleTranslationTask, taskInput, {
-          ownership: { kind: "conversation" },
-        });
-        const d = await tx.doc(SubtitleJobDoc, conversation.id);
-        d.job_key = effectiveJobKey;
-        d.source_cues = normalizedCues;
-        d.video_id = videoId;
-        d.from_lang = fromLang;
-        d.to_lang = toLang;
-      }, this.context);
-
-      if (taskId === undefined) throw new Error("Task creation did not return an ID");
-      const createdTaskId = taskId;
-      if (translatorMock || reviewerMock || revisorMock) {
-        TaskMocks.set(taskId, { translatorMock, reviewerMock, revisorMock });
-      }
-
-      const jobRecord: JobRecord = {
-        jobId,
-        jobKey: effectiveJobKey,
-        taskId,
-        conversationId: conversation.id,
-        videoId,
-        title,
-        fromLang,
-        toLang,
-        cues: normalizedCues,
-        status: "running",
-        emitter,
-        taskPromise: null,
-        aborted: false,
-      };
-
-      // Monitor task completion in background
-      jobRecord.taskPromise = (async () => {
-        try {
-          await this.activeHarness.waitForTask(createdTaskId, this.context);
-          const doc = await this.activeHarness.snapshot(SubtitleJobDoc, conversation.id, this.context);
-          if (!doc) throw new Error("Subtitle job document is missing");
-          jobRecord.status = doc.status || "succeeded";
-          jobRecord.finalResult = doc.final_result;
-
-          // Emit final cues and done
-          const cuesList = doc?.final_result?.cues || [];
-          for (const cue of cuesList) {
-            if (cue.translation) {
-              emitter.emit("cue", cue);
-            }
-          }
-
-          emitter.emit("done", {
-            total_cues: normalizedCues.length,
-            failed_cues: doc?.final_result?.failed_cues || 0,
-          });
-        } catch (err) {
-          jobRecord.status = "failed";
-          jobRecord.error = err;
-          emitter.emit("error", err);
-        }
-      })();
-
-      this.jobs.set(effectiveJobKey, jobRecord);
-      return jobRecord;
-    })();
-
-    this.pendingJobs.set(effectiveJobKey, createJobPromise);
-    try {
-      return await createJobPromise;
-    } finally {
-      this.pendingJobs.delete(effectiveJobKey);
-    }
+    const { cues = [], videoId = "", title = "", fromLang = "en", toLang = "zh-CN", segmentation = "rule", provider = "openai", ...config } = options;
+    return this.submitDocumentJob({ ...config, cues, videoId, title, fromLang, toLang, segmentation, provider });
   }
 
   private async submitDocumentJob(options: SubmitJobOptions): Promise<JobRecord> {
@@ -410,10 +258,8 @@ export class AgentWorker {
     const previous = existing.taskId && await this.activeHarness.getTask(existing.taskId, this.context);
     const saved = await this.activeHarness.snapshot(DocumentResumeDoc, existing.conversationId, this.context);
     if (!previous || !saved?.document) throw new Error("Translation checkpoint missing");
-    const isTeam = saved.workflow === TranslationTeamTask.definition.name;
-    const isEditor = saved.workflow === SubtitleEditingTask.definition.name;
-    if (!isTeam && !isEditor && saved.workflow !== DocumentTranslationTask.definition.name) throw new Error("Translation checkpoint incompatible");
-    const input = { ...(previous.input as unknown as DocumentInput), resume: true };
+    if (saved.workflow !== TranslationTeamTask.definition.name) throw new Error("Translation checkpoint incompatible");
+    const input = { ...(previous.input as DocumentInput), resume: true };
     input.budgetLimit = documentRequestBudget(options.budgetLimit, input.budgetLimit);
     let taskId: TaskId<TaskResult> | undefined;
     const conversation = await this.activeHarness.conversation(existing.conversationId, this.context);
@@ -423,10 +269,7 @@ export class AgentWorker {
       if (doc.cancelled || doc.status !== "failed" || doc.task_id !== existing.taskId) throw new Error("Translation job is no longer resumable");
       // Retrying must not silently reset the shared request budget.
       if (input.budgetLimit > 0 && doc.network_attempts >= input.budgetLimit) throw new Error(`翻译请求预算已耗尽（已用 ${doc.network_attempts} 次，上限 ${input.budgetLimit} 次，主/子 Agent 共享）；请提高 TRANSLATION_REQUEST_BUDGET 或 translate_request_budget 后继续，已保存草稿会保留`);
-      taskId = isTeam
-        ? await tx.createTask(TranslationTeamTask, input, { ownership: { kind: "conversation" } })
-        : isEditor ? await tx.createTask(SubtitleEditingTask, input, { ownership: { kind: "conversation" } })
-        : await tx.createTask(DocumentTranslationTask, input, { ownership: { kind: "conversation" } });
+      taskId = await tx.createTask(TranslationTeamTask, input, { ownership: { kind: "conversation" } });
       doc.task_id = taskId; doc.status = "running"; doc.stage = String(saved.document!.stage);
       doc.budget_limit = input.budgetLimit; doc.final_result = null; doc.failed_cues = [];
       delete doc.error;
@@ -488,13 +331,6 @@ export class AgentWorker {
    * Observe job stream (SSE / WS style)
    */
   async *observeJobStream(jobRecord: JobRecord, { heartbeatIntervalMs = 5000, signal = null }: { heartbeatIntervalMs?: number; signal?: AbortSignal | null } = {}): AsyncGenerator<StreamEvent> {
-    // Preserve the original cardinality capture before the asynchronous snapshot.
-    const sourceCueCount = jobRecord.cues.length;
-    if (jobRecord.engine === "document") {
-      yield* observeDocumentJob(jobRecord, () => this.activeHarness.snapshot(SubtitleJobDoc, jobRecord.conversationId, this.context), { heartbeatIntervalMs, signal });
-      return;
-    }
-    const doc = await this.activeHarness.snapshot(SubtitleJobDoc, jobRecord.conversationId, this.context);
-    yield* observeJobEvents(doc, jobRecord, { heartbeatIntervalMs, signal, sourceCueCount });
+    yield* observeDocumentJob(jobRecord, () => this.activeHarness.snapshot(SubtitleJobDoc, jobRecord.conversationId, this.context), { heartbeatIntervalMs, signal });
   }
 }

@@ -25,8 +25,8 @@ youtube-translator/
   │                                                  ├─ 原文只读，译文与笔记可编辑
   │                                                  ├─ 主 Agent 规划，开头专用 Agent + 最多 9 个后续 Agent
   │                                                  ├─ 子 Agent 各自连续推进，每回合持久化，不逐轮互等
-  │                                                  ├─ 开头自查提交后先显示，可边看边等后续翻译
-  │                                                  └─ 主 Agent 全文验收、关闭与校验后，统一发布并覆盖开头预览
+  │                                                  ├─ 开头优先；各片段自查提交后先显示，可边看边等后续翻译
+  │                                                  └─ 主 Agent 按自动检查清单 + 双语对照验收，一回合关闭校验提交，统一发布并覆盖预览
   └─ 快速模式 (legacy) ──► 独立逐句 / 10~12 条上下文分块快速翻译 (OpenAI / DeepL)
   ▼
 SSE / WebSocket 实时回传事件（外部字幕时间轴统一为毫秒） → 扩展渲染到 YouTube 播放器
@@ -177,14 +177,13 @@ make build-extension
    - **验收与关闭**：子任务完成后，主 Agent 审查实际合并译文并修订，调用 `accept_translation` 验收当前修订，再用 `close_subagents` 关闭子会话，最后 `validate_translation` → `finish_translation`。修改译文使验收和校验失效；普通回答不能发布，宿主复核后统一发布。
    - **模型与预算**：使用 `pi-ai` Chat Completions SSE + function tools；默认模型 `sol`，可配置。单次调用最多 10 分钟，临时 HTTP 499、429、5xx 等最多重试两次。主、子 Agent 默认不限制累计请求次数（`TRANSLATION_REQUEST_BUDGET=0`），但仍记录实际调用数；显式启用上限时，所有 Agent 共用一份预算。
    - **质量与性能边界**：编号、时间轴和完整性由程序保证；语义质量依赖子 Agent 翻译和主 Agent 审查，结构校验不等于语义正确。并发收益取决于模型服务限流和任务大小，自动化测试不验证真实模型速度或质量。
-   - 历史固定阶段工作流仅保留用于恢复旧任务，新任务使用独立版本，不复用旧工作流缓存。
+   - 仅注册多 Agent 团队工作流；已删除单 Agent、固定阶段流程及其恢复兼容，历史非团队任务不能续翻，需要重新开始。
 
 2. **快速模式 (legacy)**：
    - 适用于快速生成，支持 OpenAI-compatible 与 DeepL API。
    - 按 10~12 条一组带 `[$i]` 标记的上下文小块并发翻译，若解析不全则退回逐句补齐。
 
-3. **旧版 Agent 原型框架 (agent)**：
-   - `worker/task-definition.ts` 中的旧 `agent` 引擎仅为规则与 `defaultDraft()` 占位示例框架，**未接真实模型产品化**；请勿将测试原型与正式的 `document` 文档翻译工作流混淆。
+仅支持 `document` 和 `legacy`；旧 `agent` 引擎已移除，API 会拒绝此值。扩展中的非快速模式旧设置会使用当前 `document` 模式。
 
 ### 时间戳契约与安全边界
 

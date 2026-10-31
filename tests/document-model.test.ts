@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import { test, type TestContext } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
-import { callDocumentModel, DocumentModelError, DocumentStreamError, initialDocumentState, modelConfig } from "../worker/document-translation.js";
+import { callDocumentTurn, DocumentModelError, DocumentStreamError, modelConfig } from "../worker/document-translation.js";
 import type { DocumentInput, ModelConfig, ReasoningEffort } from "../worker/document-translation.js";
+import type { Context } from "@earendil-works/pi-ai";
+import { advanceSubtitleAgent, initialSubtitleAgentState, subtitleAgentContext } from "../worker/subtitle-agent.js";
 import { trustModelEndpoint } from "./support/model-endpoint.js";
 import { endModelStream, modelChunk, sendModelJson } from "./support/model-stream.js";
 
@@ -27,9 +29,13 @@ async function endpoint(t: TestContext, handler: http.RequestListener, config: P
   return {
     url, input,
     reservations: () => reservations,
-    call: (signal?: AbortSignal) => callDocumentModel(input, initialDocumentState(input), {
-      operation: "test", instructions: "Return JSON", data: {},
-    }, { apiKey: "ephemeral-key", signal, reserve: async () => { reservations++; } }),
+    turn: (context: Context) => callDocumentTurn(input, context, { apiKey: "ephemeral-key", reserve: async () => { reservations++; } }),
+    call: async (signal?: AbortSignal) => {
+      const response = await callDocumentTurn(input, subtitleAgentContext(input, initialSubtitleAgentState(input)), {
+        apiKey: "ephemeral-key", signal, reserve: async () => { reservations++; },
+      });
+      return JSON.parse(response.content.filter(b => b.type === "text").map(b => b.text).join(""));
+    },
   };
 }
 
@@ -283,17 +289,23 @@ test("reasoning streams support fragmented tool calls, scoped repair and multi-t
     assert.equal(payload.max_completion_tokens, 16384);
     assert.equal(payload.temperature, undefined);
     if (turns === 1) {
-      modelChunk(res, { tool_calls: [{ index: 0, id: "lookup", type: "function", function: { name: "search_transcript", arguments: '{"query":' } }] });
+      modelChunk(res, { tool_calls: [{ index: 0, id: "lookup", type: "function", function: { name: "read_file", arguments: '{"path":' } }] });
       modelChunk(res, { tool_calls: [{ index: 0, function: { arguments: "{}}" } }] });
       endModelStream(res, "tool_calls");
     } else {
       const tool = payload.messages.find((m: { role: string }) => m.role === "tool");
       assert.equal(tool.tool_call_id, "lookup");
-      assert.match(tool.content, /Invalid retrieval request/);
+      assert.match(tool.content, /Invalid workspace tool arguments/);
       assert.doesNotMatch(tool.content, /ephemeral-key/);
       sendModelJson(res, { repaired: true });
     }
   }, { reasoningEffort: "medium" });
-  assert.deepEqual(await model.call(), { repaired: true });
+  let state = initialSubtitleAgentState(model.input);
+  state = await advanceSubtitleAgent(model.input, state, model.turn);
+  assert.equal(state.messages.at(-1)?.role, "toolResult");
+  state = await advanceSubtitleAgent(model.input, state, model.turn);
+  assert.equal(state.cursor, 2);
+  assert.equal(state.stage, "editing", "ordinary text does not submit the workspace");
+  assert.deepEqual(state.draft, {});
   assert.equal(turns, 2); assert.equal(model.reservations(), 2);
 });

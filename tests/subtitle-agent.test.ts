@@ -11,7 +11,7 @@ import { TEAM_TOOLS } from "../worker/translation-team.js";
 import { modelConfig } from "../worker/document-translation.js";
 import type { DocumentInput } from "../worker/document-translation.js";
 import { AgentWorker } from "../worker/agent-worker.js";
-import { SubtitleJobDoc } from "../worker/task-definition.js";
+import { SubtitleJobDoc } from "../worker/job-document.js";
 import { DocumentResumeDoc } from "../worker/document-task.js";
 import { trustModelEndpoint } from "./support/model-endpoint.js";
 import { endModelStream, modelChunk, sendModelJson } from "./support/model-stream.js";
@@ -164,7 +164,7 @@ test("only explicit submission of the current fully validated revision can publi
   assert.throws(() => tool("write_file", { path: "translations.json", content: "{}" }));
 });
 
-test("single agent chooses arbitrary tools, repairs a bad edit, and does not run fixed analysis/review stages", async () => {
+test("team workspace session chooses tools and repairs a bad edit without fixed stages", async () => {
   const document = input(); let state = initialSubtitleAgentState(document);
   const turn = async (tools: { name: string; args: unknown }[]) => {
     state = await advanceSubtitleAgent(document, state, async context => {
@@ -306,6 +306,8 @@ test("default document job edits a workspace, self-checks then publishes atomica
   assert.deepEqual((await f.worker.snapshotJob(job)).published_cues, []);
   assert.equal((await f.worker.snapshotJob(job)).status, "running");
   assert.equal(await f.worker.submitOrAttachJob(f.jobOptions), job);
+  assert.equal(await f.worker.submitOrAttachJob({ ...f.jobOptions, engine: undefined, segmentation: "rule", fromLang: "en", toLang: "zh-CN", provider: "openai" }), job,
+    "implicit team/default metadata must retain the same document cache identity");
   const stream = f.worker.observeJobStream(job, { heartbeatIntervalMs: 1 });
   assert.equal((await stream.next()).value?.type, "meta"); await stream.next(); await stream.next();
   assert.equal((await stream.next()).value?.stage, "editing");
@@ -313,7 +315,7 @@ test("default document job edits a workspace, self-checks then publishes atomica
   const events = []; for await (const event of stream) events.push(event);
   assert.equal(events.filter(e => e.type === "cue").length, 2); assert.equal(events.at(-1)?.type, "done");
   assert.deepEqual(job.finalResult?.cues.map(c => [c.cue_id, c.start, c.end]), [["a", 123, 1200], ["b", 1200, 2500]]);
-  assert.equal(f.requests.length, 12);
+  assert.equal(f.requests.length, 9, "main acceptance, closing, validation and submission share one turn");
   assert.equal(f.requests.some(r => r.messages.some(m => m.role === "tool")), true);
   const calls = f.requests.length;
   await f.restart(); const restored = await f.worker.submitOrAttachJob(f.jobOptions);
@@ -448,9 +450,9 @@ test("a network failure after a saved edit retries the same turn without losing 
     if (!failed && lastTool(payload)?.name === "write_file") { failed = true; res.writeHead(502); res.end("private key body"); return true; }
   } });
   const job = await f.worker.submitOrAttachJob(f.jobOptions); await job.taskPromise;
-  assert.equal(job.status, "succeeded"); assert.equal(f.requests.length, 13);
+  assert.equal(job.status, "succeeded"); assert.equal(f.requests.length, 10);
   const doc = await f.worker.harness!.snapshot(SubtitleJobDoc, job.conversationId, f.worker.context);
-  assert.equal(doc?.network_attempts, 13); assert.equal(doc?.published_cues.a.translation, "数据库事务：a");
+  assert.equal(doc?.network_attempts, 10); assert.equal(doc?.published_cues.a.translation, "数据库事务：a");
 });
 
 test("transient HTTP failures retry within the shared budget; persistent failures stop after two retries", { timeout: 15000 }, async t => {
@@ -519,7 +521,7 @@ test("exhausted network retries preserve the workspace for manual continuation, 
     assert.notEqual(resumed.taskId, failed.taskId);
     await resumed.taskPromise;
     assert.equal(resumed.status, "succeeded"); assert.equal(resumed.error, undefined);
-    assert.equal(f.requests.length - calls, 8, "child read/check/submit and main acceptance remain; committed writes must not repeat");
+    assert.equal(f.requests.length - calls, 5, "child read/check/submit and one main acceptance turn remain; committed writes must not repeat");
     assert.match(JSON.stringify(f.requests[calls].messages), /transaction=事务/);
     const doc = await f.worker.harness!.snapshot(SubtitleJobDoc, resumed.conversationId, f.worker.context);
     assert.equal(doc?.network_attempts, f.requests.length); assert.equal(doc?.error, undefined);
@@ -541,7 +543,7 @@ test("manual continuation cannot reset the shared budget; an explicitly raised b
   assert.equal(f.requests.length, 2);
   const resumed = await f.worker.submitOrAttachJob({ ...f.jobOptions, budgetLimit: 20 }); await resumed.taskPromise;
   assert.equal(resumed.jobId, failed.jobId); assert.equal(resumed.status, "succeeded");
-  assert.equal(f.requests.length, 12, "the main read and dispatch must not repeat");
+  assert.equal(f.requests.length, 9, "the main read and dispatch must not repeat");
 });
 
 test("explicit cancellation aborts live model I/O and never publishes saved but unsubmitted edits", { timeout: 15000 }, async t => {

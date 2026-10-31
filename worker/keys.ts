@@ -31,7 +31,7 @@ function sortObject(obj: unknown): unknown {
  * 1. source_cues (cue_id, start, end in ms, text) & timeline
  * 2. from_lang & to_lang
  * 3. segmentation_version
- * 4. engine ("agent")
+ * 4. engine ("document")
  * 5. provider & base_url & model
  * 6. prompt_version & review_version
  * 7. workflow_version
@@ -44,7 +44,7 @@ export function calculateJobKey({
   fromLang = "en",
   toLang = "zh-CN",
   segmentationVersion = DEFAULT_VERSIONS.segmentation_version,
-  engine = "agent",
+  engine = "document",
   provider = "openai",
   baseUrl = "https://api.openai.com/v1",
   model = "gpt-4o",

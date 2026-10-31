@@ -386,7 +386,7 @@ async function load(pageUrl: string) {
             || completed === totalCues
           )) {
             showStatus(event.provisional
-              ? `开头字幕已可观看 ${completed}/${totalCues || subtitles.length}，后续正在翻译，全文审校后统一更新…`
+              ? `已提交片段可先观看 ${completed}/${totalCues || subtitles.length}，其余正在翻译，全文审校后统一更新…`
               : `字幕翻译中 ${completed}/${totalCues || subtitles.length}…`);
           }
           return;

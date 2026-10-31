@@ -14,7 +14,6 @@ import { getWhisperCacheProfile } from "../server/src/app.js";
 import { SubtitleCache } from "../server/src/cache.js";
 import { AgentWorker } from "../worker/agent-worker.js";
 import type { SubtitleCue, FlatEvent, PreparedEvents } from "../server/src/types.js";
-import type { ModelRequest } from "../worker/document-translation.js";
 
 // Helper to parse SSE stream into array of JSON events
 async function parseSseStream(response: Response): Promise<any[]> {
@@ -367,7 +366,7 @@ describe("Server API Endpoints & Gateway Integration", () => {
   });
 
   it("POST /api/subtitle/stream integrates directly with real AgentWorker for document mode", async () => {
-    const calls: ModelRequest[] = [];
+    const calls: { operation: string; request_budget: number }[] = [];
 
     // Local mock OpenAI HTTP server
     const modelServer = http.createServer(async (req, res) => {
@@ -376,7 +375,7 @@ describe("Server API Endpoints & Gateway Integration", () => {
       assert.equal(req.headers.authorization, "Bearer test-key-123");
       const payload = JSON.parse(raw);
       const userMessage = payload.messages.find((m: any) => m.role === "user");
-      const request = JSON.parse(userMessage.content) as ModelRequest;
+      const request = JSON.parse(userMessage.content);
       calls.push(request);
 
       assert.equal(request.operation, "translate_workspace");

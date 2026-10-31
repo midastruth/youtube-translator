@@ -350,7 +350,7 @@ export function validateSubtitleRequest(body: any): void {
 
   // 3. 枚举和核心字段校验
   if (body.translate_engine !== undefined && body.translate_engine !== null) {
-    if (!["legacy", "agent", "document"].includes(body.translate_engine)) {
+    if (!["legacy", "document"].includes(body.translate_engine)) {
       const err = new Error("Invalid translate_engine");
       (err as any).statusCode = 422;
       throw err;
@@ -909,110 +909,6 @@ export function createApp(deps?: Partial<AppDependencies>): http.RequestListener
           return;
         }
 
-        if (body.translate_engine === "agent") {
-          const provider = body.translate_provider || "openai";
-          if (!["openai", "deepl", "mock"].includes(provider)) {
-            sendError(res, 400, "Invalid agent model, credentials, or worker configuration");
-            return;
-          }
-
-          try {
-            const job = await resolved.worker.submitOrAttachJob({
-              cues,
-              videoId: meta.video_id,
-              title: meta.title,
-              fromLang: meta.from_lang,
-              toLang,
-              segmentation: body.segmentation || "rule",
-              provider,
-              model: body.translate_model || undefined,
-              baseUrl: body.translate_base_url,
-              apiKey: body.translate_api_key,
-            });
-
-            let snapshot: any = null;
-            let pollFinished = false;
-            for (let i = 0; i < 60; i++) {
-              snapshot = await resolved.worker.snapshotJob(job);
-              if (["succeeded", "partial", "failed", "budget_exceeded", "cancelled"].includes(snapshot.status)) {
-                pollFinished = true;
-                break;
-              }
-              await new Promise((r) => setTimeout(r, 200));
-            }
-
-            const total = cues.length;
-
-            if (!pollFinished || snapshot?.status === "failed" || snapshot?.status === "cancelled") {
-              sendJson(res, 200, {
-                video_id: meta.video_id,
-                title: meta.title,
-                from_lang: meta.from_lang,
-                to_lang: toLang,
-                segmentation: body.segmentation || "rule",
-                source: meta.source as any,
-                cues,
-                progress: 0,
-                translation_status: "failed",
-                failed_cues: total,
-                job_id: job.jobId,
-              } satisfies SubtitleResponse);
-              return;
-            }
-
-            const pubMap = new Map<string, string>();
-            for (const pc of snapshot?.published_cues || []) {
-              if (pc.cue_id) pubMap.set(pc.cue_id, pc.translation || "");
-            }
-
-            const resultCues: SubtitleCue[] = cues.map((c, idx) => {
-              const cueId = c.cue_id || `c${idx}`;
-              return {
-                ...c,
-                cue_id: cueId,
-                translation: pubMap.get(cueId) || "",
-              };
-            });
-
-            let failedCount = 0;
-            for (const c of resultCues) {
-              const tr = (c.translation || "").trim();
-              if (!tr || tr === "[Translation failed]") {
-                failedCount++;
-              }
-            }
-
-            let status: "succeeded" | "partial" | "failed" = "succeeded";
-            if (failedCount === 0) {
-              status = "succeeded";
-            } else if (failedCount >= total) {
-              status = "failed";
-            } else {
-              status = "partial";
-            }
-
-            const progress = total === 0 ? 100 : Math.round(((total - failedCount) / total) * 100);
-
-            sendJson(res, 200, {
-              video_id: meta.video_id,
-              title: meta.title,
-              from_lang: meta.from_lang,
-              to_lang: toLang,
-              segmentation: body.segmentation || "rule",
-              source: meta.source as any,
-              cues: resultCues,
-              progress,
-              translation_status: status,
-              failed_cues: failedCount,
-              job_id: job.jobId,
-            } satisfies SubtitleResponse);
-            return;
-          } catch (err: any) {
-            sendError(res, 503, `Agent translation service unavailable: ${err?.message || String(err)}`);
-            return;
-          }
-        }
-
         // Legacy translation path
         const strategy = body.translate_whole ? "rest-whole-v1" : "rest-batch-v1";
         const profileKey = getTranslationProfile({
@@ -1173,8 +1069,8 @@ export function createApp(deps?: Partial<AppDependencies>): http.RequestListener
           return;
         }
 
-        // Branch A: Document & Agent Translation Engine (Direct In-Memory Worker Integration)
-        if (body.translate_engine === "document" || body.translate_engine === "agent") {
+        // Document translation team (direct in-memory worker integration).
+        if (body.translate_engine === "document") {
           let job: any;
           try {
             job = await resolved.worker.submitOrAttachJob({

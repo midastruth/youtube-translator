@@ -34,7 +34,6 @@ class AgentWorkerClient:
     async def submit_or_attach(
         self,
         *,
-        job_key: str | None = None,
         cues: list[dict[str, Any]],
         video_id: str,
         title: str,
@@ -45,12 +44,11 @@ class AgentWorkerClient:
         model: str = "gpt-4o",
         base_url: str | None = None,
         api_key: str | None = None,
-        engine: str = "agent",
+        engine: str = "document",
         context_tokens: int | None = None,
         output_tokens: int | None = None,
     ) -> dict[str, Any]:
         payload = {
-            "jobKey": job_key,
             "cues": cues,
             "videoId": video_id,
             "title": title,
@@ -75,13 +73,6 @@ class AgentWorkerClient:
                 raise AgentWorkerError("无法连接翻译 Worker，请启动 npm run worker 或 Docker worker 服务") from exc
             if resp.status_code >= 400:
                 raise AgentWorkerError(f"Worker job submission failed ({resp.status_code}): {resp.text}")
-            return resp.json()
-
-    async def get_job(self, job_id: str) -> dict[str, Any]:
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            resp = await client.get(f"{self.base_url}/internal/jobs/{job_id}")
-            if resp.status_code >= 400:
-                raise AgentWorkerError(f"Failed to get job {job_id} ({resp.status_code}): {resp.text}")
             return resp.json()
 
     async def stream_job(self, job_id: str) -> AsyncGenerator[dict[str, Any], None]:

@@ -4,7 +4,7 @@
          '[cheshire.core :as json])
 
 (fs/create-dirs "./tmp")
-(def features ["translation-agent" "typescript-toolchain" "typescript-worker" "typescript-extension"])
+(def features ["translation-engines" "typescript-toolchain" "typescript-worker" "typescript-extension"])
 (def sources
   (mapv (fn [stem]
           (let [feature (str "docs/acceptance/" stem ".feature")

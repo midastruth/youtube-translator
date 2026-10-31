@@ -19,6 +19,19 @@ test("new installations choose document mode and display background editing-agen
   } finally { browser.close(); }
 });
 
+test("obsolete saved engine settings select the current team mode", async () => {
+  const browser = new BrowserFixture({ translateEngine: "agent" });
+  try {
+    const options = browser.options();
+    const engine = options.getElementById("translateEngine") as HTMLSelectElement;
+    assert.deepEqual([...engine.options].map(option => option.value), ["document", "legacy"]);
+    assert.equal(engine.value, "document");
+    browser.execute("content"); browser.toggle();
+    await eventually(() => browser.streams.length === 1);
+    assert.equal(browser.streams[0].body.translate_engine, "document");
+  } finally { browser.close(); }
+});
+
 test("explicit saved fast-mode preference is preserved", async () => {
   const browser = new BrowserFixture({ translateEngine: "legacy" });
   try {

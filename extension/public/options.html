@@ -60,7 +60,6 @@
     <select id="translateEngine">
       <option value="document">字幕编辑 Agent — 主 Agent 统筹，最多 9 个子 Agent 并行</option>
       <option value="legacy">快速模式 — 独立逐句 / 小块翻译</option>
-      <option value="agent">旧 Agent 框架（脚本占位，仅开发测试）</option>
     </select>
     <div class="hint">主 Agent 规划风格与术语，按内容派发 1～9 个子 Agent 并行翻译，验收并关闭子 Agent 后统一发布。需支持 SSE 和工具调用的 OpenAI-compatible 模型；所有 Agent 共用任务请求预算，不会自动降级为逐句翻译。</div>
     <label>OpenAI API Key</label>

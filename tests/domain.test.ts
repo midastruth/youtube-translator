@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { validateOutputMapping } from "../worker/validator.js";
-import { BudgetExceededError, executeWithRetryAndBudget, NetworkError, RequestBudgetTracker } from "../worker/network.js";
 import { exportableSubtitles, formatVtt, formatVttTime, subtitleIndexAt, videoIdFromUrl } from "../extension/src/subtitles.js";
 import { buildStreamRequest, hasBrowserSubtitles, selectBackendTrack } from "../extension/src/stream-request.js";
 import { apiStream, consumeSubtitleStream } from "../extension/src/subtitle-stream.js";
@@ -26,54 +25,6 @@ test("validation reports exact boundary failures without publishing partial resu
   }
   assert.deepEqual(validateOutputMapping([cue], { c0: { translation: "  译  " } }).orderedCues, [{ ...cue, translation: "译" }]);
   assert.deepEqual(validateOutputMapping([cue], [{ id: "c0", text: "译" }]).orderedCues, [{ ...cue, translation: "译" }]);
-});
-
-test("retry policy classifies config failures before retry exhaustion", async () => {
-  for (const failure of [{ status: 403 }, { status: 400 }, { message: "unsupported model" }, { message: "Invalid model" }, { message: "invalid parameter" }]) {
-    const budgetTracker = new RequestBudgetTracker();
-    let attempts = 0;
-    await assert.rejects(executeWithRetryAndBudget(async () => { attempts++; throw failure; }, {
-      maxAttempts: 1, budgetTracker, sleepFn: async () => assert.fail("non-retryable error must not sleep"),
-    }), error => error instanceof NetworkError && !error.retryable && error.errorType === ("status" in failure && failure.status === 403 ? "auth_error" : "config_error"));
-    assert.equal(attempts, 1); assert.equal(budgetTracker.interruptedAttempts, 0);
-  }
-});
-
-test("retry backoff is capped, reserves every attempt and counts only known usage", async () => {
-  const delays: number[] = [], attempts: number[] = [];
-  const budgetTracker = new RequestBudgetTracker();
-  const result = await executeWithRetryAndBudget(async attempt => {
-    if (attempt < 5) throw new Error("timeout");
-    return { usage: { promptTokens: 10, completionTokens: 20, cost: 0.5 } };
-  }, { maxAttempts: 5, budgetTracker, onAttempt: attempt => attempts.push(attempt), sleepFn: async ms => { delays.push(ms); } });
-  assert.deepEqual(delays, [1000, 2000, 4000, 4000]); assert.deepEqual(attempts, [1, 2, 3, 4, 5]);
-  assert.equal(result.usage.cost, 0.5);
-  assert.deepEqual(budgetTracker.getUsageReport(), { totalAttempts: 5, maxBudget: 12, knownTokens: 30, knownCost: 0.5, interruptedAttempts: 0, remainingAttempts: 7 });
-});
-
-test("retry exhaustion and budget exhaustion do not issue extra calls", async () => {
-  const tracker = new RequestBudgetTracker({ maxBudget: 1 });
-  let calls = 0;
-  await assert.rejects(executeWithRetryAndBudget(async () => { calls++; throw 42; }, { budgetTracker: tracker, sleepFn: async () => {} }), BudgetExceededError);
-  assert.equal(calls, 1);
-  const exhausted = new RequestBudgetTracker();
-  await assert.rejects(executeWithRetryAndBudget(async () => { throw { statusCode: 503 }; }, { maxAttempts: 1, budgetTracker: exhausted }), /Request failed after max attempts \(1\)/);
-  assert.equal(exhausted.interruptedAttempts, 1);
-  await assert.rejects(executeWithRetryAndBudget(async () => assert.fail(), { maxAttempts: 0 }), /Max attempts \(0\) exceeded/);
-  exhausted.recordSuccess(null); exhausted.recordSuccess({ promptTokens: "bad", completionTokens: 2, cost: "bad" });
-  assert.equal(exhausted.knownTokens, 2); assert.equal(exhausted.knownCost, 0);
-});
-
-test("rate limiting accepts numeric Retry-After and falls back for invalid/missing headers", async () => {
-  for (const [header, expected] of [["bad", 1000], [undefined, 1000], ["0.25", 250]] as const) {
-    let calls = 0;
-    const delays: number[] = [];
-    await executeWithRetryAndBudget(async () => {
-      if (calls++ === 0) throw { status: 429, retryAfter: header };
-      return "ok";
-    }, { sleepFn: async ms => { delays.push(ms); } });
-    assert.deepEqual(delays, [expected]);
-  }
 });
 
 test("VTT keeps optional translations, hour formatting, and pending cue exclusion", () => {

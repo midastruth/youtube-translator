@@ -1,6 +1,6 @@
 import { defineDoc, defineTask } from "@earendil-works/pi-durable";
-import { SubtitleJobDoc } from "./task-definition.js";
-import { advanceDocument, callDocumentModel, DocumentModelError, DocumentPermanentError, finalDocumentCues, initialDocumentState } from "./document-translation.js";
+import { SubtitleJobDoc } from "./job-document.js";
+import { DocumentModelError, DocumentPermanentError } from "./document-translation.js";
 import type { DocumentInput, ModelCallOptions } from "./document-translation.js";
 import type { JsonObject } from "@earendil-works/pi-durable";
 import type { PublishedCue, TaskResult } from "./domain-types.js";
@@ -44,7 +44,7 @@ export const createDocumentTask = <State extends DurableState, Request, Response
     restore: async (_task, runtime, context) => {
       const saved = await runtime.snapshot(DocumentResumeDoc, runtime.conversationId, context);
       if (!saved?.document || saved.workflow !== workflow.name) throw new Error("Translation checkpoint missing or incompatible");
-      const restored = saved.document as unknown as State;
+      const restored = saved.document as State;
       await runtime.commit(async () => ({
         status: "running", checkpoint: { phase: "run", document: workflow.resume?.(restored) ?? restored, failures: 0 },
       }), context);
@@ -166,10 +166,4 @@ export const createDocumentTask = <State extends DurableState, Request, Response
       return { status: "terminal", outcome: { status: "completed", result: { cancelled: true, published_cues: [] } } };
     }, context);
   },
-});
-
-// Retained under its original task name so in-flight v1 jobs can still resume.
-export const DocumentTranslationTask = createDocumentTask({
-  name: "document_subtitle_translation", initial: initialDocumentState,
-  advance: advanceDocument, call: callDocumentModel, finalCues: finalDocumentCues,
 });

@@ -11,7 +11,7 @@ import {
   initialTranslationTeamState, advanceTranslationTeam, translationTeamTool, translationTeamPreviewCues, openingTarget,
 } from "../worker/translation-team.js";
 import type { TranslationTeamState } from "../worker/translation-team.js";
-import { SubtitleJobDoc } from "../worker/task-definition.js";
+import { SubtitleJobDoc } from "../worker/job-document.js";
 import { trustModelEndpoint } from "./support/model-endpoint.js";
 import { scriptedAgentTools, sendAgentTools, type AgentPayload } from "./support/subtitle-agent-model.js";
 
@@ -204,8 +204,12 @@ test("production worker streams opening before slow siblings, replays on reconne
   slow.release(); await restored.taskPromise;
   const rest = []; for await (const event of reconnected) rest.push(event);
   assert.equal(rest.at(-1)?.type, "done");
-  const final = rest.filter(e => e.type === "cue");
-  assert.equal(final.length, source.length); assert.ok(final.every(e => e.provisional === false));
+  // Every later submitted section is previewed before the final, accepted publication.
+  const doneAt = rest.findIndex(e => e.type === "cue" && e.provisional === false);
+  const previewed = new Set(rest.slice(0, doneAt).filter(e => e.type === "cue" && e.provisional).map(e => e.cue_id));
+  for (const cue of source.slice(2)) assert.ok(previewed.has(cue.cue_id), `${cue.cue_id} previewed after submission`);
+  const final = rest.filter(e => e.type === "cue" && !e.provisional);
+  assert.equal(final.length, source.length);
   assert.equal(final[0].index, 0); assert.equal(final[0].translation, "最终统一术语");
   assert.equal(openingRequests(), before, "submitted opening was not translated again after restart");
   assert.equal((await worker.snapshotJob(restored)).status, "succeeded");

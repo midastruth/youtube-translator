@@ -8,7 +8,6 @@ import { setTimeout as delay } from "node:timers/promises";
 import { startServer, type ServerOptions } from "../server/src/server.js";
 import { SubtitleCache } from "../server/src/cache.js";
 import { AgentWorker } from "../worker/agent-worker.js";
-import type { ModelRequest } from "../worker/document-translation.js";
 import { WhisperClient, type WhisperClientOptions } from "../server/src/transcribe.js";
 import { trustModelEndpoint } from "./support/model-endpoint.js";
 import { respondAsSubtitleAgent } from "./support/subtitle-agent-model.js";
@@ -145,6 +144,20 @@ test("review: malformed public requests are client errors, never internal failur
   }
 });
 
+test("removed agent engine is rejected by REST, SSE and WebSocket without starting a job", { timeout: 10000 }, async t => {
+  const app = await gateway(t);
+  const request = { ...browserRequest, translate_to: "zh-CN", translate_engine: "agent" };
+  for (const route of ["/api/subtitle/process", "/api/subtitle/stream"]) {
+    const response = await app.post(route, request);
+    assert.equal(response.status, 422);
+    await response.arrayBuffer();
+  }
+  const events = await socketEvents(app.url, request);
+  assert.equal(events[0]?.type, "error");
+  assert.equal(events.some(e => e.type === "done" || e.type === "cue"), false);
+  assert.equal(app.worker.jobs.size, 0);
+});
+
 test("review: oversized JSON receives a bounded HTTP 413 response", { timeout: 10000 }, async t => {
   const app = await gateway(t);
   const response = await app.post("/api/subtitle/process", { ...browserRequest, padding: "x".repeat(10 * 1024 * 1024) });
@@ -212,14 +225,14 @@ test("review: public document SSE uses the real durable worker and reattaches wi
     if (previousModel === undefined) delete process.env.TRANSLATION_AGENT_MODEL;
     else process.env.TRANSLATION_AGENT_MODEL = previousModel;
   });
-  const calls: ModelRequest[] = [];
+  const calls: { operation: string }[] = [];
   const model = http.createServer(async (req, res) => {
     try {
       let raw = ""; for await (const chunk of req) raw += String(chunk);
       assert.equal(req.headers.authorization, "Bearer independent-review-ephemeral-key");
       const payload = JSON.parse(raw) as { model: string; messages: { role: string; content: string }[] };
       assert.equal(payload.model, "deployment-model");
-      const request = JSON.parse(payload.messages.find(m => m.role === "user")!.content) as ModelRequest;
+      const request = JSON.parse(payload.messages.find(m => m.role === "user")!.content);
       calls.push(request);
       await delay(35); // Completion must remain observable after the POST body has ended.
       assert.equal(request.operation, "translate_workspace");

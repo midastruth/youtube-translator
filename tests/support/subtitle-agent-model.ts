@@ -8,7 +8,7 @@ export function sendAgentTools(res: ServerResponse, tools: { name: string; args:
   endModelStream(res, "tool_calls");
 }
 
-/** Deterministic mock of a single agent choosing read/edit/check/submit tools. No real model tokens. */
+/** Deterministic mock of main/child workspace sessions. No real model tokens. */
 export function scriptedAgentTools(payload: AgentPayload, translate = (id: string) => `数据库事务：${id}`): { name: string; args: unknown }[] {
   const last = payload.messages.filter(m => m.role === "tool").at(-1);
   const main = payload.tools?.some(t => t.function.name === "dispatch_subagents");
@@ -21,10 +21,11 @@ export function scriptedAgentTools(payload: AgentPayload, translate = (id: strin
     const source = JSON.parse(result.content) as { cue_id: string }[];
     if (main) {
       if (result.next_offset != null) return [{ name: "read_file", args: { path: "source.json", offset: result.next_offset, count: 100 } }];
-      const all = payload.messages.filter(m => m.role === "tool").flatMap(m => {
+      // Repeated pages (e.g. re-reading after compaction) must not duplicate cues in the plan.
+      const all = [...new Map(payload.messages.filter(m => m.role === "tool").flatMap(m => {
         const r = JSON.parse(m.content!);
         return typeof r.content === "string" && r.content.startsWith("[") ? JSON.parse(r.content) as { cue_id: string }[] : [];
-      });
+      }).map(c => [c.cue_id, c])).values()];
       const team = payload.messages.filter(m => m.role === "user").map(m => {
         try { return JSON.parse(m.content || "{}"); } catch { return {}; }
       }).find(m => m.role === "main");
@@ -49,7 +50,10 @@ export function scriptedAgentTools(payload: AgentPayload, translate = (id: strin
   }
   if (call.name === "read_file" && args.path === "translations.json") {
     return result.next_offset == null
-      ? main ? [{ name: "accept_translation", args: { review: "Checked meaning, negation, timing boundaries and transaction terminology against source." } }] : [{ name: "validate_translation", args: {} }]
+      ? main ? [
+        { name: "accept_translation", args: { review: "Checked meaning, negation, timing boundaries and transaction terminology against source." } },
+        { name: "close_subagents", args: {} }, { name: "validate_translation", args: {} }, { name: "finish_translation", args: {} },
+      ] : [{ name: "validate_translation", args: {} }]
       : [{ name: "read_file", args: { path: "translations.json", offset: result.next_offset, count: 100 } }];
   }
   if (call.name === "validate_translation") return [{ name: "finish_translation", args: {} }];

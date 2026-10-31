@@ -1,6 +1,6 @@
 # YouTube 双语字幕翻译架构
 
-根据当前 TypeScript 统一单体服务端与 Worker 源码梳理；明确区分默认的字幕编辑 Agent（`document`）、轻量快速翻译（`legacy`）与旧版规则状态机原型（`agent`）。
+当前仅保留两种翻译模式：多 Agent 字幕编辑团队（`document`）与轻量快速翻译（`legacy`）。
 
 > **历史架构图说明**：仓库中保留的 `docs/translation-architecture.png` 为早期 Python 后端经网络中转调度外部 Node Worker 的历史架构设计，仅作历史对比存档参考；当前生产运行架构完全以本文描述的 **TypeScript 统一单体服务（单端口 8787、内置 Worker 内存直连）**为准。
 
@@ -35,12 +35,8 @@ flowchart TD
     Q -->|legacy：快速模式| L[server/src/translate.ts 快速翻译调度]
     L <--> API[OpenAI-compatible / DeepL API]
     
-    Q -.->|agent：旧版原型| AG[worker/task-definition.ts 规则状态机]
-    AG --- NOTE[非大模型：仅脚本硬编码 defaultDraft 与规则审校]
-    
     REVIEW --> SSE[SSE / WebSocket 事件分发：毫秒时间轴转换]
     L --> SSE
-    AG --> SSE
     SSE --> E
     E --> R[按 video.currentTime 渲染双语字幕]
     
@@ -82,23 +78,16 @@ flowchart TD
 
 ---
 
-## 3. 全文高质量模式 (Document) 与旧版 Agent 原型的边界
+## 3. 全文高质量模式 (Document)
 
-### A. 字幕编辑 Agent (`document` 模式)
+### 多 Agent 字幕编辑团队
 - **实现位置**：`worker/translation-team.ts`，复用 `worker/subtitle-agent.ts` 的文件工具、`worker/document-task.ts` 的持久化边界和共享模型传输。
 - **驱动方式**：主 Agent 快速评估内容、风格和术语，用 `dispatch_subagents` 分派约占视频前 1/6 的开头片段（1 小时视频约前 10 分钟），以及最多 9 个后续语义片段。子 Agent 使用独立会话连续推进，不逐轮互等；模型端点需支持 Chat Completions SSE 与 Function Calling，不要求 `response_format`。
 - **工作区**：只读 `source.json`、可编辑 `translations.json` 和 `notes.md` 均为 SQLite 持久化的虚拟文件。子 Agent 只能写自己片段，但能通过 `read_context` 查阅全文；所有子任务共享不可变风格与术语规范，不开放 shell 或任意宿主路径。
 - **持久化循环**：每个主/子回合完成后保存检查点，保留独立会话、文件和错误状态；失败只重试相应子任务，退避不阻塞兄弟任务。主、子请求及重试共用预算，默认 `0` 不限次数。重启仅可能重做尚未保存的在途回合。
 - **发布门禁**：开头 Agent 自查、校验并显式提交后，宿主保存 `preview_cues` 并先发 `provisional: true` 预览，供边看边等后续翻译。全部子任务提交合并后，主 Agent 语义检查与修订，再 `accept_translation` → `close_subagents` → `validate_translation` → `finish_translation`。修改译文使验收和校验失效；宿主复核后原子发布全文，以相同索引覆盖开头预览，只有此时发送 `done`。
 - **质量与性能边界**：结构由程序保证，语义由子 Agent 翻译与主 Agent 验收负责；无法由结构校验保证语义正确，实际加速比受模型服务并发限流影响。
-- **历史兼容**：`document_subtitle_translation` 和 `subtitle_editing_agent` 继续注册恢复历史任务；新任务使用 `subtitle_translation_team` 及独立缓存版本。详见 [主/子 Agent 翻译](document-translation.md)。
-
-### B. 旧版 Agent 原型状态机 (`agent` 模式边界声明)
-- **实现位置**：`worker/task-definition.ts`。
-- **重要边界声明**：**该分支不能宣称为生产级 LLM 翻译 Agent**。
-  - `task-definition.ts` 中无外部注入时默认调用 `defaultDraft()` / `reviseDefaultDraft()`，仅为硬编码的占位示例（返回 `[译] 原文`）。
-  - 默认审校为 `worker/reviewer.ts` 中的正则规则检查，并非大模型审校。
-  - 该模块作为旧版状态机协议原型保留，正式文档翻译请使用 `document` 引擎。
+- **任务边界**：仅注册 `subtitle_translation_team`，保留团队任务的恢复能力。旧单 Agent、固定阶段流程及规则原型已移除，其历史任务不能续翻，需重新开始。详见 [主/子 Agent 翻译](document-translation.md)。
 
 ---
 
@@ -115,11 +104,11 @@ flowchart TD
 | **快速翻译** | `server/src/translate.ts` | Legacy 模式快速翻译、`[$i]` 标记解析与超时防护 |
 | **字幕断句** | `server/src/subtitle-processing.ts` | 文本清洗、非语音段落过滤、规则与统计智能断句 |
 | **翻译团队** | `worker/translation-team.ts` | 主 Agent 规划验收、开头 + 最多 9 个后续 Agent 独立推进、预览与最终发布门禁 |
-| **共享 Agent 工具** | `worker/subtitle-agent.ts` | 文件工具、会话、上下文压缩与历史单 Agent 定义 |
-| **模型传输与历史流程** | `worker/document-translation.ts` | 共享 SSE 模型调用；保留历史固定阶段流程 |
+| **共享 Agent 工具** | `worker/subtitle-agent.ts` | 主/子 Agent 文件工具、会话与上下文压缩 |
+| **模型传输** | `worker/document-translation.ts` | 共享 SSE 模型调用与配置、Token 预算 |
 | **持久化任务边界** | `worker/document-task.ts` | pi-durable 检查点、重试、预算、取消与原子发布 |
 | **AgentWorker 核心** | `worker/agent-worker.ts` | 任务队列管理、事件流观察、生命周期调度 |
-| **旧版状态机原型** | `worker/task-definition.ts` | 旧版规则状态机测试框架（`defaultDraft` 占位） |
+| **任务文档** | `worker/job-document.ts` | 团队与流式观察者共用的持久化状态 |
 | **[历史兼容实现]** | `backend/src/youtube_ingest/server.py` | 原 Python FastAPI 后端，仅作历史兼容参考保留 |
 
 ---

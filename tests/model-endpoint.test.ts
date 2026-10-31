@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import { test } from "node:test";
 import { modelEndpoint } from "../worker/model-endpoint.js";
-import { callDocumentModel, initialDocumentState, modelConfig, type DocumentInput } from "../worker/document-translation.js";
+import { callDocumentTurn, modelConfig, type DocumentInput } from "../worker/document-translation.js";
 import { translateSingle, translateBatch, translateStream, translateWhole } from "../server/src/translate.js";
 import { trustModelEndpoint } from "./support/model-endpoint.js";
 
@@ -49,7 +49,7 @@ test("a trusted provider redirect cannot forward deployment credentials to anoth
     jobId: "test", jobKey: "test", videoId: "test", title: "Test", fromLang: "en", toLang: "zh", budgetLimit: 10,
     cues: [{ cue_id: "a", start: 0, end: 1000, text: "Hello." }], config: modelConfig(),
   };
-  await assert.rejects(callDocumentModel(input, initialDocumentState(input), { operation: "test", instructions: "test", data: {} }, { reserve: async () => {} }));
+  await assert.rejects(callDocumentTurn(input, { messages: [{ role: "user", content: "test", timestamp: 0 }] }, { reserve: async () => {} }));
   await assert.rejects(translateSingle("Hello", "en", "zh"));
   assert.equal(trustedCalls, 2); assert.equal(targetCalls, 0);
 });

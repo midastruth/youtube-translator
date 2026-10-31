@@ -35,11 +35,11 @@ Feature: TypeScript worker compatibility
 
   Scenario Outline: TypeScript worker compatibility-03 迁移不改变任务缓存键
     Given 视频为 "migration-video" 且源字幕为 c0、100 毫秒到 1100 毫秒、文本 "<text>"
-    And 任务缓存配置使用迁移前 keys 模块的默认值
+    And 任务缓存配置使用 document 引擎的默认值
     When 使用迁移后的实际缓存键函数计算 job_key
-    Then job_key 精确等于迁移前冻结的 "<job_key>"
+    Then job_key 精确等于 document 引擎的 "<job_key>"
 
     Examples:
       | text    | job_key                                                                                |
-      | Hello   | job:migration-video:8702a08ae1a75342b21ce2c4836358fdb3f9ffa93fef5680f86804a4b63d4b00 |
-      | Goodbye | job:migration-video:31461e48e8ed5b21b8578aff17a80fb5809c830e386ad9a5257e14e1812d3153 |
+      | Hello   | job:migration-video:2cad9ed3c4483863960b8dd1517e31ae5d0c89e198553c14254dae2b1a337de8 |
+      | Goodbye | job:migration-video:46354735c14e3f4eb2553190aa356151ad3c2fdd68bf51b0c6922112b3be3f0f |

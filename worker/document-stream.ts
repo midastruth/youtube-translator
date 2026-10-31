@@ -30,7 +30,7 @@ export async function* observeDocumentJob(job: JobRecord, snapshot: () => Promis
       }
     }
     if (doc.status === "failed" || job.error) {
-      yield { type: "error", code: "document_translation_failed", detail: doc.error || "全文翻译失败；已显示的开头仍为待统一审校版本，可重新开启续翻" }; return;
+      yield { type: "error", code: "document_translation_failed", detail: doc.error || "全文翻译失败；已显示的预览字幕仍为待统一审校版本，可重新开启续翻" }; return;
     }
     const current = `${doc.stage}:${doc.progress || ""}`;
     if (current !== stage) { stage = current; yield { type: "progress", stage: doc.stage, progress: doc.progress }; }

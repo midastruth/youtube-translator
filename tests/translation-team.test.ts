@@ -5,12 +5,13 @@ import fs from "node:fs/promises";
 import type { AssistantMessage, Context, ToolCall } from "@earendil-works/pi-ai";
 import {
   stepTranslationTeam as advanceTranslationTeam, finalTranslationTeamCues, initialTranslationTeamState,
-  translationTeamTool, translationTeamReasoning, translationTeamModelConfig, translationTeamProgress, MAX_SUBAGENTS,
+  translationTeamTool, translationTeamReasoning, translationTeamModelConfig, translationTeamProgress, translationTeamPreviewCues, MAX_SUBAGENTS,
 } from "../worker/translation-team.js";
-import { DocumentModelError, modelConfig } from "../worker/document-translation.js";
+import { DocumentModelError, inputBudget, modelConfig, outputBudget, outputEstimate, tokenEstimate } from "../worker/document-translation.js";
+import { subtitleAgentTool, MAX_READ_CUES } from "../worker/subtitle-agent.js";
 import type { DocumentInput } from "../worker/document-translation.js";
 import { AgentWorker } from "../worker/agent-worker.js";
-import { SubtitleJobDoc } from "../worker/task-definition.js";
+import { SubtitleJobDoc } from "../worker/job-document.js";
 import { trustModelEndpoint } from "./support/model-endpoint.js";
 import { scriptedAgentTools, sendAgentTools, type AgentPayload } from "./support/subtitle-agent-model.js";
 
@@ -29,7 +30,10 @@ function dispatch(document = input(), opening = false) {
     assignments: document.cues.slice(opening ? 1 : 0).map(c => ({ start_id: c.cue_id, end_id: c.cue_id, instructions: "Translate using the shared terminology." })) };
 }
 function manifest(context: Context) {
-  return JSON.parse((context.messages[1] as { content: string }).content) as { id: string; shared_brief: string; assignment: { start_id: string } };
+  return JSON.parse((context.messages[1] as { content: string }).content) as {
+    id: string; shared_brief: string; assignment: { start_id: string };
+    initial_source_page: { path: string; offset: number; content: DocumentInput["cues"]; next_offset: number | null; total_cues: number };
+  };
 }
 
 test("role reasoning inherits global settings, validates overrides and never changes restored inputs", () => {
@@ -119,6 +123,164 @@ test("nine independent children run concurrently, share brief, read global conte
   assert.deepEqual(finalTranslationTeamCues(document, state).map(c => [c.cue_id, c.start, c.end]), source.map(c => [c.cue_id, c.start, c.end]));
 });
 
+test("children translate preloaded source on their first turn, then inspect saved translations and validate before submission", async () => {
+  const document = input(); let state = initialTranslationTeamState(document);
+  translationTeamTool(document, state, "dispatch_subagents", { brief: dispatch().brief, assignments: [
+    { start_id: "c0", end_id: "c2", instructions: "Translate the first section." },
+    { start_id: "c3", end_id: "c8", instructions: "Translate the remaining section." },
+  ] });
+  const firstRoles = new Map<string, ReturnType<typeof manifest>>();
+  const turns = new Map<string, number>();
+  const call = async (context: Context) => {
+    const task = manifest(context), page = task.initial_source_page;
+    const turn = (turns.get(task.id) || 0) + 1; turns.set(task.id, turn);
+    assert.match(context.systemPrompt!, /Do not skip semantic self-review/);
+    assert.match(context.systemPrompt!, /Avoid routine notes\/progress writes and redundant reads/);
+    const expected = task.id === "subagent-1" ? document.cues.slice(0, 3) : document.cues.slice(3);
+    assert.deepEqual(page, { path: "source.json", offset: 0, content: expected, next_offset: null, total_cues: expected.length });
+    if (turn === 1) {
+      firstRoles.set(task.id, structuredClone(task));
+      assert.equal(context.messages.some(m => m.role === "toolResult"), false);
+      return response("write_file", { path: "translations.json", merge: true, content: JSON.stringify(Object.fromEntries(page.content.map(c => [c.cue_id, `数据库事务 ${c.cue_id}.`]))) });
+    }
+    assert.deepEqual(task, firstRoles.get(task.id), "preload must remain stable, including after saved-state recovery");
+    if (turn === 2) return response("read_file", { path: "translations.json", count: MAX_READ_CUES });
+    if (turn === 3) {
+      const saved = context.messages.at(-2);
+      assert.equal(saved?.role, "toolResult");
+      if (saved?.role !== "toolResult") assert.fail("missing saved translation inspection");
+      const result = JSON.parse((saved.content[0] as { text: string }).text);
+      assert.deepEqual(Object.keys(JSON.parse(result.content)), expected.map(c => c.cue_id));
+      return response("validate_translation", {});
+    }
+    return response("finish_translation", {});
+  };
+  state = await advanceTranslationTeam(document, state, call);
+  assert.deepEqual(state.draft, {}, "a first-turn write is not submission or publication");
+  for (const child of state.children) {
+    const assigned = { ...document, cues: child.id === "subagent-1" ? document.cues.slice(0, 3) : document.cues.slice(3) };
+    assert.throws(() => subtitleAgentTool(assigned, child.agent, "finish_translation", {}), /validate_translation/);
+  }
+  state = JSON.parse(JSON.stringify(state));
+  for (let i = 0; i < 3; i++) state = await advanceTranslationTeam(document, state, call);
+  assert.deepEqual([...turns.values()], [4, 4], "write, semantic inspection, validate, submit: no initial source-read turn");
+  assert.ok(state.children.every(c => c.status === "completed"));
+  assert.equal(Object.keys(state.draft).length, document.cues.length);
+  assert.throws(() => finalTranslationTeamCues(document, state), /accepted and closed/, "main acceptance remains mandatory");
+});
+
+test("preloaded source is bounded by page, input and output budgets and paginates using assignment-local offsets", async () => {
+  const cues = Array.from({ length: 450 }, (_, i) => ({ cue_id: `p${i}`, start: i * 1000, end: i * 1000 + 900, text: "x" }));
+  for (const config of [modelConfig(), modelConfig({ contextTokens: 24000, outputTokens: 1024 }), modelConfig({ contextTokens: 24000, outputTokens: 8192 })]) {
+    const document = { ...input(), cues, config }; let state = initialTranslationTeamState(document);
+    translationTeamTool(document, state, "dispatch_subagents", { brief: dispatch().brief, assignments: [
+      { start_id: "p0", end_id: "p9", instructions: "Translate intro." },
+      { start_id: "p10", end_id: "p449", instructions: "Translate remaining passage." },
+    ] });
+    let length = 0;
+    state = await advanceTranslationTeam(document, state, async context => {
+      const task = manifest(context), page = task.initial_source_page;
+      const offset = task.id === "subagent-1" ? 0 : 10;
+      assert.ok(page.content.length > 0 && page.content.length <= MAX_READ_CUES);
+      assert.deepEqual(page.content, cues.slice(offset, offset + page.content.length));
+      assert.equal(page.total_cues, offset ? 440 : 10);
+      assert.ok(tokenEstimate(page) <= inputBudget(config) * 0.2);
+      assert.ok(outputEstimate(page.content) <= outputBudget(config));
+      assert.ok(tokenEstimate(context) <= inputBudget(config));
+      if (offset) {
+        length = page.content.length;
+        if (config.contextTokens === 128000) assert.equal(length, MAX_READ_CUES);
+        assert.equal(page.next_offset, length);
+        return response("read_file", { path: "source.json", offset: page.next_offset, count: MAX_READ_CUES });
+      }
+      return response("read_file", { path: "source.json", count: 1 });
+    });
+    const read = state.children[1].agent.messages.at(-1);
+    assert.equal(read?.role, "toolResult");
+    if (read?.role !== "toolResult") assert.fail("missing subsequent source page");
+    const result = JSON.parse((read.content[0] as { text: string }).text);
+    assert.equal(JSON.parse(result.content)[0].cue_id, cues[10 + length].cue_id);
+    if (config.contextTokens === 24000) assert.ok(length < MAX_READ_CUES, "tight input or output budgets must shrink the preload");
+  }
+});
+
+test("oversized preload cues fall back to source reads without breaking a valid child context", async () => {
+  const document = { ...input(), config: modelConfig({ contextTokens: 24000, outputTokens: 1024 }), cues: [{ ...source[0], text: "x".repeat(4000) }] };
+  let state = initialTranslationTeamState(document);
+  translationTeamTool(document, state, "dispatch_subagents", { brief: dispatch().brief, assignments: [{ start_id: "c0", end_id: "c0", instructions: "Translate this long cue." }] });
+  state = await advanceTranslationTeam(document, state, async context => {
+    const page = manifest(context).initial_source_page;
+    assert.deepEqual(page.content, []);
+    assert.equal(page.next_offset, 0);
+    assert.ok(tokenEstimate(context) <= inputBudget(document.config));
+    return response("read_file", { path: "source.json", offset: 0, count: 1 });
+  });
+  assert.equal(state.children[0].failures, 0);
+  const result = state.children[0].agent.messages.at(-1);
+  assert.equal(result?.role, "toolResult");
+  if (result?.role === "toolResult") assert.equal(result.isError, false);
+});
+
+test("submitted sections preview immediately; main review gets a checklist, reads bilingually and finishes in one turn", async () => {
+  const document = input(); let state = initialTranslationTeamState(document);
+  translationTeamTool(document, state, "dispatch_subagents", { brief: "transaction = 事务; preserve numbers.", assignments: [
+    { start_id: "c0", end_id: "c3", instructions: "First half." }, { start_id: "c4", end_id: "c8", instructions: "Second half." },
+  ] });
+  assert.throws(() => translationTeamTool(document, state, "review_checklist", {}), /Wait for all subagents/);
+  const translate = (id: string) => id === "c5" ? "交易 5。" : `数据库事务 ${id.slice(1)}。`;
+  const childTurn = async (context: Context) => {
+    const task = manifest(context), page = task.initial_source_page.content;
+    const turn = context.messages.filter(m => m.role === "assistant").length;
+    if (task.id === "subagent-2" && turn === 0) return response("read_context", { query: "transaction" }); // slower sibling
+    if (turn === 0 || (task.id === "subagent-2" && turn === 1)) return response("write_file", { path: "translations.json", content: JSON.stringify(Object.fromEntries(page.map(c => [c.cue_id, translate(c.cue_id)]))) });
+    const written = turn - (task.id === "subagent-2" ? 1 : 0);
+    return response(written === 1 ? "validate_translation" : "finish_translation", {});
+  };
+  for (let i = 0; i < 3; i++) state = await advanceTranslationTeam(document, state, childTurn);
+  assert.deepEqual(state.children.map(c => c.status), ["completed", "running"]);
+  assert.deepEqual(translationTeamPreviewCues(document, state).map(c => [c.index, c.cue_id]), [[0, "c0"], [1, "c1"], [2, "c2"], [3, "c3"]],
+    "a submitted non-opening section is visible before its slower sibling finishes");
+  assert.match(translationTeamProgress(document, state), /已可先观看 4 条/);
+  assert.equal(state.messages.length, 0, "no checklist before every child completes");
+  state = await advanceTranslationTeam(document, state, childTurn);
+  assert.ok(state.children.every(c => c.status === "completed"));
+  assert.equal(translationTeamPreviewCues(document, state).length, 9);
+
+  // The checklist is in the main history (and therefore the persisted checkpoint).
+  const checklist = JSON.parse((state.messages.at(-1) as { content: string }).content);
+  assert.equal(checklist.type, "review_checklist");
+  assert.deepEqual(checklist.flagged.map((f: { cue_id: string }) => f.cue_id), ["c5"]);
+  assert.match(checklist.flagged[0].issues.join(), /"transaction" expected "事务"/);
+  assert.deepEqual(checklist.boundaries.map((b: { rows: string[][] }) => b.rows.map(r => r[0])), [["c1", "c2", "c3", "c4", "c5", "c6"]]);
+
+  const turns: Context[] = [];
+  const mainTurn = async (context: Context) => {
+    turns.push(structuredClone(context));
+    if (turns.length === 1) {
+      assert.ok(context.tools!.some(t => t.name === "read_bilingual") && context.tools!.some(t => t.name === "review_checklist"));
+      assert.match(JSON.stringify(context.messages), /review_checklist/);
+      return response("read_bilingual", { offset: 0, count: 400 });
+    }
+    if (turns.length === 2) return response("edit_file", { path: "translations.json", edits: [{ old_text: '"c5": "交易 5。"', new_text: '"c5": "数据库事务 5。"' }] });
+    if (turns.length === 3) return response("review_checklist", {});
+    const calls = ["accept_translation", "close_subagents", "validate_translation", "finish_translation"].map((name, i) => ({
+      type: "toolCall" as const, id: `t${i}`, name, arguments: (name === "accept_translation" ? { review: "Fixed c5 terminology; boundaries and numbers consistent." } : {}) as ToolCall["arguments"] }));
+    return { ...response("noop", {}), content: calls };
+  };
+  state = await advanceTranslationTeam(document, state, mainTurn);
+  const bilingual = JSON.parse((state.messages.at(-1) as { content: { text: string }[] }).content[0].text);
+  assert.equal(bilingual.rows.length, 9); assert.deepEqual(bilingual.rows[5], ["c5", source[5].text, "交易 5。"]);
+  state = await advanceTranslationTeam(document, state, mainTurn);
+  assert.equal(translationTeamPreviewCues(document, state)[5].translation, "数据库事务 5。", "main corrections refresh the provisional preview");
+  state = await advanceTranslationTeam(document, state, mainTurn);
+  const recheck = JSON.parse((state.messages.at(-1) as { content: { text: string }[] }).content[0].text);
+  assert.equal(recheck.flagged_total, 0);
+  state = await advanceTranslationTeam(document, state, mainTurn);
+  assert.equal(state.stage, "publish", "acceptance, closing, validation and submission complete in one model turn");
+  assert.equal(turns.length, 4);
+  assert.equal(finalTranslationTeamCues(document, state)[5].translation, "数据库事务 5。");
+});
+
 test("main and child prompts keep a stable cacheable prefix; live team status trails and agents get distinct cache keys", async () => {
   const document = input(); let state = initialTranslationTeamState(document);
   translationTeamTool(document, state, "dispatch_subagents", dispatch());
@@ -193,6 +355,9 @@ test("child context compaction retains assignment, shared terminology, notes and
       assert.match(JSON.stringify(context), /Checked later definitions/);
       assert.equal(task.assignment.start_id, "c0");
       assert.doesNotMatch(JSON.stringify(context), /long history/);
+      assert.deepEqual(task.initial_source_page.content, [document.cues[0]], "compaction retains the same immutable source preload");
+      const status = JSON.parse((context.messages.at(-1) as { content: string }).content);
+      assert.equal(status.translated_cues, 1, "saved progress prevents treating the preload as fresh work");
     }
     return response("read_file", { path: "translations.json", count: 100 });
   });

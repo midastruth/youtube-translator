@@ -54,7 +54,7 @@ export function attachWebSocket(server: http.Server, deps?: Partial<AppDependenc
         signal.throwIfAborted();
         const toLang = body.translate_to;
 
-        if (toLang && cues.length && (body.translate_engine === "document" || body.translate_engine === "agent")) {
+        if (toLang && cues.length && body.translate_engine === "document") {
           const job = await resolved.worker.submitOrAttachJob({
             cues, videoId: meta.video_id, title: meta.title, fromLang: meta.from_lang, toLang,
             segmentation: body.segmentation || "rule", provider: body.translate_provider || "openai",

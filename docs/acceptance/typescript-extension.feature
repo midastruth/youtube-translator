@@ -33,7 +33,7 @@ Feature: TypeScript extension compatibility
 
     Examples:
       | backend_input             | backend_url           | engine |
-      | http://localhost:8791///  | http://localhost:8791 | agent  |
+      | http://localhost:8791///  | http://localhost:8791 | document |
       | http://localhost:8787/    | http://localhost:8787 | legacy |
 
   Scenario Outline: TypeScript extension compatibility-03 字幕显示与 VTT 导出兼容

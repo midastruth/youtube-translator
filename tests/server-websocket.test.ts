@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { trustModelEndpoint } from "./support/model-endpoint.js";
-import { sendModelJson } from "./support/model-stream.js";
 import { respondAsSubtitleAgent } from "./support/subtitle-agent-model.js";
 import http from "node:http";
 import fs from "node:fs/promises";
@@ -11,7 +10,7 @@ import { WebSocket } from "ws";
 import { startServer, type RunningServer } from "../server/src/server.js";
 import { SubtitleCache } from "../server/src/cache.js";
 import { AgentWorker } from "../worker/agent-worker.js";
-import { SubtitleJobDoc } from "../worker/task-definition.js";
+import { SubtitleJobDoc } from "../worker/job-document.js";
 
 describe("WebSocket Subtitle Processing Endpoint (/ws/subtitle/process)", () => {
   let tmpDir: string;
@@ -52,47 +51,9 @@ describe("WebSocket Subtitle Processing Endpoint (/ws/subtitle/process)", () => 
           return;
         }
 
-        // The default document engine is a single workspace-editing agent.
+        // The default document engine uses the workspace-editing translation team.
         if (respondAsSubtitleAgent(payload, res, id => `译文：${id}`)) return;
-        // Retained compatibility mock for older fixed-stage tasks.
-        const userMsg = payload.messages?.find((m: any) => m.role === "user")?.content;
-        const request = JSON.parse(userMsg);
-        const cues = (request.data as { source?: { cue_id: string; start: number; end: number }[] })?.source || [];
-
-        let answer: any;
-        switch (request.operation) {
-          case "analyze":
-            answer = {
-              summary: "Test summary",
-              glossary: [],
-              chapters: [{ start_id: cues[0].cue_id, end_id: cues[cues.length - 1].cue_id, title: "Section" }],
-            };
-            break;
-          case "brief":
-            answer = { summary: "Test summary", glossary: [] };
-            break;
-          case "translate":
-            answer = {
-              summary: "Test summary",
-              glossary: [],
-              translations: cues.map((c: any) => ({ cue_id: c.cue_id, translation: `译文：${c.cue_id}` })),
-            };
-            break;
-          case "audit":
-            answer = { guidance: "ok" };
-            break;
-          case "review":
-            answer = { summary: "Test summary", glossary: [], passed: true, issues: [], corrections: [] };
-            break;
-          case "final_audit":
-            answer = { passed: true, guidance: "ok" };
-            break;
-          default:
-            answer = { summary: "Test summary", glossary: [] };
-        }
-
-        assert.equal(payload.stream, true);
-        sendModelJson(res, answer);
+        throw new Error("Unexpected model request outside the translation team");
       } catch (err: any) {
         res.writeHead(500);
         res.end(String(err));

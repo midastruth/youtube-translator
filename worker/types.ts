@@ -3,12 +3,11 @@ import type { EventEmitter } from "node:events";
 
 // Compatibility facade for application consumers; core modules use domain-types directly.
 export type * from "./domain-types.js";
-import type { SourceCue, InputCue, FinalResult, TaskResult, ModelMocks, Draft } from "./domain-types.js";
-export type SubmitJobOptions = ModelMocks & {
-  jobKey?: string; cues?: InputCue[]; videoId?: string; title?: string; fromLang?: string; toLang?: string;
-  segmentation?: string; provider?: string; model?: string; baseUrl?: string; requestId?: string | null;
-  budgetLimit?: number; maxCuesPerBlock?: number; initialGlossary?: Draft | null;
-  engine?: string; apiKey?: string; contextTokens?: number; outputTokens?: number;
+import type { SourceCue, InputCue, FinalResult, TaskResult } from "./domain-types.js";
+export type SubmitJobOptions = {
+  cues?: InputCue[]; videoId?: string; title?: string; fromLang?: string; toLang?: string;
+  segmentation?: string; provider?: string; model?: string; baseUrl?: string;
+  budgetLimit?: number; engine?: string; apiKey?: string; contextTokens?: number; outputTokens?: number;
 };
 export type JobRecord = {
   jobId: string; jobKey: string; taskId: TaskId<TaskResult> | null; conversationId: ConversationId;

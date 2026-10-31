@@ -402,7 +402,7 @@ class SubtitleRequest(BaseModel):
     allow_automatic: bool = True
     segmentation: str = "rule"  # "rule" | "statistical"
     translate_to: str | None = None
-    translate_engine: Literal["legacy", "agent", "document"] = "legacy"
+    translate_engine: Literal["legacy", "document"] = "legacy"
     translate_provider: str = "openai"
     translate_api_key: str | None = None
     translate_base_url: str | None = None
@@ -797,83 +797,6 @@ async def process_subtitle(req: SubtitleRequest):
                 progress=100,
             )
 
-        if req.translate_engine == "agent":
-            # Durable agent translation
-            if req.translate_provider not in ("openai", "deepl", "mock"):
-                raise HTTPException(
-                    status_code=400,
-                    detail="Invalid agent model, credentials, or worker configuration",
-                )
-
-            agent_client = AgentWorkerClient()
-            try:
-                job_res = await agent_client.submit_or_attach(
-                    cues=cues,
-                    video_id=meta["video_id"],
-                    title=meta["title"],
-                    from_lang=meta["from_lang"],
-                    to_lang=to_lang,
-                    segmentation=req.segmentation,
-                    provider=req.translate_provider,
-                    model=req.translate_model or "gpt-4o",
-                    base_url=req.translate_base_url,
-                    api_key=req.translate_api_key,
-                )
-                job_id = job_res.get("job_id")
-                # Wait for job completion via snapshot polling
-                snapshot = None
-                for _ in range(60):
-                    snapshot = await agent_client.get_job(job_id)
-                    if snapshot.get("status") in ("succeeded", "partial", "failed", "budget_exceeded"):
-                        break
-                    await asyncio.sleep(0.5)
-
-                pub_map = {c["cue_id"]: c.get("translation", "") for c in snapshot.get("published_cues", [])}
-                failed_set = set(snapshot.get("failed_cues", []))
-
-                result_cues = []
-                for idx, c in enumerate(cues):
-                    cue_id = c.get("cue_id") or f"c{idx}"
-                    tr = pub_map.get(cue_id, "")
-                    result_cues.append(SubtitleCue(
-                        start=c["start"],
-                        end=c["end"],
-                        text=c["text"],
-                        translation=tr,
-                        cue_id=cue_id,
-                    ))
-
-                total = len(cues)
-                failed_count = len(failed_set)
-                if not failed_count and snapshot.get("status") == "budget_exceeded":
-                    failed_count = sum(1 for c in result_cues if not c.translation)
-
-                if failed_count == 0:
-                    status = "succeeded"
-                elif failed_count < total:
-                    status = "partial"
-                else:
-                    status = "failed"
-
-                progress = int(((total - failed_count) / max(1, total)) * 100)
-
-                return SubtitleResponse(
-                    video_id=meta["video_id"],
-                    title=meta["title"],
-                    from_lang=meta["from_lang"],
-                    to_lang=to_lang,
-                    segmentation=req.segmentation,
-                    source=meta["source"],
-                    cues=result_cues,
-                    translation_status=status,
-                    failed_cues=failed_count,
-                    progress=progress,
-                    job_id=job_id,
-                )
-            except AgentWorkerError as exc:
-                logger.error("Agent worker failed: %s", exc)
-                raise HTTPException(status_code=503, detail=f"Agent translation service unavailable: {exc}")
-
         # Legacy translation path
         strategy = "rest-whole-v1" if req.translate_whole else "rest-batch-v1"
         profile, cached_cues = _cached_translation(
@@ -983,14 +906,9 @@ async def process_subtitle_stream(req: SubtitleRequest):
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    if req.translate_engine in ("agent", "document"):
-        if req.translate_engine == "document" and req.translate_provider != "openai":
+    if req.translate_engine == "document":
+        if req.translate_provider != "openai":
             raise HTTPException(status_code=422, detail="全文高质量模式需要 OpenAI-compatible 模型，不支持逐句 DeepL 翻译")
-        if req.translate_provider not in ("openai", "deepl", "mock"):
-            raise HTTPException(
-                status_code=400,
-                detail="Invalid agent model, credentials, or worker configuration",
-            )
         agent_client = AgentWorkerClient()
         try:
             job_res = await agent_client.submit_or_attach(
@@ -1207,7 +1125,7 @@ async def ws_subtitle_process(ws: WebSocket):
     })
 
     if to_lang and cues:
-        if req.translate_engine in ("agent", "document"):
+        if req.translate_engine == "document":
             agent_client = AgentWorkerClient()
             try:
                 job_res = await agent_client.submit_or_attach(

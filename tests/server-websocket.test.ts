@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { trustModelEndpoint } from "./support/model-endpoint.js";
+import { sendModelJson } from "./support/model-stream.js";
 import http from "node:http";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -34,7 +35,7 @@ describe("WebSocket Subtitle Processing Endpoint (/ws/subtitle/process)", () => 
         const payload = JSON.parse(raw);
 
         // SSE Streaming branch for legacy cue_chunk tests
-        if (payload.stream) {
+        if (payload.stream && !payload.tools?.length) {
           res.setHeader("Content-Type", "text/event-stream");
           res.setHeader("Cache-Control", "no-cache");
           res.writeHead(200);
@@ -49,7 +50,7 @@ describe("WebSocket Subtitle Processing Endpoint (/ws/subtitle/process)", () => 
           return;
         }
 
-        // Non-streaming branch for document translation operations
+        // pi streaming branch for document translation operations with tools
         const userMsg = payload.messages?.find((m: any) => m.role === "user")?.content;
         const request = JSON.parse(userMsg);
         const cues = (request.data as { source?: { cue_id: string; start: number; end: number }[] })?.source || [];
@@ -86,8 +87,8 @@ describe("WebSocket Subtitle Processing Endpoint (/ws/subtitle/process)", () => 
             answer = { summary: "Test summary", glossary: [] };
         }
 
-        res.setHeader("Content-Type", "application/json");
-        res.end(JSON.stringify({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify(answer) } }] }));
+        assert.equal(payload.stream, true);
+        sendModelJson(res, answer);
       } catch (err: any) {
         res.writeHead(500);
         res.end(String(err));

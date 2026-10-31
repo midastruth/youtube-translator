@@ -69,7 +69,7 @@ export const DocumentTranslationTask = defineTask<DocumentInput, Checkpoint, Tas
         if (runtime.signal.aborted) return;
         const message = (error instanceof Error ? error.message : "Document translation failed").slice(0, 2000);
         const terminal = error instanceof DocumentPermanentError ||
-          (error instanceof DocumentModelError && error.status >= 400 && error.status < 500 && error.status !== 429);
+          (error instanceof DocumentModelError && error.status >= 400 && error.status < 500 && ![429, 499].includes(error.status));
         if (!terminal && checkpoint.failures < 2) {
           if (error instanceof DocumentModelError) await runtime.sleep(runtime.now() + error.retryAfterMs * (checkpoint.failures + 1), context);
           await runtime.commit(async () => ({

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { trustModelEndpoint } from "./support/model-endpoint.js";
+import { sendModelJson } from "./support/model-stream.js";
 import http from "node:http";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -393,8 +394,8 @@ describe("Server API Endpoints & Gateway Integration", () => {
         case "final_audit": answer = { passed: true, guidance: "Final guidance" }; break;
         default: throw new Error(`Unexpected operation: ${request.operation}`);
       }
-      res.setHeader("Content-Type", "application/json");
-      res.end(JSON.stringify({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify(answer) } }] }));
+      assert.equal(payload.stream, true);
+      sendModelJson(res, answer);
     });
 
     await new Promise<void>(resolve => modelServer.listen(0, "127.0.0.1", resolve));

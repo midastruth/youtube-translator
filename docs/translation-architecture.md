@@ -25,7 +25,7 @@ flowchart TD
     
     Q -->|document：默认全文高质量| DW[进程内直连 AgentWorker]
     DW <--> DB[(SQLite：任务检查点与笔记)]
-    DW <--> LLM[真实大模型 API：ChatCompletions + Tools]
+    DW <--> LLM[pi-ai 流式调用：ChatCompletions SSE + Tools]
     
     Q -->|legacy：快速模式| L[server/src/translate.ts 快速翻译调度]
     L <--> API[OpenAI-compatible / DeepL API]
@@ -81,7 +81,7 @@ flowchart TD
 
 ### A. 全文高质量工作流 (`document` 模式)
 - **实现位置**：`worker/document-translation.ts`、`worker/document-task.ts` 与 `worker/document-stream.ts`。
-- **驱动引擎**：**真实大语言模型**（如 GPT-4o），必须支持 JSON Object 输出与 Function Calling。
+- **驱动引擎**：使用与 pi 相同的 `pi-ai` 流式适配器调用**真实大语言模型**，要求支持 Chat Completions SSE 与 Function Calling。通过提示词要求 JSON，宿主在流完整结束后严格解析校验，不强制 `response_format`。单次调用总时限 10 分钟，任务可即时取消；网络重试统一由持久化任务计费预算约束。
 - **全生命周期阶段**：
   1. `analyze`：全文阅读理解、语义分析、主题/背景提取与章节规划。
   2. `consolidate`：超长视频分层归并全文摘要。

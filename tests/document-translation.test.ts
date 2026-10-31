@@ -11,6 +11,7 @@ import { AgentWorker } from "../worker/agent-worker.js";
 import { createWorkerServer } from "../worker/server.js";
 import { SubtitleJobDoc } from "../worker/task-definition.js";
 import { trustModelEndpoint } from "./support/model-endpoint.js";
+import { endModelStream, modelChunk, sendModelJson } from "./support/model-stream.js";
 
 const cues = [
   { cue_id: "a", start: 123, end: 1200, text: "The transaction was rejected." },
@@ -139,16 +140,18 @@ test("read-only retrieval finds a definition anywhere and cannot read host files
   assert.deepEqual(chapterCues(cues, { start_id: "a", end_id: "b", title: "all" }), cues);
 });
 
-async function fixture(handler: (request: ModelRequest, authorization: string | undefined) => Promise<unknown>) {
+async function fixture(handler: (request: ModelRequest, authorization: string | undefined) => Promise<unknown>, failures: number[] = []) {
   const server = http.createServer(async (req, res) => {
     let body = ""; for await (const chunk of req) body += chunk;
     const payload = JSON.parse(body);
     try {
+      assert.equal(payload.stream, true);
+      assert.equal(payload.response_format, undefined);
+      if (failures.length) { res.writeHead(failures.shift()!); res.end("private transient provider error"); return; }
       const request = JSON.parse(payload.messages.find((m: { role: string }) => m.role === "user").content);
       const answer = await handler(request, req.headers.authorization);
       if (answer === "unauthorized") { res.writeHead(401); res.end("private provider body"); return; }
-      res.setHeader("Content-Type", "application/json");
-      res.end(JSON.stringify({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify(answer) } }] }));
+      sendModelJson(res, answer);
     } catch { res.writeHead(500); res.end(); }
   });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
@@ -323,13 +326,17 @@ test("model tool calls retrieve distant context with a per-turn budget and no fi
   const server = http.createServer(async (req, res) => {
     let body = ""; for await (const chunk of req) body += chunk;
     const payload = JSON.parse(body); turns++;
+    assert.equal(payload.stream, true);
     assert.deepEqual(payload.tools.map((t: { function: { name: string } }) => t.function.name), ["read_transcript", "search_transcript"]);
-    const message = turns === 1 ? { content: null, tool_calls: [{ id: "lookup", type: "function", function: { name: "search_transcript", arguments: JSON.stringify({ query: "not a payment" }) } }] } : { content: JSON.stringify({ found: true }) };
-    if (turns === 2) {
+    if (turns === 1) {
+      modelChunk(res, { tool_calls: [{ index: 0, id: "lookup", type: "function", function: { name: "search_transcript", arguments: '{"query":"not' } }] });
+      modelChunk(res, { tool_calls: [{ index: 0, function: { arguments: ' a payment"}' } }] });
+      endModelStream(res, "tool_calls");
+    } else {
       const tool = payload.messages.find((m: { role: string }) => m.role === "tool");
       assert.match(tool.content, /not a payment/);
+      sendModelJson(res, { found: true });
     }
-    res.end(JSON.stringify({ choices: [{ finish_reason: turns === 1 ? "tool_calls" : "stop", message }] }));
   });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   const address = server.address(); assert.ok(address && typeof address !== "string");
@@ -339,6 +346,39 @@ test("model tool calls retrieve distant context with a per-turn budget and no fi
     const answer = await callDocumentModel(document, initialDocumentState(document), { operation: "test", instructions: "Find the term definition", data: {} }, { apiKey: "key", reserve: async () => { reservations++; } });
     assert.deepEqual(answer, { found: true }); assert.equal(reservations, 2);
   } finally { restoreEndpoint(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
+});
+
+test("transient 499 and 502 retry through the durable budget before reviewed publication", { timeout: 15000 }, async () => {
+  const failures = [499, 502]; let calls = 0;
+  const model = await fixture(async request => { calls++; return result(request); }, failures);
+  const directory = await fs.mkdtemp("./tmp/document-transient-");
+  const worker = new AgentWorker({ storagePath: `${directory}/db` });
+  try {
+    await worker.start();
+    const job = await worker.submitOrAttachJob({ engine: "document", cues, baseUrl: model.url, apiKey: "key" });
+    await job.taskPromise;
+    assert.equal(job.status, "succeeded"); assert.equal(failures.length, 0);
+    const doc = await worker.harness!.snapshot(SubtitleJobDoc, job.conversationId, worker.context);
+    assert.equal(doc?.network_attempts, calls + 2);
+    assert.equal(job.finalResult?.cues.length, cues.length);
+    assert.equal(JSON.stringify(doc).includes("private transient provider error"), false);
+  } finally { await worker.close(); await model.close(); await fs.rm(directory, { recursive: true, force: true }); }
+});
+
+test("persistent 499 stops after two retries and never publishes partial subtitles", { timeout: 15000 }, async () => {
+  const failures = [499, 499, 499, 499];
+  const model = await fixture(async request => result(request), failures);
+  const directory = await fs.mkdtemp("./tmp/document-persistent-");
+  const worker = new AgentWorker({ storagePath: `${directory}/db` });
+  try {
+    await worker.start();
+    const job = await worker.submitOrAttachJob({ engine: "document", cues, baseUrl: model.url, apiKey: "key" });
+    await job.taskPromise;
+    assert.equal(job.status, "failed"); assert.equal(failures.length, 1);
+    const doc = await worker.harness!.snapshot(SubtitleJobDoc, job.conversationId, worker.context);
+    assert.equal(doc?.network_attempts, 3); assert.deepEqual(doc?.published_cues, {});
+    assert.equal(doc?.error, "Model API HTTP 499");
+  } finally { await worker.close(); await model.close(); await fs.rm(directory, { recursive: true, force: true }); }
 });
 
 test("authentication failures terminate explicitly without scripted or sentence fallback", { timeout: 10000 }, async () => {

@@ -1,3 +1,6 @@
+import { normalizeContext, Type, validateToolCall } from "@earendil-works/pi-ai";
+import type { Context, Model, Tool } from "@earendil-works/pi-ai";
+import { stream } from "@earendil-works/pi-ai/api/openai-completions";
 import type { Draft, PublishedCue, SourceCue } from "./domain-types.js";
 import { validateOutputMapping } from "./validator.js";
 import { modelEndpoint } from "./model-endpoint.js";
@@ -320,9 +323,9 @@ export function documentTool(input: DocumentInput, state: DocumentState, name: s
   }
   throw new Error("Unknown document tool");
 }
-export const DOCUMENT_TOOLS = [
-  { type: "function", function: { name: "read_transcript", description: "Read source/available translation by cue ID. Use smaller counts for long cues. Returns next_id for pagination.", parameters: { type: "object", properties: { start_id: { type: "string" }, count: { type: "integer" } }, additionalProperties: false } } },
-  { type: "function", function: { name: "search_transcript", description: "Find distant uses/definitions of a term in the full source and draft. Read surrounding cues to disambiguate.", parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"], additionalProperties: false } } },
+export const DOCUMENT_TOOLS: Tool[] = [
+  { name: "read_transcript", description: "Read source/available translation by cue ID. Use smaller counts for long cues. Returns next_id for pagination.", parameters: Type.Object({ start_id: Type.Optional(Type.String()), count: Type.Optional(Type.Integer()) }, { additionalProperties: false }) },
+  { name: "search_transcript", description: "Find distant uses/definitions of a term in the full source and draft. Read surrounding cues to disambiguate.", parameters: Type.Object({ query: Type.String() }, { additionalProperties: false }) },
 ];
 
 export class DocumentModelError extends Error {
@@ -341,43 +344,67 @@ export async function callDocumentModel(input: DocumentInput, state: DocumentSta
   if (!apiKey) throw new DocumentPermanentError("configuration", "全文翻译需要 OpenAI-compatible API Key；请在扩展或 Worker 环境变量中配置");
   // Revalidate persisted inputs too: a restored job must obey current policy.
   const baseUrl = modelEndpoint(input.config.baseUrl);
-  const messages: Record<string, unknown>[] = [
-    { role: "system", content: DOCUMENT_SYSTEM_PROMPT }, { role: "user", content: JSON.stringify(request) },
-  ];
+  const model: Model<"openai-completions"> = {
+    id: input.config.model, name: input.config.model, api: "openai-completions", provider: "subtitle-model",
+    baseUrl, reasoning: false, input: ["text"], contextWindow: input.config.contextTokens,
+    maxTokens: input.config.outputTokens, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    compat: { maxTokensField: "max_tokens", supportsStore: false },
+  };
+  const context: Context = {
+    systemPrompt: DOCUMENT_SYSTEM_PROMPT, tools: DOCUMENT_TOOLS,
+    messages: [{ role: "user", content: JSON.stringify(request), timestamp: Date.now() }],
+  };
   for (let turn = 0; turn < 8; turn++) {
-    if (tokenEstimate({ messages, tools: DOCUMENT_TOOLS }) > inputBudget(input.config)) throw new DocumentPermanentError("budget", "Retrieval conversation exceeds context budget; reduce requested context");
+    if (tokenEstimate(context) > inputBudget(input.config)) throw new DocumentPermanentError("budget", "Retrieval conversation exceeds context budget; reduce requested context");
+    options.signal?.throwIfAborted();
     await options.reserve();
-    const signal = AbortSignal.any([AbortSignal.timeout(180000), ...(options.signal ? [options.signal] : [])]);
-    const response = await fetch(`${baseUrl}/chat/completions`, {
-      method: "POST", signal, redirect: "error",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({ model: input.config.model, messages, tools: DOCUMENT_TOOLS, response_format: { type: "json_object" }, temperature: 0.1, max_tokens: input.config.outputTokens }),
+    // Like pi, consume the provider's SSE stream, including fragmented tool calls.
+    // Keep a bounded ten-minute turn and propagate task cancellation immediately.
+    const signal = AbortSignal.any([AbortSignal.timeout(600000), ...(options.signal ? [options.signal] : [])]);
+    let httpError: DocumentModelError | undefined;
+    const events = stream(model, normalizeContext(context), {
+      apiKey, signal, timeoutMs: 600000, temperature: 0.1, maxTokens: input.config.outputTokens,
+      // Retries belong to the durable task so every network attempt reserves budget.
+      maxRetries: 0,
+      fetch: async (url, init) => {
+        // SDK defaults must not weaken endpoint policy or forward keys on redirects.
+        const result = await fetch(url, { ...init, redirect: "error" });
+        if (!result.ok) {
+          const retryAfter = result.headers.get("retry-after") || "";
+          const seconds = Number(retryAfter);
+          const delay = retryAfter ? (Number.isFinite(seconds) ? seconds * 1000 : Date.parse(retryAfter) - Date.now()) : 1000;
+          httpError = new DocumentModelError(result.status, Number.isFinite(delay) ? Math.min(30000, Math.max(1000, delay)) : 1000);
+        }
+        return result;
+      },
     });
-    // Never expose provider bodies, request headers, or keys in durable errors.
-    if (!response.ok) {
-      const retryAfter = response.headers.get("retry-after") || "";
-      const seconds = Number(retryAfter);
-      const delay = retryAfter ? (Number.isFinite(seconds) ? seconds * 1000 : Date.parse(retryAfter) - Date.now()) : 1000;
-      throw new DocumentModelError(response.status, Number.isFinite(delay) ? Math.min(30000, Math.max(1000, delay)) : 1000);
-    }
-    const payload = await response.json() as { choices?: { finish_reason?: string; message?: { content?: string; tool_calls?: { id: string; type: string; function: { name: string; arguments: string } }[] } }[] };
-    const choice = payload.choices?.[0];
-    if (!choice?.message || choice.finish_reason === "length") throw new Error("Model output missing or truncated; increase output limit or use smaller semantic chapters");
-    if (choice.message.tool_calls?.length) {
-      messages.push({ role: "assistant", ...choice.message });
-      if (choice.message.tool_calls.length > 8) throw new Error("Too many context retrieval calls");
-      for (const tool of choice.message.tool_calls) {
-        let result: unknown;
-        try { result = documentTool(input, state, tool.function.name, JSON.parse(tool.function.arguments)); }
-        // Tool-call boundary: invalid model arguments are returned to the model
-        // as an explicit tool error so it can repair the request.
-        catch { result = { error: "Invalid retrieval request; check tool name, range and result size" }; }
-        messages.push({ role: "tool", tool_call_id: tool.id, content: JSON.stringify(result) });
+    // Drain updates without publishing unreviewed text or buffering every delta.
+    for await (const _event of events) { /* Final output is validated below. */ }
+    const response = await events.result();
+    // pi returns failures as messages, not rejected promises. Never parse partial
+    // output or persist its raw errorMessage: provider bodies may contain secrets.
+    options.signal?.throwIfAborted();
+    if (httpError) throw httpError;
+    if (signal.aborted) throw new Error("Model API request timed out after 600s");
+    if (response.stopReason === "error" || response.stopReason === "aborted") throw new Error("Model API stream failed or ended prematurely");
+    if (response.stopReason === "length") throw new Error("Model output missing or truncated; increase output limit or use smaller semantic chapters");
+    const toolCalls = response.content.filter(block => block.type === "toolCall");
+    if (toolCalls.length) {
+      context.messages.push(response);
+      if (toolCalls.length > 8) throw new Error("Too many context retrieval calls");
+      for (const tool of toolCalls) {
+        let result: unknown, isError = false;
+        try { result = documentTool(input, state, tool.name, validateToolCall(DOCUMENT_TOOLS, tool)); }
+        // Invalid tool arguments are returned to the model for bounded repair.
+        catch { result = { error: "Invalid retrieval request; check tool name, range and result size" }; isError = true; }
+        context.messages.push({ role: "toolResult", toolCallId: tool.id, toolName: tool.name,
+          content: [{ type: "text", text: JSON.stringify(result) }], isError, timestamp: Date.now() });
       }
       continue;
     }
-    // Parsing failures propagate to the durable task's bounded repair boundary.
-    return JSON.parse(choice.message.content || "");
+    // Require a complete JSON object through prompts and host-side validation,
+    // rather than forcing response_format on otherwise compatible pi endpoints.
+    return JSON.parse(response.content.filter(block => block.type === "text").map(block => block.text).join(""));
   }
   throw new Error("Context retrieval exceeded eight model turns");
 }

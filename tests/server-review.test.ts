@@ -11,6 +11,7 @@ import { AgentWorker } from "../worker/agent-worker.js";
 import type { ModelRequest } from "../worker/document-translation.js";
 import { WhisperClient, type WhisperClientOptions } from "../server/src/transcribe.js";
 import { trustModelEndpoint } from "./support/model-endpoint.js";
+import { sendModelJson } from "./support/model-stream.js";
 
 // Independent acceptance checks: exercise the public HTTP contract, not just module mocks.
 const source = [
@@ -235,8 +236,7 @@ test("review: public document SSE uses the real durable worker and reattaches wi
         case "final_audit": answer = { passed: true, guidance: "Consistent database terminology." }; break;
         default: throw new Error(`Unexpected model operation ${request.operation}`);
       }
-      res.setHeader("Content-Type", "application/json");
-      res.end(JSON.stringify({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify(answer) } }] }));
+      sendModelJson(res, answer);
     } catch (err) {
       res.writeHead(500); res.end(String(err));
     }

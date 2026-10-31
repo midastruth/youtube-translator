@@ -134,7 +134,8 @@ make build-extension
 ### 翻译模式区分
 
 1. **全文高质量模式 (document)**：
-   - **真实大模型驱动**：需要支持 Chat Completions、`response_format: json_object` 与 function tools 的 OpenAI-compatible 模型（如 `gpt-4o`）。
+   - **真实大模型驱动**：使用与 pi 相同的 `pi-ai` Chat Completions 流式调用，需要支持 SSE 与 function tools 的 OpenAI-compatible 模型；不强制端点支持 `response_format`，JSON 结果由宿主严格校验。
+   - **连接与重试**：单次模型调用最多 10 分钟，显式取消会立即中断；临时 HTTP 499、429 与 5xx 错误由持久化任务最多重试两次，每次计入调用预算。模型流式接收不等于提前发布字幕，全部审校通过后仍统一发布。
    - **文档级全局理解**：先读取完整字幕，提取全文主题、意图与跨句术语。
    - **语义章节与长文本覆盖**：输入与预计输出均可容纳时合并为全文翻译；超出容量时按语义章节划分并共享全文理解。
    - **双语审校与一致性审计**：在发布前结合全文背景进行双语审校与有限语义修订，全部通过后原子发布。

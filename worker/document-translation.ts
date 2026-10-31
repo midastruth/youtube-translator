@@ -13,7 +13,12 @@ export class DocumentPermanentError extends Error {
 }
 
 export const DOCUMENT_WORKFLOW_VERSION = "document-v1";
-export type ModelConfig = { model: string; baseUrl: string; contextTokens: number; outputTokens: number };
+export type ReasoningEffort = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+export type ModelConfig = {
+  model: string; baseUrl: string; contextTokens: number; outputTokens: number;
+  // Optional for checkpoints created before reasoning was configurable.
+  reasoningEffort?: ReasoningEffort;
+};
 export type DocumentInput = {
   jobId: string; jobKey: string; videoId: string; title: string; fromLang: string; toLang: string;
   cues: SourceCue[]; config: ModelConfig; budgetLimit: number;
@@ -40,12 +45,19 @@ export function inputBudget(config: ModelConfig) {
   return Math.floor(config.contextTokens * 0.8) - config.outputTokens - 1500;
 }
 export function outputBudget(config: ModelConfig) { return Math.floor(config.outputTokens * 0.7); }
+function parseReasoningEffort(value: unknown): ReasoningEffort {
+  if (!["off", "minimal", "low", "medium", "high", "xhigh"].includes(value as string)) {
+    throw new DocumentPermanentError("configuration", "Invalid TRANSLATION_REASONING_EFFORT; use off, minimal, low, medium, high or xhigh");
+  }
+  return value as ReasoningEffort;
+}
 export function modelConfig(options: Partial<ModelConfig> = {}): ModelConfig {
   const config = {
     model: options.model || process.env.TRANSLATION_AGENT_MODEL || "sol",
     baseUrl: modelEndpoint(options.baseUrl),
     contextTokens: options.contextTokens ?? Number(process.env.TRANSLATION_CONTEXT_TOKENS || 128000),
     outputTokens: options.outputTokens ?? Number(process.env.TRANSLATION_OUTPUT_TOKENS || 16384),
+    reasoningEffort: parseReasoningEffort(options.reasoningEffort ?? (process.env.TRANSLATION_REASONING_EFFORT || "off")),
   };
   if (!Number.isSafeInteger(config.contextTokens) || !Number.isSafeInteger(config.outputTokens) ||
       config.outputTokens < 512 || inputBudget(config) < 1024) throw new Error("Invalid model context/output token limits");
@@ -363,11 +375,18 @@ export async function callDocumentTurn(input: DocumentInput, context: Context, o
   if (!apiKey) throw new DocumentPermanentError("configuration", "全文翻译需要 OpenAI-compatible API Key；请在扩展或 Worker 环境变量中配置");
   // Revalidate persisted inputs too: a restored job must obey current policy.
   const baseUrl = modelEndpoint(input.config.baseUrl);
+  // Use the persisted setting, not a possibly changed deployment environment.
+  // Old checkpoints keep their original non-reasoning request format.
+  const effort = parseReasoningEffort(input.config.reasoningEffort ?? "off");
+  const reasoning = effort !== "off";
   const model: Model<"openai-completions"> = {
     id: input.config.model, name: input.config.model, api: "openai-completions", provider: "subtitle-model",
-    baseUrl, reasoning: false, input: ["text"], contextWindow: input.config.contextTokens,
+    baseUrl, reasoning, input: ["text"], contextWindow: input.config.contextTokens,
     maxTokens: input.config.outputTokens, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    compat: { maxTokensField: "max_tokens", supportsStore: false },
+    compat: {
+      maxTokensField: reasoning ? "max_completion_tokens" : "max_tokens", supportsStore: false,
+      ...(reasoning ? { thinkingFormat: "openai", supportsReasoningEffort: true } : {}),
+    },
   };
   if (tokenEstimate(context) > inputBudget(input.config)) throw new DocumentPermanentError("budget", "Conversation exceeds context budget; reduce requested context");
   options.signal?.throwIfAborted();
@@ -377,7 +396,10 @@ export async function callDocumentTurn(input: DocumentInput, context: Context, o
   let httpError: DocumentModelError | undefined;
   let transportError: DocumentStreamError | undefined;
   const events = stream(model, normalizeContext(context), {
-    apiKey, signal, timeoutMs: 600000, temperature: 0.1, maxTokens: input.config.outputTokens,
+    apiKey, signal, timeoutMs: 600000, maxTokens: input.config.outputTokens,
+    // Let pi-ai serialize OpenAI's reasoning_effort. Reasoning models may reject
+    // custom temperatures; their completion cap includes hidden reasoning tokens.
+    ...(effort === "off" ? { temperature: 0.1 } : { reasoningEffort: effort }),
     // Retries belong to the durable task so every network attempt reserves budget.
     maxRetries: 0,
     fetch: async (url, init) => {

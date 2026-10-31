@@ -46,6 +46,32 @@ test("agent defaults to sol while explicit model and deployment configuration ta
   }
 });
 
+test("reasoning configuration defaults off, validates levels and snapshots deployment settings", () => {
+  const previous = process.env.TRANSLATION_REASONING_EFFORT;
+  try {
+    delete process.env.TRANSLATION_REASONING_EFFORT;
+    assert.equal(modelConfig().reasoningEffort, "off");
+    process.env.TRANSLATION_REASONING_EFFORT = "medium";
+    const config = modelConfig();
+    assert.equal(config.reasoningEffort, "medium");
+    assert.equal(modelConfig({ reasoningEffort: "off" }).reasoningEffort, "off");
+    assert.equal(modelConfig({ reasoningEffort: "high" }).reasoningEffort, "high");
+    process.env.TRANSLATION_REASONING_EFFORT = "low";
+    assert.equal(config.reasoningEffort, "medium");
+    assert.equal(modelConfig(config).reasoningEffort, "medium");
+    process.env.TRANSLATION_REASONING_EFFORT = "invalid-private-value";
+    assert.throws(() => modelConfig(), error => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /Invalid TRANSLATION_REASONING_EFFORT/);
+      assert.doesNotMatch(error.message, /invalid-private-value/);
+      return true;
+    });
+  } finally {
+    if (previous === undefined) delete process.env.TRANSLATION_REASONING_EFFORT;
+    else process.env.TRANSLATION_REASONING_EFFORT = previous;
+  }
+});
+
 test("agent workspace reads paginated immutable timed source and searches later definitions", () => {
   const document = input(), state = initialSubtitleAgentState(document);
   const page = subtitleAgentTool(document, state, "read_file", { path: "source.json", count: 1 }) as { content: string; next_offset: number };
@@ -230,6 +256,48 @@ test("default document job edits a workspace, self-checks then publishes atomica
   for (const name of await fs.readdir(f.directory)) if (name.startsWith("state.db")) {
     assert.equal((await fs.readFile(`${f.directory}/${name}`)).includes(Buffer.from(f.jobOptions.apiKey)), false);
   }
+});
+
+test("reasoning effort is stable across agent turns, separates cache keys and survives restart", { timeout: 15000 }, async t => {
+  const previous = process.env.TRANSLATION_REASONING_EFFORT;
+  t.after(() => {
+    if (previous === undefined) delete process.env.TRANSLATION_REASONING_EFFORT;
+    else process.env.TRANSLATION_REASONING_EFFORT = previous;
+  });
+  process.env.TRANSLATION_REASONING_EFFORT = "high";
+  const f = await fixture(t);
+  const high = await f.worker.submitOrAttachJob(f.jobOptions);
+  process.env.TRANSLATION_REASONING_EFFORT = "off";
+  await high.taskPromise;
+  assert.equal(high.status, "succeeded");
+  assert.ok(f.requests.length > 1);
+  for (const request of f.requests) {
+    const payload = request as unknown as Record<string, unknown>;
+    assert.equal(payload.reasoning_effort, "high");
+    assert.equal(payload.max_completion_tokens, 16384);
+    assert.equal(payload.temperature, undefined);
+  }
+  const highCalls = f.requests.length;
+  const off = await f.worker.submitOrAttachJob(f.jobOptions); await off.taskPromise;
+  assert.equal(off.status, "succeeded");
+  assert.notEqual(off.jobKey, high.jobKey);
+  for (const request of f.requests.slice(highCalls)) {
+    const payload = request as unknown as Record<string, unknown>;
+    assert.equal(payload.reasoning_effort, undefined);
+    assert.equal(payload.max_tokens, 16384);
+  }
+  process.env.TRANSLATION_REASONING_EFFORT = "medium";
+  const medium = await f.worker.submitOrAttachJob(f.jobOptions); await medium.taskPromise;
+  assert.equal(medium.status, "succeeded");
+  assert.notEqual(medium.jobKey, high.jobKey);
+  assert.notEqual(medium.jobKey, off.jobKey);
+  const calls = f.requests.length;
+  await f.restart();
+  process.env.TRANSLATION_REASONING_EFFORT = "high";
+  const restored = await f.worker.submitOrAttachJob(f.jobOptions);
+  assert.equal(restored.jobId, high.jobId);
+  assert.equal(restored.status, "succeeded");
+  assert.equal(f.requests.length, calls);
 });
 
 test("restart resumes committed edits and tool conversation without repeating the write; browser credentials reattach", { timeout: 15000 }, async t => {

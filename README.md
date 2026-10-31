@@ -109,6 +109,26 @@ Cookie 文件仅限本机使用，不要提交到 Git；YouTube Cookie 失效后
 
 如果仍只有旧版 `failed or ended prematurely` 提示，请更新并重启服务端；排查时提供错误分类、API 基础地址和模型名，**不要提供 API Key 或带密钥的日志**。
 
+### OpenAI 推理模式（字幕编辑 Agent）
+
+使用项目现有的 `pi-ai` Chat Completions 调用，在 `.env` 中配置：
+
+```env
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_API_KEY=你的密钥
+TRANSLATION_AGENT_MODEL=gpt-5-mini
+TRANSLATION_REASONING_EFFORT=medium
+TRANSLATION_OUTPUT_TOKENS=16384
+```
+
+- 扩展中选择「字幕编辑 Agent」模式；如扩展显式指定了模型，请同步改为所需的推理模型。
+- `TRANSLATION_REASONING_EFFORT` 支持 `off`（默认）、`minimal`、`low`、`medium`、`high`、`xhigh`；具体档位必须由所选模型支持，建议先用 `medium`。`off` 表示不发送推理强度参数，**不保证关闭上游模型默认的推理**。
+- 开启后由 `pi-ai` 发送 `reasoning_effort`，使用 `max_completion_tokens` 并省略自定义 `temperature`。输出上限包含隐藏推理 Token 和可见输出；如果出现截断，可提高 `TRANSLATION_OUTPUT_TOKENS`，同时确保上下文预算充足。
+- 推理强度会随任务持久化并参与缓存键；修改配置不会改变已运行任务的调用方式。历史任务保持原有请求格式；不保存或展示推理内容。此配置不作用于快速模式。
+- 以上针对 OpenAI Chat Completions；其他兼容接口须支持相同参数。OpenAI 的内部推理不会通过此接口返回，无需为多轮工具调用回传 `reasoning_content`。
+
+本地修改后重启 `npm start`；Docker 部署修改后执行 `docker compose up -d --build --force-recreate server`。
+
 ### 浏览器字幕兜底
 
 若服务端 yt-dlp 被拦截或找不到可用字幕轨道，浏览器扩展会自动读取 YouTube 播放器自身已加载的字幕（json3，保留逐词时间戳），上传给服务端走同样的断句与翻译流程。该兜底只在服务端无法提供轨道时启用，不会将浏览器的敏感 Cookie 发给服务端。

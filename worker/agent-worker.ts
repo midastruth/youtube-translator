@@ -325,7 +325,11 @@ export class AgentWorker {
       videoId: options.videoId, sourceCues: cues, fromLang: options.fromLang, toLang: options.toLang,
       segmentationVersion: options.segmentation, engine: "document", provider: "openai", model: config.model, baseUrl: config.baseUrl,
       workflowVersion: SUBTITLE_AGENT_VERSION, promptVersion: SUBTITLE_AGENT_VERSION, reviewVersion: SUBTITLE_AGENT_VERSION,
-      styleConfig: JSON.stringify({ context: config.contextTokens, output: config.outputTokens, title: options.title || "" }),
+      styleConfig: JSON.stringify({
+        context: config.contextTokens, output: config.outputTokens, title: options.title || "",
+        // Preserve existing cache keys when reasoning is not explicitly enabled.
+        ...(config.reasoningEffort !== "off" ? { reasoningEffort: config.reasoningEffort } : {}),
+      }),
     });
     if (options.apiKey) documentCredentials.set(jobKey, options.apiKey);
     if (this.pendingJobs.has(jobKey)) return this.pendingJobs.get(jobKey)!;

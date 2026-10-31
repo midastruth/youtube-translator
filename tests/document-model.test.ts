@@ -3,11 +3,11 @@ import http from "node:http";
 import { test, type TestContext } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { callDocumentModel, DocumentModelError, DocumentStreamError, initialDocumentState, modelConfig } from "../worker/document-translation.js";
-import type { DocumentInput } from "../worker/document-translation.js";
+import type { DocumentInput, ModelConfig, ReasoningEffort } from "../worker/document-translation.js";
 import { trustModelEndpoint } from "./support/model-endpoint.js";
 import { endModelStream, modelChunk, sendModelJson } from "./support/model-stream.js";
 
-async function endpoint(t: TestContext, handler: http.RequestListener) {
+async function endpoint(t: TestContext, handler: http.RequestListener, config: Partial<ModelConfig> = {}) {
   const server = http.createServer(handler);
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   const address = server.address(); assert.ok(address && typeof address !== "string");
@@ -21,11 +21,11 @@ async function endpoint(t: TestContext, handler: http.RequestListener) {
     jobId: "stream-test", jobKey: "stream-key", videoId: "video", title: "Database",
     fromLang: "en", toLang: "zh-CN", budgetLimit: 10,
     cues: [{ cue_id: "a", start: 0, end: 1000, text: "A database transaction." }],
-    config: modelConfig({ model: "same-pi-model", baseUrl: url }),
+    config: modelConfig({ model: "same-pi-model", baseUrl: url, reasoningEffort: "off", ...config }),
   };
   let reservations = 0;
   return {
-    url,
+    url, input,
     reservations: () => reservations,
     call: (signal?: AbortSignal) => callDocumentModel(input, initialDocumentState(input), {
       operation: "test", instructions: "Return JSON", data: {},
@@ -51,6 +51,8 @@ test("pi transport streams without response_format and waits for complete JSON b
     assert.equal(payload.stream, true);
     assert.equal(payload.max_tokens, 16384);
     assert.equal(payload.temperature, 0.1);
+    assert.equal(payload.reasoning_effort, undefined);
+    assert.equal(payload.max_completion_tokens, undefined);
     assert.equal(payload.response_format, undefined);
     assert.match(payload.messages[0].content, /untrusted task data/);
     modelChunk(res, { reasoning_content: "Private reasoning is not JSON output." });
@@ -71,6 +73,59 @@ test("pi transport streams without response_format and waits for complete JSON b
   release();
   assert.deepEqual(await pending, { translation: "事务完成" });
   assert.equal(model.reservations(), 1);
+});
+
+test("pi reasoning options produce OpenAI-compatible payloads and keep reasoning out of JSON output", { timeout: 10000 }, async t => {
+  for (const effort of ["minimal", "low", "medium", "high", "xhigh"] as const) {
+    await t.test(effort, async t => {
+      const model = await endpoint(t, async (req, res) => {
+        const payload = await body(req);
+        assert.equal(payload.reasoning_effort, effort);
+        assert.equal(payload.max_completion_tokens, 16384);
+        assert.equal(payload.max_tokens, undefined);
+        assert.equal(payload.temperature, undefined);
+        assert.equal(payload.stream, true);
+        assert.ok(payload.tools.length > 0);
+        modelChunk(res, { reasoning_content: "Private reasoning, not part of the translation." });
+        sendModelJson(res, { translation: "事务完成" });
+      }, { reasoningEffort: effort });
+      assert.deepEqual(await model.call(), { translation: "事务完成" });
+      assert.equal(model.reservations(), 1);
+    });
+  }
+});
+
+test("old checkpoints do not adopt newly enabled deployment reasoning", { timeout: 5000 }, async t => {
+  const previous = process.env.TRANSLATION_REASONING_EFFORT;
+  t.after(() => {
+    if (previous === undefined) delete process.env.TRANSLATION_REASONING_EFFORT;
+    else process.env.TRANSLATION_REASONING_EFFORT = previous;
+  });
+  const model = await endpoint(t, async (req, res) => {
+    const payload = await body(req);
+    assert.equal(payload.reasoning_effort, undefined);
+    assert.equal(payload.max_completion_tokens, undefined);
+    assert.equal(payload.max_tokens, 16384);
+    assert.equal(payload.temperature, 0.1);
+    sendModelJson(res, { restored: true });
+  });
+  delete model.input.config.reasoningEffort;
+  process.env.TRANSLATION_REASONING_EFFORT = "high";
+  assert.deepEqual(await model.call(), { restored: true });
+});
+
+test("invalid persisted reasoning settings fail before model I/O or budget reservation", async t => {
+  let hits = 0;
+  const model = await endpoint(t, async (_req, res) => { hits++; sendModelJson(res, {}); });
+  model.input.config.reasoningEffort = "invalid-private-value" as ReasoningEffort;
+  await assert.rejects(model.call(), error => {
+    assert.ok(error instanceof Error);
+    assert.match(error.message, /Invalid TRANSLATION_REASONING_EFFORT/);
+    assert.doesNotMatch(error.message, /invalid-private-value/);
+    return true;
+  });
+  assert.equal(hits, 0);
+  assert.equal(model.reservations(), 0);
 });
 
 test("a stream ending without finish_reason rejects even syntactically complete JSON", { timeout: 5000 }, async t => {
@@ -220,10 +275,13 @@ test("pi streaming never follows redirects with credentials", { timeout: 5000 },
   assert.equal(model.reservations(), 1);
 });
 
-test("fragmented invalid tool arguments receive a scoped error and can be repaired", { timeout: 5000 }, async t => {
+test("reasoning streams support fragmented tool calls, scoped repair and multi-turn tool history", { timeout: 5000 }, async t => {
   let turns = 0;
   const model = await endpoint(t, async (req, res) => {
     const payload = await body(req); turns++;
+    assert.equal(payload.reasoning_effort, "medium");
+    assert.equal(payload.max_completion_tokens, 16384);
+    assert.equal(payload.temperature, undefined);
     if (turns === 1) {
       modelChunk(res, { tool_calls: [{ index: 0, id: "lookup", type: "function", function: { name: "search_transcript", arguments: '{"query":' } }] });
       modelChunk(res, { tool_calls: [{ index: 0, function: { arguments: "{}}" } }] });
@@ -235,7 +293,7 @@ test("fragmented invalid tool arguments receive a scoped error and can be repair
       assert.doesNotMatch(tool.content, /ephemeral-key/);
       sendModelJson(res, { repaired: true });
     }
-  });
+  }, { reasoningEffort: "medium" });
   assert.deepEqual(await model.call(), { repaired: true });
   assert.equal(turns, 2); assert.equal(model.reservations(), 2);
 });

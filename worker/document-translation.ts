@@ -4,6 +4,7 @@ import { stream } from "@earendil-works/pi-ai/api/openai-completions";
 import type { Draft, PublishedCue, SourceCue } from "./domain-types.js";
 import { validateOutputMapping } from "./validator.js";
 import { modelEndpoint } from "./model-endpoint.js";
+import { createHash } from "node:crypto";
 
 export class DocumentPermanentError extends Error {
   readonly code: "configuration" | "budget" | "convergence";
@@ -373,7 +374,12 @@ export class DocumentStreamError extends Error {
   }
 }
 
-export type ModelCallOptions = { apiKey?: string; signal?: AbortSignal; reserve: () => Promise<void> };
+export type ModelCallOptions = { apiKey?: string; signal?: AbortSignal; reserve: () => Promise<void>; cacheKey?: string };
+
+/** Stable per job+agent, at most 64 chars (OpenAI prompt_cache_key limit), and reveals no job data. */
+export function promptCacheSession(input: DocumentInput, agent = "main") {
+  return `st-${createHash("sha256").update(`${input.jobKey}\0${agent}`).digest("hex").slice(0, 40)}`;
+}
 
 /** One complete, budgeted provider turn. The caller owns tools and durable conversation state. */
 export async function callDocumentTurn(input: DocumentInput, context: Context, options: ModelCallOptions) {
@@ -403,6 +409,9 @@ export async function callDocumentTurn(input: DocumentInput, context: Context, o
   let transportError: DocumentStreamError | undefined;
   const events = stream(model, normalizeContext(context), {
     apiKey, signal, timeoutMs: 600000, maxTokens: input.config.outputTokens,
+    // Route every turn of one agent to the same provider cache (prompt_cache_key /
+    // session-affinity headers where pi-ai supports them for this endpoint).
+    sessionId: promptCacheSession(input, options.cacheKey),
     // Let pi-ai serialize OpenAI's reasoning_effort. Reasoning models may reject
     // custom temperatures; their completion cap includes hidden reasoning tokens.
     ...(effort === "off" ? { temperature: 0.1 } : { reasoningEffort: effort }),

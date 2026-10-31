@@ -29,7 +29,7 @@ export const DocumentResumeDoc = defineDoc<{
 export const createDocumentTask = <State extends DurableState, Request, Response>(workflow: {
   name: string;
   initial: (input: DocumentInput) => State;
-  advance: (input: DocumentInput, state: State, call: (request: Request) => Promise<Response>, control?: DocumentAdvanceControl<State>) => Promise<State>;
+  advance: (input: DocumentInput, state: State, call: (request: Request, cacheKey?: string) => Promise<Response>, control?: DocumentAdvanceControl<State>) => Promise<State>;
   call: (input: DocumentInput, state: State, request: Request, options: ModelCallOptions) => Promise<Response>;
   finalCues: (input: DocumentInput, state: State) => PublishedCue[];
   previewCues?: (input: DocumentInput, state: State) => PublishedCue[];
@@ -111,8 +111,8 @@ export const createDocumentTask = <State extends DurableState, Request, Response
         }, context);
         const wakeAt = workflow.wakeAt?.(checkpoint.document) ?? 0;
         if (wakeAt > runtime.now()) await runtime.sleep(wakeAt, context);
-        const next = await workflow.advance(input, checkpoint.document, request => workflow.call(input, checkpoint.document, request, {
-          apiKey: documentCredentials.get(input.jobKey), signal: runtime.signal,
+        const next = await workflow.advance(input, checkpoint.document, (request, cacheKey) => workflow.call(input, checkpoint.document, request, {
+          apiKey: documentCredentials.get(input.jobKey), signal: runtime.signal, cacheKey,
           reserve: async () => {
             await runtime.commit(async tx => {
               const doc = await tx.doc(SubtitleJobDoc, runtime.conversationId);

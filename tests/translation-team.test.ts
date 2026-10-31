@@ -119,6 +119,35 @@ test("nine independent children run concurrently, share brief, read global conte
   assert.deepEqual(finalTranslationTeamCues(document, state).map(c => [c.cue_id, c.start, c.end]), source.map(c => [c.cue_id, c.start, c.end]));
 });
 
+test("main and child prompts keep a stable cacheable prefix; live team status trails and agents get distinct cache keys", async () => {
+  const document = input(); let state = initialTranslationTeamState(document);
+  translationTeamTool(document, state, "dispatch_subagents", dispatch());
+  const seen = new Map<string, Context[]>();
+  const record = async (context: Context, key?: string) => {
+    seen.set(key!, [...(seen.get(key!) || []), structuredClone(context)]);
+    return response("read_context", { query: "transaction" });
+  };
+  state = await advanceTranslationTeam(document, state, record);
+  state = await advanceTranslationTeam(document, state, record);
+  assert.equal(seen.size, 9);
+  for (const [key, [first, second]] of seen) {
+    assert.match(key, /^subagent-/);
+    assert.deepEqual(second.messages.slice(0, first.messages.length - 1), first.messages.slice(0, -1));
+    assert.equal(JSON.parse((second.messages.at(-1) as { content: string }).content).type, "workspace_status");
+  }
+  // Main agent: live subagent status lives in the trailing message, not the role prefix.
+  for (const child of state.children) child.status = "completed";
+  const main: Context[] = [];
+  state = await advanceTranslationTeam(document, state, async (context, key) => { assert.equal(key, "main"); main.push(structuredClone(context)); return response("read_file", { path: "notes.md", count: 10 }); });
+  state.children[0].agent.draft = { c0: "x" };
+  state = await advanceTranslationTeam(document, state, async context => { main.push(structuredClone(context)); return response("read_file", { path: "notes.md", count: 10 }); });
+  assert.deepEqual(main[1].messages.slice(0, main[0].messages.length - 1), main[0].messages.slice(0, -1));
+  assert.doesNotMatch(JSON.stringify(main[1].messages[1]), /"status"|translated_cues/);
+  const status = JSON.parse((main[1].messages.at(-1) as { content: string }).content);
+  assert.equal(status.type, "workspace_status");
+  assert.deepEqual(status.subagents[0], { id: "subagent-1", status: "completed", translated_cues: 1 });
+});
+
 test("progress distinguishes saved drafts, submitted agents, review and publication without exposing text", () => {
   const document = input(), state = initialTranslationTeamState(document);
   assert.match(translationTeamProgress(document, state), /主 Agent 规划.*0\/9.*已完成 0 轮/);

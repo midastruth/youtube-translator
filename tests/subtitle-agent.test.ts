@@ -210,10 +210,42 @@ test("compaction preserves workspace edits, notes and revision, and resumes with
   assert.equal(state.compactions, 1); assert.deepEqual(state.messages, []);
   assert.equal(state.draft.a, "事务。"); assert.equal(state.revision, 1);
   assert.match(JSON.stringify(context.messages), /transaction=事务/);
-  assert.match(JSON.stringify(context.messages), /resumed_after_compaction/);
-  assert.match(JSON.stringify(context.messages), /first_untranslated_id/);
+  assert.match(JSON.stringify(context.messages[0]), /resumed_after_compaction/);
+  assert.match(JSON.stringify(context.messages.at(-1)), /first_untranslated_id/);
+  assert.match(JSON.stringify(context.messages.at(-1)), /transaction=事务/, "notes travel in the trailing status");
   const restored = JSON.parse(JSON.stringify(state));
   assert.deepEqual(restored.draft, state.draft);
+});
+
+test("prompt prefix is byte-stable across turns: volatile progress and notes only trail the history", async () => {
+  const document = input(); let state = initialSubtitleAgentState(document);
+  const sent: { context: ReturnType<typeof subtitleAgentContext>; key?: string }[] = [];
+  const turn = async (tools: { name: string; args: unknown }[]) => {
+    state = await advanceSubtitleAgent(document, state, async (context, key) => {
+      sent.push({ context: structuredClone(context), key });
+      return { ...assistant(tools), usage: { ...assistant().usage, input: 10, cacheRead: 90 } };
+    });
+  };
+  await turn([{ name: "read_file", args: { path: "source.json", count: 2 } }]);
+  await turn([{ name: "write_file", args: { path: "translations.json", content: '{"a":"事务被拒绝。"}' } }, { name: "write_file", args: { path: "notes.md", content: "transaction=事务" } }]);
+  await turn([{ name: "write_file", args: { path: "translations.json", content: '{"b":"数据库事务。"}', merge: true } }]);
+  for (let i = 1; i < sent.length; i++) {
+    const previous = sent[i - 1].context, current = sent[i].context;
+    assert.equal(current.systemPrompt, previous.systemPrompt);
+    assert.deepEqual(current.tools, previous.tools);
+    // Everything except the previous trailing status must be an exact prefix.
+    const stable = previous.messages.slice(0, -1);
+    assert.deepEqual(current.messages.slice(0, stable.length), stable);
+  }
+  assert.deepEqual(sent.map(s => s.context.messages.length), [2, 4, 7]);
+  assert.equal(new Set(sent.map(s => s.key)).size, 1);
+  const status = JSON.parse((sent[2].context.messages.at(-1) as { content: string }).content);
+  assert.equal(status.type, "workspace_status");
+  assert.equal(status.notes, "transaction=事务");
+  assert.equal(status.first_untranslated_id, "b");
+  assert.doesNotMatch(JSON.stringify(sent[2].context.messages.slice(0, -1).filter(m => m.role === "user")), /first_untranslated_id|translated_cues/);
+  assert.deepEqual(state.usage, { input: 30, cacheRead: 270, cacheWrite: 0 });
+  assert.equal(state.messages.some(m => m.role === "user"), false, "status is never persisted into history");
 });
 
 test("agent input rejects invalid timing, duplicate/reserved IDs and insufficient context before charging", () => {

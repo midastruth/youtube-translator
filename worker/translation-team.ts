@@ -4,7 +4,7 @@ import {
   advanceSubtitleAgent, finalSubtitleAgentCues, initialSubtitleAgentState,
   SUBTITLE_AGENT_PROMPT, SUBTITLE_AGENT_TOOLS, subtitleAgentContext, subtitleAgentTool, WorkspaceError, MAX_READ_CUES,
 } from "./subtitle-agent.js";
-import type { SubtitleAgentState } from "./subtitle-agent.js";
+import type { AgentCall, AgentHooks, SubtitleAgentState } from "./subtitle-agent.js";
 import { callDocumentTurn, DocumentModelError, DocumentPermanentError, inputBudget, parseReasoningEffort, tokenEstimate } from "./document-translation.js";
 import type { DocumentInput, ModelConfig } from "./document-translation.js";
 import { createDocumentTask } from "./document-task.js";
@@ -40,7 +40,7 @@ export type TranslationTeamState = SubtitleAgentState & {
 export const TEAM_PROMPT = `${SUBTITLE_AGENT_PROMPT}
 You are the MAIN agent coordinating a translation team, not the bulk translator.
 Quickly read representative source (opening plus later definitions) to assess subject, audience, tone, subtitle style and terminology; do not spend many turns exhaustively reading before delegation. Save useful notes. Then call dispatch_subagents with a shared style/terminology brief, a dedicated opening assignment, and 0 to 9 further contiguous, non-overlapping semantic assignments covering the REMAINDER. The opening always starts at the first source cue. Choose its end_id according to total translation volume, cue density and sentence/topic boundaries: aim for a small, quickly translatable first viewing buffer (usually 30-90 seconds, about 10-30 ordinary cues), not a large chapter. For tiny sources the opening may cover everything and assignments may be empty. Do not allocate the opening to any other child. Choose the remaining parallelism proportional to source length/complexity, at most 9. Avoid splitting sentences or dependent explanations. All children receive the same immutable brief and can read the whole source for context. Put explicit source term -> target term decisions in the brief. Assignments can be large: children paginate and translate incrementally. Historical tasks without stream_opening may still use assignments covering the whole source without opening.
-The host runs every child independently and checkpoints each completed turn; a fast child never waits for a slow sibling's turn. The opening child submits a self-checked preview for immediate viewing while other children keep translating. It is provisional, not final main-agent acceptance. The host returns control after all translations are complete. Do not translate the whole source yourself before delegation. You can inspect team status in every task manifest. After completion, read and check the actual merged translations against the source, especially boundaries, terminology, numbers and negation. Use search/edit tools to fix problems. You are responsible for semantic acceptance; structure validation alone is NOT review.
+The host runs every child independently and checkpoints each completed turn; a fast child never waits for a slow sibling's turn. The opening child submits a self-checked preview for immediate viewing while other children keep translating. It is provisional, not final main-agent acceptance. The host returns control after all translations are complete. Do not translate the whole source yourself before delegation. You can inspect live team status in the latest workspace_status message. After completion, read and check the actual merged translations against the source, especially boundaries, terminology, numbers and negation. Use search/edit tools to fix problems. You are responsible for semantic acceptance; structure validation alone is NOT review.
 After your review and corrections, call accept_translation with a concrete review summary, then close_subagents to release child sessions. Finally validate_translation and finish_translation. Any translation edit invalidates acceptance. You cannot submit until all children are completed, accepted and closed. Ordinary chat is not completion.`;
 
 export const TEAM_TOOLS: Tool[] = [
@@ -62,8 +62,7 @@ export function initialTranslationTeamState(input: DocumentInput): TranslationTe
   translationTeamModelConfig(input, "main");
   translationTeamModelConfig(input, "subagent");
   const state: TranslationTeamState = { ...initialSubtitleAgentState(input), brief: "", children: [], acceptedRevision: -1, acceptance: "" };
-  const context = teamContext(subtitleAgentContext(input, state), state, input);
-  context.tools = TEAM_TOOLS;
+  const context = subtitleAgentContext(input, state, mainHooks(input, state));
   if (tokenEstimate(context) > inputBudget(input.config)) throw new DocumentPermanentError("configuration", "Main agent instructions/tools exceed configured context budget");
   return state;
 }
@@ -128,21 +127,30 @@ export function translationTeamTool(input: DocumentInput, state: TranslationTeam
   if ((name === "write_file" || name === "edit_file") && a?.path === "translations.json" && !completed(state)) throw new WorkspaceError("Delegate translation first; edit merged translations after subagents complete");
   return subtitleAgentTool(input, state, name, args);
 }
-function teamContext(context: Context, state: TranslationTeamState, input?: DocumentInput): Context {
-  return { ...context, systemPrompt: TEAM_PROMPT, messages: [
-    ...context.messages.slice(0, 1),
-    { role: "user", timestamp: 0, content: JSON.stringify({ role: "main", shared_brief: state.brief, stream_opening: !!input?.streamOpening,
-      subagents: state.children.map(c => ({ id: c.id, kind: c.kind, start_id: c.start_id, end_id: c.end_id, instructions: c.instructions, status: c.status, translated_cues: Object.keys(c.agent.draft).length })),
-      accepted_revision: state.acceptedRevision, current_revision: state.revision, acceptance: state.acceptance,
-    }) }, ...context.messages.slice(1),
-  ] };
+// Cache layout: the role message changes only once (at dispatch); live team
+// progress is volatile and goes into the trailing workspace_status instead.
+function mainHooks(input: DocumentInput, state: TranslationTeamState): AgentHooks {
+  return {
+    tools: TEAM_TOOLS, cacheKey: "main",
+    context: context => ({ ...context, systemPrompt: TEAM_PROMPT, messages: [
+      ...context.messages.slice(0, 1),
+      { role: "user", timestamp: 0, content: JSON.stringify({ role: "main", stream_opening: !!input.streamOpening, shared_brief: state.brief,
+        subagents: state.children.map(c => ({ id: c.id, kind: c.kind, start_id: c.start_id, end_id: c.end_id, instructions: c.instructions })),
+      }) }, ...context.messages.slice(1),
+    ] }),
+    status: () => ({
+      subagents: state.children.map(c => ({ id: c.id, status: c.status, translated_cues: Object.keys(c.agent.draft).length })),
+      accepted_revision: state.acceptedRevision, acceptance: state.acceptance,
+    }),
+    tool: (s, name, args) => translationTeamTool(input, s as TranslationTeamState, name, args),
+  };
 }
 
-async function advanceChild(input: DocumentInput, state: TranslationTeamState, child: TranslationChild, call: (context: Context) => Promise<AssistantMessage>) {
+async function advanceChild(input: DocumentInput, state: TranslationTeamState, child: TranslationChild, call: AgentCall) {
   const assigned = childInput(input, child);
   try {
     const next = await advanceSubtitleAgent(assigned, child.agent, call, {
-      tools: CHILD_TOOLS,
+      tools: CHILD_TOOLS, cacheKey: child.id,
       context: context => ({ ...context, systemPrompt: `${SUBTITLE_AGENT_PROMPT}\nYou are a translation SUBAGENT. Translate ONLY your assigned source.json IDs. Follow the MAIN agent's shared style and terminology brief. Use read_context to check later definitions or surrounding sentences in the full source. Submit your own complete assignment with validate_translation and finish_translation; the MAIN agent will review it.${child.kind === "opening" ? " You are the dedicated OPENING agent: viewers are waiting for these first subtitles. Work efficiently, avoid unnecessary notes/tool turns, self-review and submit this small opening promptly. It will be shown provisionally before whole-document review." : ""}`, messages: [
         ...context.messages.slice(0, 1), { role: "user", timestamp: 0, content: JSON.stringify({ role: "subagent", id: child.id, kind: child.kind, shared_brief: state.brief, assignment: { start_id: child.start_id, end_id: child.end_id, instructions: child.instructions } }) }, ...context.messages.slice(1),
       ] }),
@@ -176,15 +184,11 @@ function updateFeedback(state: TranslationTeamState) {
 }
 
 /** Single-step driver retained for deterministic workspace tests and integrations. */
-export async function stepTranslationTeam(input: DocumentInput, previous: TranslationTeamState, call: (context: Context) => Promise<AssistantMessage>): Promise<TranslationTeamState> {
+export async function stepTranslationTeam(input: DocumentInput, previous: TranslationTeamState, call: AgentCall): Promise<TranslationTeamState> {
   const state = structuredClone(previous);
   const running = state.children.filter(c => c.status === "running");
   if (!running.length) {
-    return await advanceSubtitleAgent(input, state, call, {
-      tools: TEAM_TOOLS,
-      context: context => teamContext(context, state, input),
-      tool: (s, name, args) => translationTeamTool(input, s as TranslationTeamState, name, args),
-    }) as TranslationTeamState;
+    return await advanceSubtitleAgent(input, state, call, mainHooks(input, state)) as TranslationTeamState;
   }
   const failed = failedChild(state);
   if (failed) throw new DocumentPermanentError("convergence", `${failed.id}: ${failed.error}`);
@@ -198,7 +202,7 @@ export async function stepTranslationTeam(input: DocumentInput, previous: Transl
  * Promise.allSettled only joins the final results, never synchronizes model turns.
  * On failure/cancellation drain in-flight calls before returning to the task boundary.
  */
-export async function advanceTranslationTeam(input: DocumentInput, previous: TranslationTeamState, call: (context: Context) => Promise<AssistantMessage>, control?: DocumentAdvanceControl<TranslationTeamState>): Promise<TranslationTeamState> {
+export async function advanceTranslationTeam(input: DocumentInput, previous: TranslationTeamState, call: AgentCall, control?: DocumentAdvanceControl<TranslationTeamState>): Promise<TranslationTeamState> {
   if (!previous.children.some(c => c.status === "running")) return stepTranslationTeam(input, previous, call);
   const state = structuredClone(previous);
   let stopped = false;

@@ -5,7 +5,7 @@ import fs from "node:fs/promises";
 import type { AssistantMessage, Context, ToolCall } from "@earendil-works/pi-ai";
 import {
   advanceTranslationTeam, finalTranslationTeamCues, initialTranslationTeamState,
-  translationTeamTool, translationTeamReasoning, translationTeamModelConfig, MAX_SUBAGENTS,
+  translationTeamTool, translationTeamReasoning, translationTeamModelConfig, translationTeamProgress, MAX_SUBAGENTS,
 } from "../worker/translation-team.js";
 import { DocumentModelError, modelConfig } from "../worker/document-translation.js";
 import type { DocumentInput } from "../worker/document-translation.js";
@@ -99,6 +99,7 @@ test("nine independent children run concurrently, share brief, read global conte
   }
   state = await advanceTranslationTeam(document, state, async context => response("write_file", { path: "translations.json", content: JSON.stringify({ [manifest(context).assignment.start_id]: "事务" }) }));
   assert.deepEqual(state.draft, {}, "unsubmitted child drafts must not be merged");
+  assert.match(translationTeamProgress(document, state), /已保存草稿 9\/9（未发布），Subagent 已提交 0\/9/);
   state = await advanceTranslationTeam(document, state, async () => response("validate_translation", {}));
   state = await advanceTranslationTeam(document, state, async () => response("finish_translation", {}));
   assert.equal(Object.keys(state.draft).length, 9);
@@ -114,6 +115,34 @@ test("nine independent children run concurrently, share brief, read global conte
   translationTeamTool(document, state, "validate_translation", {});
   translationTeamTool(document, state, "finish_translation", {});
   assert.deepEqual(finalTranslationTeamCues(document, state).map(c => [c.cue_id, c.start, c.end]), source.map(c => [c.cue_id, c.start, c.end]));
+});
+
+test("progress distinguishes saved drafts, submitted agents, review and publication without exposing text", () => {
+  const document = input(), state = initialTranslationTeamState(document);
+  assert.match(translationTeamProgress(document, state), /主 Agent 规划.*0\/9.*已完成 0 轮/);
+  translationTeamTool(document, state, "dispatch_subagents", dispatch());
+  state.children[0].agent.draft = { c0: "private draft text" };
+  state.children[1].agent.draft = { c1: "private draft text" };
+  state.cursor = 3;
+  let progress = translationTeamProgress(document, state);
+  assert.match(progress, /并行翻译中，已保存草稿 2\/9（未发布），Subagent 已提交 0\/9，已完成 3 轮/);
+  assert.doesNotMatch(progress, /private draft text/);
+  assert.deepEqual(state.draft, {}, "progress must not merge unsubmitted drafts");
+
+  state.children[0].status = "completed";
+  state.draft.c0 = "merged translation";
+  assert.match(translationTeamProgress(document, state), /已保存草稿 2\/9.*已提交 1\/9/, "merged and child copies are not double counted");
+  state.children[1].failures = 1;
+  state.children[2].failures = 3;
+  state.children[3].failures = 1; state.children[3].terminal = true;
+  progress = translationTeamProgress(document, state);
+  assert.match(progress, /Subagent 失败 2，Subagent 重试中 1/);
+
+  for (const child of state.children) child.status = "closed";
+  delete state.draft.c0;
+  assert.match(translationTeamProgress(document, state), /主 Agent 验收，已合并 0\/9.*已提交 9\/9/, "review uses main edits, not stale child copies");
+  state.stage = "publish";
+  assert.match(translationTeamProgress(document, state), /^正在发布/);
 });
 
 test("child context compaction retains assignment, shared terminology, notes and saved translations", async () => {

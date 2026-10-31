@@ -181,6 +181,24 @@ export function finalTranslationTeamCues(input: DocumentInput, state: Translatio
   if (!accepted(state) || state.children.some(c => c.status !== "closed")) throw new Error("Translation team has not been accepted and closed");
   return finalSubtitleAgentCues(input, state);
 }
+/** Report saved work, not just submitted/merged assignments. Never expose draft text. */
+export function translationTeamProgress(input: DocumentInput, state: TranslationTeamState): string {
+  const running = state.children.filter(c => c.status === "running");
+  // Completed child drafts also exist in state.draft. Count IDs only once, and
+  // prefer the main workspace during review (child copies may now be stale).
+  const saved = new Set(Object.keys(state.draft));
+  for (const child of running) for (const id of Object.keys(child.agent.draft)) saved.add(id);
+  const phase = state.stage === "publish" ? "正在发布" : running.length ? "并行翻译中" : state.children.length ? "主 Agent 验收" : "主 Agent 规划";
+  const parts = [phase, `${running.length ? "已保存草稿" : "已合并"} ${saved.size}/${input.cues.length}（未发布）`];
+  if (state.children.length) parts.push(`Subagent 已提交 ${state.children.length - running.length}/${state.children.length}`);
+  parts.push(`已完成 ${state.cursor} 轮`);
+  const failed = running.filter(c => c.terminal || c.failures > 2).length;
+  const retrying = running.filter(c => c.failures > 0 && !c.terminal && c.failures <= 2).length;
+  if (failed) parts.push(`Subagent 失败 ${failed}`);
+  if (retrying) parts.push(`Subagent 重试中 ${retrying}`);
+  return parts.join("，");
+}
+
 export const TranslationTeamTask = createDocumentTask({
   name: "subtitle_translation_team", initial: initialTranslationTeamState, advance: advanceTranslationTeam,
   call: (input, state, context, options) => callDocumentTurn({
@@ -192,5 +210,5 @@ export const TranslationTeamTask = createDocumentTask({
     const running = state.children.filter(c => c.status === "running");
     return running.length && running.every(c => !c.terminal && c.failures <= 2 && c.retryAt > Date.now()) ? Math.min(...running.map(c => c.retryAt)) : 0;
   },
-  progress: (input, state) => `${Object.keys(state.draft).length}/${input.cues.length}，子 Agent ${state.children.filter(c => c.status !== "running").length}/${state.children.length}，${state.children.some(c => c.status === "running") ? "并行翻译中" : state.children.length ? "主 Agent 验收" : "主 Agent 规划"}`,
+  progress: translationTeamProgress,
 });

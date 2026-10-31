@@ -12,7 +12,8 @@ import { observeJobEvents } from "./job-stream.js";
 import { DocumentTranslationTask, DocumentResumeDoc, documentCredentials } from "./document-task.js";
 import { modelConfig } from "./document-translation.js";
 import type { DocumentInput } from "./document-translation.js";
-import { SUBTITLE_AGENT_VERSION, SubtitleEditingTask, initialSubtitleAgentState } from "./subtitle-agent.js";
+import { SubtitleEditingTask } from "./subtitle-agent.js";
+import { TRANSLATION_TEAM_VERSION, TranslationTeamTask, initialTranslationTeamState } from "./translation-team.js";
 import { observeDocumentJob } from "./document-stream.js";
 import type { TaskId, ConversationId } from "@earendil-works/pi-durable";
 
@@ -57,7 +58,7 @@ export class AgentWorker {
       this.extension = defineExtension({
         name: "translation_agent",
         tools: WHITELIST_TOOLS,
-        tasks: [SubtitleTranslationTask, DocumentTranslationTask, SubtitleEditingTask],
+        tasks: [SubtitleTranslationTask, DocumentTranslationTask, SubtitleEditingTask, TranslationTeamTask],
       });
       this.registry.install(this.extension);
     }
@@ -325,7 +326,7 @@ export class AgentWorker {
     const jobKey = calculateJobKey({
       videoId: options.videoId, sourceCues: cues, fromLang: options.fromLang, toLang: options.toLang,
       segmentationVersion: options.segmentation, engine: "document", provider: "openai", model: config.model, baseUrl: config.baseUrl,
-      workflowVersion: SUBTITLE_AGENT_VERSION, promptVersion: SUBTITLE_AGENT_VERSION, reviewVersion: SUBTITLE_AGENT_VERSION,
+      workflowVersion: TRANSLATION_TEAM_VERSION, promptVersion: TRANSLATION_TEAM_VERSION, reviewVersion: TRANSLATION_TEAM_VERSION,
       styleConfig: JSON.stringify({
         context: config.contextTokens, output: config.outputTokens, title: options.title || "",
         // Preserve existing cache keys when reasoning is not explicitly enabled.
@@ -360,14 +361,14 @@ export class AgentWorker {
         fromLang: options.fromLang || "en", toLang: options.toLang || "zh-CN", cues, config, budgetLimit: options.budgetLimit ?? 128,
       };
       if (!Number.isSafeInteger(input.budgetLimit) || input.budgetLimit < 1 || input.budgetLimit > 1000) throw new Error("Invalid document request budget");
-      initialSubtitleAgentState(input); // Validate before creating durable state.
+      initialTranslationTeamState(input); // Validate before creating durable state.
       if (!documentCredentials.get(jobKey) && !process.env.OPENAI_API_KEY && !process.env.TRANSLATE_API_KEY) {
         throw new Error("全文翻译需要 API Key；请在扩展或 Worker 环境变量中配置");
       }
       const conversation = await this.activeHarness.createConversation({ ownership: { kind: "ownerless" } }, this.context);
       let taskId: TaskId<TaskResult> | undefined;
       await conversation.commit(async tx => {
-        taskId = await tx.createTask(SubtitleEditingTask, input, { ownership: { kind: "conversation" } });
+        taskId = await tx.createTask(TranslationTeamTask, input, { ownership: { kind: "conversation" } });
         const doc = await tx.doc(SubtitleJobDoc, conversation.id);
         doc.job_key = jobKey; doc.job_id = input.jobId; doc.task_id = taskId;
         doc.engine = "document"; doc.title = input.title; doc.video_id = input.videoId;
@@ -398,8 +399,9 @@ export class AgentWorker {
     const previous = existing.taskId && await this.activeHarness.getTask(existing.taskId, this.context);
     const saved = await this.activeHarness.snapshot(DocumentResumeDoc, existing.conversationId, this.context);
     if (!previous || !saved?.document) throw new Error("Translation checkpoint missing");
+    const isTeam = saved.workflow === TranslationTeamTask.definition.name;
     const isEditor = saved.workflow === SubtitleEditingTask.definition.name;
-    if (!isEditor && saved.workflow !== DocumentTranslationTask.definition.name) throw new Error("Translation checkpoint incompatible");
+    if (!isTeam && !isEditor && saved.workflow !== DocumentTranslationTask.definition.name) throw new Error("Translation checkpoint incompatible");
     const input = { ...(previous.input as unknown as DocumentInput), resume: true };
     input.budgetLimit = options.budgetLimit ?? input.budgetLimit;
     if (!Number.isSafeInteger(input.budgetLimit) || input.budgetLimit < 1 || input.budgetLimit > 1000) throw new Error("Invalid document request budget");
@@ -411,8 +413,9 @@ export class AgentWorker {
       if (doc.cancelled || doc.status !== "failed" || doc.task_id !== existing.taskId) throw new Error("Translation job is no longer resumable");
       // Retrying must not silently reset the shared request budget.
       if (doc.network_attempts >= input.budgetLimit) throw new Error("翻译请求预算已耗尽；请提高预算后继续");
-      taskId = isEditor
-        ? await tx.createTask(SubtitleEditingTask, input, { ownership: { kind: "conversation" } })
+      taskId = isTeam
+        ? await tx.createTask(TranslationTeamTask, input, { ownership: { kind: "conversation" } })
+        : isEditor ? await tx.createTask(SubtitleEditingTask, input, { ownership: { kind: "conversation" } })
         : await tx.createTask(DocumentTranslationTask, input, { ownership: { kind: "conversation" } });
       doc.task_id = taskId; doc.status = "running"; doc.stage = String(saved.document!.stage);
       doc.budget_limit = input.budgetLimit; doc.final_result = null; doc.failed_cues = [];

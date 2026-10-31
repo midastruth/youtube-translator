@@ -28,6 +28,8 @@ export const createDocumentTask = <State extends DurableState, Request, Response
   call: (input: DocumentInput, state: State, request: Request, options: ModelCallOptions) => Promise<Response>;
   finalCues: (input: DocumentInput, state: State) => PublishedCue[];
   progress?: (input: DocumentInput, state: State) => string;
+  resume?: (state: State) => State;
+  wakeAt?: (state: State) => number;
 }) => defineTask<DocumentInput, { phase: string; document: State; failures: number }, TaskResult>({
   name: workflow.name,
   version: 1,
@@ -36,8 +38,9 @@ export const createDocumentTask = <State extends DurableState, Request, Response
     restore: async (_task, runtime, context) => {
       const saved = await runtime.snapshot(DocumentResumeDoc, runtime.conversationId, context);
       if (!saved?.document || saved.workflow !== workflow.name) throw new Error("Translation checkpoint missing or incompatible");
+      const restored = saved.document as unknown as State;
       await runtime.commit(async () => ({
-        status: "running", checkpoint: { phase: "run", document: saved.document as unknown as State, failures: 0 },
+        status: "running", checkpoint: { phase: "run", document: workflow.resume?.(restored) ?? restored, failures: 0 },
       }), context);
     },
     run: async (task, runtime, context) => {
@@ -75,6 +78,8 @@ export const createDocumentTask = <State extends DurableState, Request, Response
           doc.status = "running"; doc.stage = checkpoint.document.stage;
           doc.progress = workflow.progress?.(input, checkpoint.document) ?? `${checkpoint.document.cursor + 1}`;
         }, context);
+        const wakeAt = workflow.wakeAt?.(checkpoint.document) ?? 0;
+        if (wakeAt > runtime.now()) await runtime.sleep(wakeAt, context);
         const next = await workflow.advance(input, checkpoint.document, request => workflow.call(input, checkpoint.document, request, {
           apiKey: documentCredentials.get(input.jobKey), signal: runtime.signal,
           reserve: async () => {

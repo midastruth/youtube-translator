@@ -23,9 +23,13 @@ flowchart TD
     
     C --> Q{translate_engine}
     
-    Q -->|document：默认字幕编辑 Agent| DW[单 Agent 自主阅读、编辑、检查与提交]
-    DW <--> DB[(SQLite：文件工作区与工具会话)]
+    Q -->|document：默认字幕编辑 Agent| DW[主 Agent 规划风格、术语和语义分段]
+    DW --> CHILD[1～9 个子 Agent 并行翻译]
+    CHILD --> REVIEW[主 Agent 验收、关闭子 Agent、校验并提交]
+    DW <--> DB[(SQLite：主/子文件工作区与工具会话)]
+    CHILD <--> DB
     DW <--> LLM[pi-ai 流式调用：ChatCompletions SSE + Tools]
+    CHILD <--> LLM
     
     Q -->|legacy：快速模式| L[server/src/translate.ts 快速翻译调度]
     L <--> API[OpenAI-compatible / DeepL API]
@@ -33,7 +37,7 @@ flowchart TD
     Q -.->|agent：旧版原型| AG[worker/task-definition.ts 规则状态机]
     AG --- NOTE[非大模型：仅脚本硬编码 defaultDraft 与规则审校]
     
-    DW --> SSE[SSE / WebSocket 事件分发：毫秒时间轴转换]
+    REVIEW --> SSE[SSE / WebSocket 事件分发：毫秒时间轴转换]
     L --> SSE
     AG --> SSE
     SSE --> E
@@ -80,13 +84,13 @@ flowchart TD
 ## 3. 全文高质量模式 (Document) 与旧版 Agent 原型的边界
 
 ### A. 字幕编辑 Agent (`document` 模式)
-- **实现位置**：`worker/subtitle-agent.ts`，复用 `worker/document-task.ts` 的持久化、重试和原子发布边界，以及 `worker/document-translation.ts` 的 SSE 传输。
-- **驱动方式**：一个真实模型像编码 Agent 一样自主选择读取、搜索、写入、精确编辑与检查工具，不再强制安排分析、分章、审校等固定阶段。模型端点需支持 Chat Completions SSE 与 Function Calling，不要求 `response_format`。
-- **工作区**：只读 `source.json` 保存编号、时间轴和原文；可编辑 `translations.json` 保存编号到译文的映射，`notes.md` 保存术语、计划和上下文。它们是 SQLite 持久化的虚拟文件，不开放任意宿主路径、shell 或外网权限。
-- **持久化循环**：每个完整模型轮次执行工具后，将文件、修订号和工具会话一起提交；模型可自行继续读取、翻译或修正。超长会话压缩后保留文件和笔记。单次调用总时限 10 分钟，取消即时中断，所有请求与重试消耗预算。
-- **发布门禁**：Agent 自查后调用 `validate_translation`，成功验证当前修订才能 `finish_translation`。程序再次核对全部编号、非空译文与原始时间轴后原子发布；普通聊天回答不能提交。
-- **质量边界**：程序保证结构与完整性，不保证语义正确。翻译与语义自查由同一个 Agent 完成，不能将结构校验称作独立双语审校。
-- **历史兼容**：旧固定阶段 `document_subtitle_translation` 任务继续注册用于恢复；新任务使用 `subtitle_editing_agent` 及独立缓存版本。详见 [字幕编辑 Agent](document-translation.md)。
+- **实现位置**：`worker/translation-team.ts`，复用 `worker/subtitle-agent.ts` 的文件工具、`worker/document-task.ts` 的持久化边界和共享模型传输。
+- **驱动方式**：主 Agent 评估内容、风格和术语，按任务大小用 `dispatch_subagents` 分派 1～9 个连续语义片段。子 Agent 使用独立会话并行翻译；模型端点需支持 Chat Completions SSE 与 Function Calling，不要求 `response_format`。
+- **工作区**：只读 `source.json`、可编辑 `translations.json` 和 `notes.md` 均为 SQLite 持久化的虚拟文件。子 Agent 只能写自己片段，但能通过 `read_context` 查阅全文；所有子任务共享不可变风格与术语规范，不开放 shell 或任意宿主路径。
+- **持久化循环**：一个主回合或一轮并行子回合后统一提交检查点，保留独立会话、文件和错误状态；失败只重试相应子任务。主、子请求及重试共用默认 128 次预算。未提交的并行轮次重启后可能重做。
+- **发布门禁**：子任务提交后合并，主 Agent 语义检查与修订，再 `accept_translation` → `close_subagents` → `validate_translation` → `finish_translation`。修改译文使验收和校验失效，宿主复核后原子发布。
+- **质量与性能边界**：结构由程序保证，语义由子 Agent 翻译与主 Agent 验收负责；无法由结构校验保证语义正确，实际加速比受模型服务并发限流影响。
+- **历史兼容**：`document_subtitle_translation` 和 `subtitle_editing_agent` 继续注册恢复历史任务；新任务使用 `subtitle_translation_team` 及独立缓存版本。详见 [主/子 Agent 翻译](document-translation.md)。
 
 ### B. 旧版 Agent 原型状态机 (`agent` 模式边界声明)
 - **实现位置**：`worker/task-definition.ts`。
@@ -109,7 +113,8 @@ flowchart TD
 | **媒体转写** | `server/src/transcribe.ts` & `audio.ts` | ffmpeg 分块、Whisper API 转写及秒级时间轴拼接 |
 | **快速翻译** | `server/src/translate.ts` | Legacy 模式快速翻译、`[$i]` 标记解析与超时防护 |
 | **字幕断句** | `server/src/subtitle-processing.ts` | 文本清洗、非语音段落过滤、规则与统计智能断句 |
-| **字幕编辑 Agent** | `worker/subtitle-agent.ts` | 单 Agent 文件工具、会话、上下文压缩与显式提交 |
+| **翻译团队** | `worker/translation-team.ts` | 主 Agent 规划验收、最多 9 个子 Agent 并发、关闭与发布门禁 |
+| **共享 Agent 工具** | `worker/subtitle-agent.ts` | 文件工具、会话、上下文压缩与历史单 Agent 定义 |
 | **模型传输与历史流程** | `worker/document-translation.ts` | 共享 SSE 模型调用；保留历史固定阶段流程 |
 | **持久化任务边界** | `worker/document-task.ts` | pi-durable 检查点、重试、预算、取消与原子发布 |
 | **AgentWorker 核心** | `worker/agent-worker.ts` | 任务队列管理、事件流观察、生命周期调度 |

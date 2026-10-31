@@ -11,6 +11,7 @@ export function sendAgentTools(res: ServerResponse, tools: { name: string; args:
 /** Deterministic mock of a single agent choosing read/edit/check/submit tools. No real model tokens. */
 export function scriptedAgentTools(payload: AgentPayload, translate = (id: string) => `数据库事务：${id}`): { name: string; args: unknown }[] {
   const last = payload.messages.filter(m => m.role === "tool").at(-1);
+  const main = payload.tools?.some(t => t.function.name === "dispatch_subagents");
   if (!last) return [{ name: "read_file", args: { path: "source.json", offset: 0, count: 100 } }];
   const assistant = payload.messages.filter(m => m.role === "assistant" && m.tool_calls?.length).at(-1)!;
   const call = assistant.tool_calls!.at(-1)!.function;
@@ -18,8 +19,21 @@ export function scriptedAgentTools(payload: AgentPayload, translate = (id: strin
   const result = JSON.parse(last.content!);
   if (call.name === "read_file" && args.path === "source.json") {
     const source = JSON.parse(result.content) as { cue_id: string }[];
+    if (main) {
+      if (result.next_offset != null) return [{ name: "read_file", args: { path: "source.json", offset: result.next_offset, count: 100 } }];
+      const all = payload.messages.filter(m => m.role === "tool").flatMap(m => {
+        const r = JSON.parse(m.content!);
+        return typeof r.content === "string" && r.content.startsWith("[") ? JSON.parse(r.content) as { cue_id: string }[] : [];
+      });
+      const count = Math.min(9, Math.max(1, Math.ceil(all.length / 80)));
+      const size = Math.ceil(all.length / count);
+      return [{ name: "dispatch_subagents", args: { brief: "Natural concise subtitles. transaction=数据库事务; preserve negation and numbers.", assignments: Array.from({ length: count }, (_, i) => ({ start_id: all[i * size].cue_id, end_id: all[Math.min(all.length, (i + 1) * size) - 1].cue_id, instructions: "Translate this semantic section using the shared glossary." })) } }];
+    }
     return [{ name: "write_file", args: { path: "translations.json", merge: true, content: JSON.stringify(Object.fromEntries(source.map(c => [c.cue_id, translate(c.cue_id)]))) } }];
   }
+  if (call.name === "dispatch_subagents") return [{ name: "read_file", args: { path: "translations.json", offset: 0, count: 100 } }];
+  if (call.name === "accept_translation") return [{ name: "close_subagents", args: {} }];
+  if (call.name === "close_subagents") return [{ name: "validate_translation", args: {} }];
   if (call.name === "write_file" || call.name === "edit_file") {
     const sourceResults = payload.messages.filter(m => m.role === "tool").map(m => JSON.parse(m.content!)).filter(r => typeof r.content === "string" && r.content.startsWith("["));
     const page = sourceResults.at(-1);
@@ -28,7 +42,7 @@ export function scriptedAgentTools(payload: AgentPayload, translate = (id: strin
   }
   if (call.name === "read_file" && args.path === "translations.json") {
     return result.next_offset == null
-      ? [{ name: "validate_translation", args: {} }]
+      ? main ? [{ name: "accept_translation", args: { review: "Checked meaning, negation, timing boundaries and transaction terminology against source." } }] : [{ name: "validate_translation", args: {} }]
       : [{ name: "read_file", args: { path: "translations.json", offset: result.next_offset, count: 100 } }];
   }
   if (call.name === "validate_translation") return [{ name: "finish_translation", args: {} }];

@@ -45,7 +45,7 @@ Firefox 临时扩展在浏览器重启后自动移除；长期安装需打包并
    统一 TypeScript 服务端已在进程内集成文档翻译 Worker，监听单一 `8787` 端口，无需多进程跳转。如需配置 YouTube 反爬 Cookie，本地指定 `YTDLP_COOKIES_FILE=./cookies/youtube-cookies.txt`（Docker 容器内为 `/run/secrets/youtube-cookies.txt`）。
 2. **选项页设置**：
    - 后端地址：默认填写 `http://localhost:8787`。
-   - 翻译引擎：默认为 **字幕编辑 Agent (document)**，一个 Agent 自主读取字幕文件、编辑译文并检查提交（需要支持 SSE 和工具调用的 OpenAI-compatible 模型）；亦可选择 **快速模式 (legacy)**。
+   - 翻译引擎：默认为 **字幕编辑 Agent (document)**，主 Agent 规划翻译风格与术语，按任务大小派发 1～9 个子 Agent 并行翻译，主 Agent 验收并关闭子 Agent 后统一发布（需要支持 SSE 和工具调用的 OpenAI-compatible 模型，所有 Agent 共用请求预算）；亦可选择 **快速模式 (legacy)**。
    - 模型配置：可在此填入模型 API Key、Base URL 及 Model 名称。设置项保存在浏览器本地扩展存储（`chrome.storage.local`）中，便于日常使用，用户须保护好本机浏览器 profile 安全；服务端与 Worker 任务数据库绝不持久化存储请求中的 API Key。
 3. **打开 YouTube 播放视频**：
    点击播放器右下角新增的翻译按钮开启双语字幕；每次刷新页面或 SPA 切换视频时默认处于关闭状态。

@@ -55,7 +55,7 @@ export function initialSubtitleAgentState(input: DocumentInput): SubtitleAgentSt
 }
 
 // Only host-authored workspace errors may be returned to the model.
-class WorkspaceError extends Error {}
+export class WorkspaceError extends Error {}
 
 function fileText(state: SubtitleAgentState, path: string) {
   if (path === "translations.json") return JSON.stringify(state.draft, null, 2);
@@ -192,10 +192,29 @@ export function subtitleAgentContext(input: DocumentInput, state: SubtitleAgentS
   return context;
 }
 
-export async function advanceSubtitleAgent(input: DocumentInput, previous: SubtitleAgentState, call: (context: Context) => Promise<AssistantMessage>): Promise<SubtitleAgentState> {
+export type AgentHooks = {
+  tools?: Tool[];
+  context?: (context: Context) => Context;
+  tool?: (state: SubtitleAgentState, name: string, args: unknown) => unknown;
+};
+
+export async function advanceSubtitleAgent(input: DocumentInput, previous: SubtitleAgentState, call: (context: Context) => Promise<AssistantMessage>, hooks: AgentHooks = {}): Promise<SubtitleAgentState> {
   const state = structuredClone(previous);
   if (state.stage === "publish") return state;
-  const response = await call(subtitleAgentContext(input, state));
+  const tools = hooks.tools ?? SUBTITLE_AGENT_TOOLS;
+  const buildContext = () => {
+    const context = subtitleAgentContext(input, state);
+    context.tools = tools;
+    return hooks.context ? hooks.context(context) : context;
+  };
+  let context = buildContext();
+  // Include role-specific prompts, tools and the shared brief in compaction accounting.
+  if (tokenEstimate(context) > inputBudget(input.config) * 0.8 && state.messages.length) {
+    state.messages = []; state.compactions++;
+    context = buildContext();
+  }
+  if (tokenEstimate(context) > inputBudget(input.config)) throw new DocumentPermanentError("configuration", "Agent instructions/tools exceed the configured context budget");
+  const response = await call(context);
   const calls = response.content.filter(b => b.type === "toolCall");
   if (calls.length > 32) throw new Error("Too many workspace tools in one turn");
   // Reasoning blocks and upstream metadata are not needed for durable tool history.
@@ -206,7 +225,7 @@ export async function advanceSubtitleAgent(input: DocumentInput, previous: Subti
   });
   for (const tool of calls) {
     let result: unknown, isError = false;
-    try { result = subtitleAgentTool(input, state, tool.name, validateToolCall(SUBTITLE_AGENT_TOOLS, tool)); }
+    try { result = (hooks.tool ?? ((s, name, args) => subtitleAgentTool(input, s, name, args)))(state, tool.name, validateToolCall(tools, tool)); }
     catch (error) {
       // Never echo arbitrary provider arguments/schema errors (which may contain secrets).
       result = { error: error instanceof WorkspaceError ? error.message : "Invalid workspace tool arguments; check the declared schema and allowed files." };

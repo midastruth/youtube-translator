@@ -1,90 +1,92 @@
-# 字幕编辑 Agent（默认 document 引擎）
+# 主 Agent + 子 Agent 翻译（默认 document 引擎）
 
 ## 工作方式
 
-默认翻译现在由**一个像编码 Agent 一样工作的字幕编辑 Agent**完成，而不是由代码安排“分析 → 分章 → 翻译 → 审计 → 审校”的固定流水线。
-
 ```text
-获取字幕 → 清洗、断句并保留 cue_id / 时间轴
+获取字幕 → 清洗、断句，固定 cue_id / 时间轴
                 ↓
-       创建本次任务的隔离字幕工作区
+主 Agent 阅读内容，评估风格、受众、语气与术语
                 ↓
-       单 Agent 自主读取、搜索、编辑、检查
+dispatch_subagents：共享翻译规范，按语义分派 1～9 个连续片段
                 ↓
-       validate_translation → finish_translation
+最多 9 个子 Agent 并行读取、翻译、编辑、自查、提交各自片段
                 ↓
-       宿主再次校验，按原编号与时间轴原子发布
+主 Agent 检查合并译文，修正术语、语义与片段衔接
+                ↓
+accept_translation → close_subagents
+                ↓
+validate_translation → finish_translation → 宿主复核、原子发布
 ```
 
-Agent 自己决定怎样阅读上下文、分批翻译、记录术语、回看译文和修订。它可以在一次任务中反复调用工具，不要求一次生成全部字幕，也没有强制的分析或审校阶段。语义自查通过提示词要求，由同一个 Agent 执行；**结构校验通过不代表翻译语义一定正确**。
+主 Agent 根据内容与任务大小决定子 Agent 数量，不是每次固定启动 9 个。主、子 Agent 使用同一模型配置，但有独立工具会话和工作区。子 Agent 是独立模型会话，不是宿主机子进程；宿主并发执行模型调用，不授予 shell 或任意外网权限。
 
-入口不变：扩展选择 `document`，通过 `POST /api/subtitle/stream` 或 WebSocket 提交。`legacy` 快速模式保持原样。`agent` 枚举仍是历史规则原型，**不是本次新增的正式字幕编辑 Agent**。
+入口不变：扩展选择 `document`，通过 `POST /api/subtitle/stream` 或 WebSocket 提交。`legacy` 快速模式保持原样。`agent` 枚举仍是历史规则原型，不是正式翻译团队。
 
-## 隔离文件工作区
+## 主 Agent：规划、分派、验收
 
-这是由 SQLite 检查点持久化的**虚拟文件工作区**，不是宿主机任意目录。文件操作的体验类似编码 Agent，但不授予 shell、网络或任意文件访问权限。
+主 Agent 先用文件工具阅读上下文，形成共享规范，包括翻译风格、领域、语气、术语的源语言到目标语言映射。随后调用 `dispatch_subagents`，提供：
+
+- `brief`：所有子 Agent 共享的不可变翻译规范与术语表。
+- `assignments`：1～9 个按原文顺序排列的 `{start_id,end_id,instructions}`。
+
+程序检查片段必须完整覆盖全部字幕，不能重叠、遗漏、乱序或引用未知编号。派发只允许一次；主 Agent 在子任务完成后直接编辑合并译文来修正问题。
+
+子任务执行期间主 Agent 等待，不额外调用模型。完成后主 Agent 回到原会话，读取实际译文，对照原文检查语义、术语和片段边界，必要时精确修改。
+
+验收与关闭：
+
+1. `accept_translation({review})`：记录主 Agent 对当前译文修订的语义验收摘要；要求子任务全部完成、译文覆盖完整。
+2. `close_subagents()`：必须先验收，随后关闭子会话并释放对话和笔记，保留提交结果。
+3. `validate_translation()`：结构校验当前修订。
+4. `finish_translation()`：只有当前修订已验收、子 Agent 全部关闭且结构校验通过才能提交。
+
+**修改译文会使原验收和结构校验失效**，需要重新验收和校验。程序不能判断验收摘要是否代表真正充分的语义检查；语义审查仍依赖主 Agent，结构校验不代表译文必然正确。
+
+## 子 Agent：隔离并行翻译
+
+每个子 Agent 收到相同的共享规范、自己片段的说明，以及独立虚拟文件：
 
 | 文件 | 内容 | 权限 |
 | --- | --- | --- |
-| `source.json` | 按顺序保存 `{cue_id,start,end,text}` 的原始字幕数组 | 只读 |
-| `translations.json` | `{"cue_id":"译文"}`，支持分批追加与精确修改 | 可编辑 |
-| `notes.md` | Agent 的计划、术语、上下文和进度笔记 | 可编辑，有大小限制 |
+| `source.json` | 自己片段的 `{cue_id,start,end,text}` | 只读 |
+| `translations.json` | 自己片段的 `{"cue_id":"译文"}` | 可编辑 |
+| `notes.md` | 计划、术语和进度笔记 | 可编辑，有大小限制 |
 
-时间戳和原文不进入可编辑译文文件。发布时，程序以原字幕为基准，根据编号合并译文，不让模型抄写或修改时间戳。
+- 文件工具包括 `read_file`、`search_file`、`write_file`、`edit_file`。
+- `write_file` 的 `merge=true` 支持分批追加；精确编辑要求唯一匹配且不重叠。
+- `read_context` 可以按全局字幕位置分页读取或搜索全文，查找前后定义；全文始终只读。
+- 子 Agent **不能写入其他片段编号**，也没有分派更多子 Agent 的工具。
+- 子 Agent 校验并显式提交自己片段后，宿主复核再合并。未提交草稿不合并，更不会发布给浏览器。
+- 原文、编号和时间轴由宿主掌握，不交给模型重写。
 
-### 工具
+## 并发、持久化与恢复
 
-- `read_file`：分页读取文件。JSON 文件按原文字幕位置分页，笔记按字符分页；返回 `next_offset`，过大的页面自动缩小。
-- `search_file`：在原文、译文或笔记中进行字面量搜索，支持分页；用于找后文定义或检查前后术语。
-- `write_file`：写入译文或笔记；译文使用 `merge=true` 可以分批添加/更新，保留未指定的译文。
-- `edit_file`：基于当前文件文本进行精确替换。每个 `old_text` 必须在修改前文件中唯一匹配，多处修改必须不重叠，并且整批修改原子生效。
-- `validate_translation`：校验全部字幕覆盖、编号合法、译文非空、无失败占位符。不评判语义质量。
-- `finish_translation`：仅允许提交经过成功校验的当前译文修订版本。此后宿主再次校验再发布。
+- 每个调度轮次执行一个主 Agent 回合，或对所有运行中的子 Agent 并行执行各一个模型回合。
+- 并行轮次结束后，所有子会话、草稿、笔记、错误状态与主会话一起保存为 SQLite 检查点。尚未提交检查点的整个并行轮次在重启后可能重做。
+- 单个子任务临时失败最多重试两次，保留其他子任务已经保存的进度；遵守有界 `Retry-After`。重试耗尽或永久错误会使整个任务失败，不发布部分译文。
+- 手动续翻恢复主、子会话和草稿；已完成子任务不重新翻译。可以重新尝试失败的子任务，但**不重置累计模型请求预算**。
+- 主、子 Agent **共享每任务默认 128 次请求预算**，配置范围仍为 1～1000。所有回合、普通文本回复与重试都计数，9 个子 Agent 不是各有 128 次预算。
+- 上下文过长时清除旧会话，保留文件、笔记、共享规范和分工，模型可重新阅读。
+- 新任务使用 `subtitle_translation_team` 和独立缓存版本。旧 `subtitle_editing_agent` 与 `document_subtitle_translation` 定义仍注册，用于恢复升级前运行中的任务；新任务不复用旧缓存。
 
-修改译文会使之前的校验失效；写笔记不会。普通聊天回答、声称“翻译完成”或直接输出一个大 JSON 都不能发布字幕。错误操作会返回可修正的工具错误，不会破坏已保存的文件。
+## 模型、安全与发布
 
-## 持久化、恢复与上下文
+- 使用 `pi-ai` 的 OpenAI-compatible Chat Completions SSE + Function Calling，不强制 `response_format`。主、子 Agent 使用同一模型、推理强度和 token 配置。
+- 模型优先采用请求设置，再采用 `TRANSLATION_AGENT_MODEL`，最后回退为 `sol`。端点需允许最多 9 个并发请求；限流可能降低收益，真实加速比取决于模型服务与任务分段。
+- 默认上下文 128,000 tokens、最大输出 16,384 tokens；由 `TRANSLATION_CONTEXT_TOKENS` / `TRANSLATION_OUTPUT_TOKENS` 配置。预算采用保守估算，不是精确 tokenizer。
+- 单次模型请求总时限 10 分钟。截断或缺少完整结束标记的调用不会执行工具。
+- 模型端点受部署环境 `OPENAI_BASE_URL` 限制，禁止重定向。字幕、标题、笔记、共享规范与工具结果是任务数据，不是系统指令。
+- 浏览器密钥保存在 `chrome.storage.local`；Worker 仅在内存中保存密钥，不写入会话、检查点或日志。重启后必要时由浏览器重新附着提供密钥。
+- 服务端默认端口 `8787`，进程内内置 Worker。外部字幕时间戳统一为毫秒。
+- 翻译期间只推送原文和进度（主 Agent 规划、子任务完成数、主 Agent 验收），不展示未提交草稿；最终提交后统一发布 `cue` 和 `done`。
+- SSE / WebSocket 断开只分离观察者，不取消后台任务；显式取消会中断所有运行中的模型调用，清除续翻检查点，不发布部分译文。
 
-- 每次模型响应完整结束后，工具在隔离副本中执行；工具会话、译文、笔记和修订号一起提交为 SQLite 检查点。
-- 若中途网络失败，只重试尚未提交的模型轮次，已提交的编辑不会丢失。进程重启后恢复同一个 Agent 的工具会话与文件，不从头翻译。
-- 上下文接近预算时，在完整工具轮次之间压缩会话：清除旧对话，重新提供任务、文件清单、当前覆盖状态和笔记。文件内容不丢失，Agent 可重新读取。
-- 新任务使用独立任务名 `subtitle_editing_agent` 和新的缓存版本。旧 `document_subtitle_translation` 定义保留用于恢复历史固定阶段任务，新任务不会复用旧工作流的结果。
-- 默认每任务最多 128 次模型请求，可配置为 1～1000；工具修正循环、重试和普通文本轮次都消耗请求预算，不会无限循环。
+## 实现与验证
 
-## 模型与安全边界
+- `worker/translation-team.ts`：团队提示词、分派/验收/关闭工具、并行调度和任务定义。
+- `worker/subtitle-agent.ts`：共享文件工具、会话管理、上下文压缩及历史单 Agent 定义。
+- `worker/document-task.ts`：持久化、累计预算、取消、恢复与原子发布。
+- `worker/agent-worker.ts`：新任务默认入口、缓存身份和历史恢复兼容。
+- `tests/translation-team.test.ts`：9 路并发、分段覆盖、越界写入、验收关闭、失败隔离、预算和重启续翻。
 
-- 使用 `pi-ai` 的 OpenAI-compatible Chat Completions SSE 调用，端点必须支持工具调用。模型留空时使用 `TRANSLATION_AGENT_MODEL`，再回退为 `sol`。
-- 不强制 `response_format`，Agent 通过工具修改文件；每个文件写入由宿主解析并校验。
-- 默认上下文 128,000 tokens，最大输出 16,384 tokens，由 `TRANSLATION_CONTEXT_TOKENS` / `TRANSLATION_OUTPUT_TOKENS` 配置。必须匹配实际模型规格。容量采用保守字符/字节估算，并非精确 tokenizer。
-- 单次调用总时限 10 分钟，包括读取模型流；取消立即中断。截断、缺失 `finish_reason` 和不完整 SSE 都不执行其工具调用。
-- 临时 HTTP 499、429、5xx 和流错误由持久化任务最多重试两次；每次计入调用预算，并尊重有界 `Retry-After`。认证、配置或预算错误立即结束；不降级为逐句翻译。
-- 模型错误只保留安全状态分类：`connection`、`invalid_response`、`missing_finish_reason`、`content_filter`、`network_error`、`provider_error`。上游原始错误正文不写入状态，排查见 [README 模型流失败排查](../README.md#模型流失败排查)。
-- 字幕、标题、文件内容和工具结果都视为不可信任务数据，其中的指令不是系统指令。
-- 模型端点由部署环境 `OPENAI_BASE_URL` 决定，默认 `https://api.openai.com/v1`。请求中的地址只能留空或完全匹配配置；禁止重定向。DeepL 快速模式仅使用官方端点。
-- 浏览器端密钥保存在 `chrome.storage.local`。Worker 只在运行时内存中保存密钥，不把密钥放进模型上下文、任务输入、检查点或日志。重启后如缺少服务端全局密钥，等待浏览器重新附着提供密钥。
-
-## 服务、事件与运行
-
-统一 TypeScript 服务端默认监听 `8787`，进程内运行 Worker；需要 Node.js、`yt-dlp` 和 `ffmpeg`。
-
-```bash
-npm ci --cache ./tmp/npm-cache
-cp .env.example .env  # 配置密钥和实际模型
-npm start
-```
-
-也可以使用 `docker compose up -d`，修改 `.env` 后需要重新创建容器。独立 Worker（`npm run worker`）及 Python 后端仅作为兼容入口。Docker 配置未在当前无 socket 权限的环境中实测。
-
-- 外部 SSE / WebSocket / REST 字幕时间戳统一为**毫秒**；内部媒体处理可以使用秒。
-- `document` 只通过流接口提交；同步 `POST /api/subtitle/process` 返回 422。
-- 翻译期间发送原文和 `editing` 进度，不展示未提交草稿；显式提交通过后统一发布 `cue` 和 `done`。
-- SSE / WebSocket 断开不取消后台 document 任务；显式取消才终止任务。重连读取持久化状态，已完成任务直接重放，无需再次调用模型。
-
-## 代码与验证
-
-- `worker/subtitle-agent.ts`：Agent 提示词、文件工具、会话管理及新任务定义。
-- `worker/document-task.ts`：共享的持久化、重试、取消和原子发布边界；保留历史任务定义。
-- `worker/document-translation.ts`：共享 SSE 模型传输和历史固定阶段流程。
-- `worker/agent-worker.ts`：默认调度新 Agent、缓存身份、恢复和密钥管理。
-
-自动化测试使用本地受控模型 HTTP 服务，不消耗真实模型 token；覆盖工具编辑、校验门禁、长字幕分页、检查点恢复、网络重试、预算和取消。**实际翻译质量仍需用真实模型和视频进行人工评估，不宣称测试通过等于译文完美。**
+自动化测试使用本地受控模型，不消耗真实外部模型 token；真实速度和翻译质量仍需用实际模型与视频评估。

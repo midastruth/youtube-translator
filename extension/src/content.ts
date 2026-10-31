@@ -352,7 +352,7 @@ async function load(pageUrl: string) {
 
         if (event.type === "progress") {
           const stages: Record<string, string> = {
-            editing: "翻译 Agent 正在阅读、编辑与检查字幕",
+            editing: "翻译 Agent 团队正在规划、并行翻译与验收字幕",
             analyze: "正在阅读全文并规划语义章节", consolidate: "正在整合全文理解", brief: "正在统一术语与上下文",
             translate: "正在进行文档级翻译", audit: "正在检查全文术语与语义一致性", review: "正在进行双语审校与修订",
             final_audit: "正在复查修订后的全文一致性",

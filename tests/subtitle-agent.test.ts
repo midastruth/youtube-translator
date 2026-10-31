@@ -7,6 +7,7 @@ import {
   advanceSubtitleAgent, finalSubtitleAgentCues, initialSubtitleAgentState, subtitleAgentContext,
   subtitleAgentTool, SUBTITLE_AGENT_TOOLS,
 } from "../worker/subtitle-agent.js";
+import { TEAM_TOOLS } from "../worker/translation-team.js";
 import { modelConfig } from "../worker/document-translation.js";
 import type { DocumentInput } from "../worker/document-translation.js";
 import { AgentWorker } from "../worker/agent-worker.js";
@@ -203,7 +204,8 @@ async function fixture(t: TestContext, options: FixtureOptions = {}) {
     try {
       const payload = JSON.parse(body); requests.push(payload);
       assert.equal(payload.stream, true); assert.equal(payload.response_format, undefined);
-      assert.deepEqual(payload.tools.map((tool: { function: { name: string } }) => tool.function.name), SUBTITLE_AGENT_TOOLS.map(t => t.name));
+      const names = payload.tools.map((tool: { function: { name: string } }) => tool.function.name);
+      assert.deepEqual(names, names.includes("dispatch_subagents") ? TEAM_TOOLS.map(t => t.name) : [...SUBTITLE_AGENT_TOOLS.map(t => t.name), "read_context"]);
       if (options.failures?.length) { res.writeHead(options.failures.shift()!); res.end("private provider key body"); return; }
       if (await options.intercept?.(payload, res, req.headers.authorization)) return;
       sendAgentTools(res, scriptedAgentTools(payload));
@@ -249,7 +251,7 @@ test("default document job edits a workspace, self-checks then publishes atomica
   const events = []; for await (const event of stream) events.push(event);
   assert.equal(events.filter(e => e.type === "cue").length, 2); assert.equal(events.at(-1)?.type, "done");
   assert.deepEqual(job.finalResult?.cues.map(c => [c.cue_id, c.start, c.end]), [["a", 123, 1200], ["b", 1200, 2500]]);
-  assert.equal(f.requests.length, 5);
+  assert.equal(f.requests.length, 12);
   assert.equal(f.requests.some(r => r.messages.some(m => m.role === "tool")), true);
   const calls = f.requests.length;
   await f.restart(); const restored = await f.worker.submitOrAttachJob(f.jobOptions);
@@ -313,7 +315,7 @@ test("restart resumes committed edits and tool conversation without repeating th
   const events = []; for await (const event of f.worker.observeJobStream(restored, { heartbeatIntervalMs: 1 })) events.push(event);
   assert.equal(events.at(-1)?.type, "done");
   // Only the pending read-after-write provider turn is replayed, not the committed write request.
-  assert.equal(f.requests.filter(r => lastTool(r)?.name === "read_file" && JSON.parse(lastTool(r)!.arguments).path === "source.json").length, 1);
+  assert.equal(f.requests.filter(r => lastTool(r)?.name === "read_file" && JSON.parse(lastTool(r)!.arguments).path === "source.json").length, 2);
   assert.equal(events.filter(e => e.type === "cue").length, 2);
 });
 
@@ -359,9 +361,9 @@ test("a network failure after a saved edit retries the same turn without losing 
     if (!failed && lastTool(payload)?.name === "write_file") { failed = true; res.writeHead(502); res.end("private key body"); return true; }
   } });
   const job = await f.worker.submitOrAttachJob(f.jobOptions); await job.taskPromise;
-  assert.equal(job.status, "succeeded"); assert.equal(f.requests.length, 6);
+  assert.equal(job.status, "succeeded"); assert.equal(f.requests.length, 13);
   const doc = await f.worker.harness!.snapshot(SubtitleJobDoc, job.conversationId, f.worker.context);
-  assert.equal(doc?.network_attempts, 6); assert.equal(doc?.published_cues.a.translation, "数据库事务：a");
+  assert.equal(doc?.network_attempts, 13); assert.equal(doc?.published_cues.a.translation, "数据库事务：a");
 });
 
 test("transient HTTP failures retry within the shared budget; persistent failures stop after two retries", { timeout: 15000 }, async t => {
@@ -402,19 +404,20 @@ test("exhausted network retries preserve the workspace for manual continuation, 
     let offline = true;
     const f = await fixture(t, { intercept: async (payload, res) => {
       const last = lastTool(payload);
-      if (last?.name === "read_file" && JSON.parse(last.arguments).path === "source.json") {
+      if (!payload.tools?.some(t => t.function.name === "dispatch_subagents") && last?.name === "read_file" && JSON.parse(last.arguments).path === "source.json") {
         sendAgentTools(res, [...scriptedAgentTools(payload), { name: "write_file", args: { path: "notes.md", content: "transaction=事务；已保存草稿" } }]);
         return true;
       }
       if (offline && last?.name === "write_file") { res.destroy(); return true; }
     } });
     const failed = await f.worker.submitOrAttachJob(f.jobOptions); await failed.taskPromise;
-    assert.equal(failed.status, "failed"); assert.equal(f.requests.length, 5);
+    assert.equal(failed.status, "failed"); assert.equal(f.requests.length, 7);
     const saved = await f.worker.harness!.snapshot(DocumentResumeDoc, failed.conversationId, f.worker.context);
-    assert.deepEqual(saved?.document?.draft, { a: "数据库事务：a", b: "数据库事务：b" });
-    assert.equal(saved?.document?.revision, 1);
-    assert.equal(saved?.document?.notes, "transaction=事务；已保存草稿");
-    assert.ok(Array.isArray(saved?.document?.messages));
+    const child = (saved?.document?.children as unknown as { agent: { draft: unknown; revision: number; notes: string; messages: unknown } }[])[0].agent;
+    assert.deepEqual(child.draft, { a: "数据库事务：a", b: "数据库事务：b" });
+    assert.equal(child.revision, 1);
+    assert.equal(child.notes, "transaction=事务；已保存草稿");
+    assert.ok(Array.isArray(child.messages));
     assert.deepEqual((await f.worker.snapshotJob(failed)).published_cues, []);
     const failedEvents = []; for await (const event of f.worker.observeJobStream(failed)) failedEvents.push(event);
     assert.equal(failedEvents.at(-1)?.type, "error");
@@ -429,7 +432,7 @@ test("exhausted network retries preserve the workspace for manual continuation, 
     assert.notEqual(resumed.taskId, failed.taskId);
     await resumed.taskPromise;
     assert.equal(resumed.status, "succeeded"); assert.equal(resumed.error, undefined);
-    assert.equal(f.requests.length - calls, 3, "only read/check/submit remain; committed writes must not repeat");
+    assert.equal(f.requests.length - calls, 8, "child read/check/submit and main acceptance remain; committed writes must not repeat");
     assert.match(JSON.stringify(f.requests[calls].messages), /transaction=事务/);
     const doc = await f.worker.harness!.snapshot(SubtitleJobDoc, resumed.conversationId, f.worker.context);
     assert.equal(doc?.network_attempts, f.requests.length); assert.equal(doc?.error, undefined);
@@ -449,9 +452,9 @@ test("manual continuation cannot reset the shared budget; an explicitly raised b
   assert.equal(failed.status, "failed"); assert.equal(f.requests.length, 2);
   await assert.rejects(f.worker.submitOrAttachJob(f.jobOptions), /预算已耗尽/);
   assert.equal(f.requests.length, 2);
-  const resumed = await f.worker.submitOrAttachJob({ ...f.jobOptions, budgetLimit: 8 }); await resumed.taskPromise;
+  const resumed = await f.worker.submitOrAttachJob({ ...f.jobOptions, budgetLimit: 20 }); await resumed.taskPromise;
   assert.equal(resumed.jobId, failed.jobId); assert.equal(resumed.status, "succeeded");
-  assert.equal(f.requests.length, 5, "the initial read and saved write must not repeat");
+  assert.equal(f.requests.length, 12, "the main read and dispatch must not repeat");
 });
 
 test("explicit cancellation aborts live model I/O and never publishes saved but unsubmitted edits", { timeout: 15000 }, async t => {

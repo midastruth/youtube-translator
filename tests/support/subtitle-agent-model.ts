@@ -25,9 +25,16 @@ export function scriptedAgentTools(payload: AgentPayload, translate = (id: strin
         const r = JSON.parse(m.content!);
         return typeof r.content === "string" && r.content.startsWith("[") ? JSON.parse(r.content) as { cue_id: string }[] : [];
       });
-      const count = Math.min(9, Math.max(1, Math.ceil(all.length / 80)));
-      const size = Math.ceil(all.length / count);
-      return [{ name: "dispatch_subagents", args: { brief: "Natural concise subtitles. transaction=数据库事务; preserve negation and numbers.", assignments: Array.from({ length: count }, (_, i) => ({ start_id: all[i * size].cue_id, end_id: all[Math.min(all.length, (i + 1) * size) - 1].cue_id, instructions: "Translate this semantic section using the shared glossary." })) } }];
+      const team = payload.messages.filter(m => m.role === "user").map(m => {
+        try { return JSON.parse(m.content || "{}"); } catch { return {}; }
+      }).find(m => m.role === "main");
+      const openingSize = team?.stream_opening ? Math.min(all.length, 20) : 0;
+      const remainder = all.slice(openingSize);
+      const count = remainder.length ? Math.min(9, Math.max(1, Math.ceil(remainder.length / 80))) : 0;
+      const size = count ? Math.ceil(remainder.length / count) : 0;
+      return [{ name: "dispatch_subagents", args: { brief: "Natural concise subtitles. transaction=数据库事务; preserve negation and numbers.",
+        ...(openingSize ? { opening: { end_id: all[openingSize - 1].cue_id, instructions: "Translate the small opening promptly for viewing." } } : {}),
+        assignments: Array.from({ length: count }, (_, i) => ({ start_id: remainder[i * size].cue_id, end_id: remainder[Math.min(remainder.length, (i + 1) * size) - 1].cue_id, instructions: "Translate this semantic section using the shared glossary." })) } }];
     }
     return [{ name: "write_file", args: { path: "translations.json", merge: true, content: JSON.stringify(Object.fromEntries(source.map(c => [c.cue_id, translate(c.cue_id)]))) } }];
   }

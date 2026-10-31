@@ -23,9 +23,10 @@ youtube-translator/
   │  yt-dlp CLI / 浏览器字幕兜底 / Whisper 媒体转写 → 清洗展平与智能断句
   ├─ 字幕编辑 Agent (document) ── 进程内存零跳转 ──► 内置 AgentWorker
   │                                                  ├─ 原文只读，译文与笔记可编辑
-  │                                                  ├─ 主 Agent 规划风格与术语，最多 9 个子 Agent 并行翻译
-  │                                                  ├─ 文件和会话按轮持久化，可恢复
-  │                                                  └─ 主 Agent 验收并关闭子 Agent，校验后原子发布
+  │                                                  ├─ 主 Agent 规划，开头专用 Agent + 最多 9 个后续 Agent
+  │                                                  ├─ 子 Agent 各自连续推进，每回合持久化，不逐轮互等
+  │                                                  ├─ 开头自查提交后先显示，可边看边等后续翻译
+  │                                                  └─ 主 Agent 全文验收、关闭与校验后，统一发布并覆盖开头预览
   └─ 快速模式 (legacy) ──► 独立逐句 / 10~12 条上下文分块快速翻译 (OpenAI / DeepL)
   ▼
 SSE / WebSocket 实时回传事件（外部字幕时间轴统一为毫秒） → 扩展渲染到 YouTube 播放器

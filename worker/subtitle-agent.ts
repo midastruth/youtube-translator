@@ -246,7 +246,8 @@ export function finalSubtitleAgentCues(input: DocumentInput, state: SubtitleAgen
 }
 
 export const SubtitleEditingTask = createDocumentTask({
-  name: "subtitle_editing_agent", initial: initialSubtitleAgentState, advance: advanceSubtitleAgent,
+  name: "subtitle_editing_agent", initial: initialSubtitleAgentState,
+  advance: (input: DocumentInput, state: SubtitleAgentState, call: (context: Context) => Promise<AssistantMessage>) => advanceSubtitleAgent(input, state, call),
   call: (input, _state, context, options) => callDocumentTurn(input, context, options),
   finalCues: finalSubtitleAgentCues,
   progress: (input, state) => `${Object.keys(state.draft).length}/${input.cues.length}，已执行 ${state.cursor} 轮`,

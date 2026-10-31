@@ -15,6 +15,8 @@ export type FinalResult = {
 export type JobDocument = {
   job_key: string; video_id: string; from_lang: string; to_lang: string; status: string; stage: string;
   source_cues: SourceCue[]; published_cues: Record<string, PublishedCue>; failed_cues: string[];
+  // Submitted, self-checked opening; provisional until whole-document acceptance.
+  preview_cues?: Record<string, PublishedCue>;
   glossary: Draft; network_attempts: number; budget_limit: number; revisions: Record<string, number>;
   cancelled: boolean; final_result: FinalResult | null;
   engine?: string; job_id?: string; title?: string; task_id?: number; error?: string; progress?: string;

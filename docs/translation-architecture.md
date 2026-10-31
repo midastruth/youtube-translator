@@ -24,8 +24,9 @@ flowchart TD
     C --> Q{translate_engine}
     
     Q -->|document：默认字幕编辑 Agent| DW[主 Agent 规划风格、术语和语义分段]
-    DW --> CHILD[1～9 个子 Agent 并行翻译]
-    CHILD --> REVIEW[主 Agent 验收、关闭子 Agent、校验并提交]
+    DW --> CHILD[开头专用 Agent + 最多 9 个后续 Agent 独立连续翻译]
+    CHILD -->|开头自查提交后先发预览| SSE
+    CHILD --> REVIEW[主 Agent 全文验收、关闭子 Agent、校验并提交]
     DW <--> DB[(SQLite：主/子文件工作区与工具会话)]
     CHILD <--> DB
     DW <--> LLM[pi-ai 流式调用：ChatCompletions SSE + Tools]
@@ -85,10 +86,10 @@ flowchart TD
 
 ### A. 字幕编辑 Agent (`document` 模式)
 - **实现位置**：`worker/translation-team.ts`，复用 `worker/subtitle-agent.ts` 的文件工具、`worker/document-task.ts` 的持久化边界和共享模型传输。
-- **驱动方式**：主 Agent 评估内容、风格和术语，按任务大小用 `dispatch_subagents` 分派 1～9 个连续语义片段。子 Agent 使用独立会话并行翻译；模型端点需支持 Chat Completions SSE 与 Function Calling，不要求 `response_format`。
+- **驱动方式**：主 Agent 快速评估内容、风格和术语，用 `dispatch_subagents` 按翻译量分派一个小范围开头片段，以及最多 9 个后续语义片段。子 Agent 使用独立会话连续推进，不逐轮互等；模型端点需支持 Chat Completions SSE 与 Function Calling，不要求 `response_format`。
 - **工作区**：只读 `source.json`、可编辑 `translations.json` 和 `notes.md` 均为 SQLite 持久化的虚拟文件。子 Agent 只能写自己片段，但能通过 `read_context` 查阅全文；所有子任务共享不可变风格与术语规范，不开放 shell 或任意宿主路径。
-- **持久化循环**：一个主回合或一轮并行子回合后统一提交检查点，保留独立会话、文件和错误状态；失败只重试相应子任务。主、子请求及重试共用默认 128 次预算。未提交的并行轮次重启后可能重做。
-- **发布门禁**：子任务提交后合并，主 Agent 语义检查与修订，再 `accept_translation` → `close_subagents` → `validate_translation` → `finish_translation`。修改译文使验收和校验失效，宿主复核后原子发布。
+- **持久化循环**：每个主/子回合完成后保存检查点，保留独立会话、文件和错误状态；失败只重试相应子任务，退避不阻塞兄弟任务。主、子请求及重试共用预算，默认 `0` 不限次数。重启仅可能重做尚未保存的在途回合。
+- **发布门禁**：开头 Agent 自查、校验并显式提交后，宿主保存 `preview_cues` 并先发 `provisional: true` 预览，供边看边等后续翻译。全部子任务提交合并后，主 Agent 语义检查与修订，再 `accept_translation` → `close_subagents` → `validate_translation` → `finish_translation`。修改译文使验收和校验失效；宿主复核后原子发布全文，以相同索引覆盖开头预览，只有此时发送 `done`。
 - **质量与性能边界**：结构由程序保证，语义由子 Agent 翻译与主 Agent 验收负责；无法由结构校验保证语义正确，实际加速比受模型服务并发限流影响。
 - **历史兼容**：`document_subtitle_translation` 和 `subtitle_editing_agent` 继续注册恢复历史任务；新任务使用 `subtitle_translation_team` 及独立缓存版本。详见 [主/子 Agent 翻译](document-translation.md)。
 
@@ -113,7 +114,7 @@ flowchart TD
 | **媒体转写** | `server/src/transcribe.ts` & `audio.ts` | ffmpeg 分块、Whisper API 转写及秒级时间轴拼接 |
 | **快速翻译** | `server/src/translate.ts` | Legacy 模式快速翻译、`[$i]` 标记解析与超时防护 |
 | **字幕断句** | `server/src/subtitle-processing.ts` | 文本清洗、非语音段落过滤、规则与统计智能断句 |
-| **翻译团队** | `worker/translation-team.ts` | 主 Agent 规划验收、最多 9 个子 Agent 并发、关闭与发布门禁 |
+| **翻译团队** | `worker/translation-team.ts` | 主 Agent 规划验收、开头 + 最多 9 个后续 Agent 独立推进、预览与最终发布门禁 |
 | **共享 Agent 工具** | `worker/subtitle-agent.ts` | 文件工具、会话、上下文压缩与历史单 Agent 定义 |
 | **模型传输与历史流程** | `worker/document-translation.ts` | 共享 SSE 模型调用；保留历史固定阶段流程 |
 | **持久化任务边界** | `worker/document-task.ts` | pi-durable 检查点、重试、预算、取消与原子发布 |

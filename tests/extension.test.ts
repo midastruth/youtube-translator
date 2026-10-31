@@ -115,6 +115,29 @@ test("duplicate cue replaces one subtitle; actual background action exports mill
   } finally { browser.close(); }
 });
 
+test("opening preview renders while the stream is live, then final review replaces it at the same index", async () => {
+  const browser = new BrowserFixture();
+  try {
+    browser.execute("content"); browser.execute("background"); browser.toggle();
+    await eventually(() => browser.streams.length === 1);
+    const opening = { index: 0, start: 1000, end: 2500, text: "Transaction" };
+    const later = { index: 1, start: 2500, end: 4000, text: "Later definition" };
+    browser.send([{ type: "meta", total_cues: 2 }, { type: "source_cue", ...opening }, { type: "source_cue", ...later },
+      { type: "cue", ...opening, translation: "开头预览", provisional: true }]);
+    browser.seek(1500);
+    await eventually(() => browser.dom.window.document.querySelector(".tran")?.textContent === "开头预览");
+    assert.match(browser.dom.window.document.querySelector(".status")!.textContent!, /开头字幕已可观看.*全文审校后/);
+    browser.send([{ type: "cue", ...opening, translation: "统一审校后的事务", provisional: false },
+      { type: "cue", ...later, translation: "后续定义", provisional: false }, { type: "done", total_cues: 2, failed_cues: 0 }]);
+    browser.finish();
+    await eventually(() => browser.dom.window.document.querySelector(".tran")?.textContent === "统一审校后的事务");
+    browser.clickAction();
+    assert.equal(browser.response?.count, 2);
+    const exported = await browser.downloads[0].blob.text();
+    assert.match(exported, /统一审校后的事务/); assert.doesNotMatch(exported, /开头预览/);
+  } finally { browser.close(); }
+});
+
 test("new page and SPA navigation start off despite legacy enabled; stale stream cannot repaint", async () => {
   const browser = new BrowserFixture({ enabled: true });
   try {

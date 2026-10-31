@@ -341,7 +341,7 @@ test("restart resumes committed edits and tool conversation without repeating th
   assert.equal(events.at(-1)?.type, "done");
   // Only the pending read-after-write provider turn is replayed, not the committed write request.
   assert.equal(f.requests.filter(r => lastTool(r)?.name === "read_file" && JSON.parse(lastTool(r)!.arguments).path === "source.json").length, 2);
-  assert.equal(events.filter(e => e.type === "cue").length, 2);
+  assert.equal(events.filter(e => e.type === "cue" && !e.provisional).length, 2);
 });
 
 test("long transcript is paginated and incrementally edited instead of requiring one giant model output", { timeout: 15000 }, async t => {
@@ -464,7 +464,7 @@ test("exhausted network retries preserve the workspace for manual continuation, 
     assert.equal(doc?.failed_cues.length, 0);
     assert.equal((await f.worker.harness!.snapshot(DocumentResumeDoc, resumed.conversationId, f.worker.context))?.document, null);
     const events = []; for await (const event of f.worker.observeJobStream(resumed)) events.push(event);
-    assert.equal(events.at(-1)?.type, "done"); assert.equal(events.filter(e => e.type === "cue").length, 2);
+    assert.equal(events.at(-1)?.type, "done"); assert.equal(events.filter(e => e.type === "cue" && !e.provisional).length, 2);
     for (const name of await fs.readdir(f.directory)) if (name.startsWith("state.db")) {
       assert.equal((await fs.readFile(`${f.directory}/${name}`)).includes(Buffer.from(f.jobOptions.apiKey)), false);
     }

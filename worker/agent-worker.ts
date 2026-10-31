@@ -370,7 +370,7 @@ export class AgentWorker {
       if (existing) this.jobs.delete(jobKey);
       const input = {
         jobId: `doc-${crypto.randomUUID()}`, jobKey, videoId: options.videoId || "", title: options.title || "",
-        fromLang: options.fromLang || "en", toLang: options.toLang || "zh-CN", cues, config, teamReasoning, budgetLimit: documentRequestBudget(options.budgetLimit),
+        fromLang: options.fromLang || "en", toLang: options.toLang || "zh-CN", cues, config, teamReasoning, streamOpening: true, budgetLimit: documentRequestBudget(options.budgetLimit),
       };
       initialTranslationTeamState(input); // Validate before creating durable state.
       if (!documentCredentials.get(jobKey) && !process.env.OPENAI_API_KEY && !process.env.TRANSLATE_API_KEY) {

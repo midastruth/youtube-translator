@@ -24,6 +24,8 @@ export type DocumentInput = {
   cues: SourceCue[]; config: ModelConfig; budgetLimit: number;
   // Snapshotted per-role settings. Older tasks inherit their persisted global effort.
   teamReasoning?: { main: ReasoningEffort; subagent: ReasoningEffort };
+  // New team jobs require a dedicated opening assignment. Absent in old tasks.
+  streamOpening?: boolean;
   // Explicit retry of a failed task restores its conversation's saved checkpoint.
   resume?: boolean;
 };

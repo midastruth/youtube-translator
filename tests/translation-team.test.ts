@@ -4,7 +4,7 @@ import http from "node:http";
 import fs from "node:fs/promises";
 import type { AssistantMessage, Context, ToolCall } from "@earendil-works/pi-ai";
 import {
-  advanceTranslationTeam, finalTranslationTeamCues, initialTranslationTeamState,
+  stepTranslationTeam as advanceTranslationTeam, finalTranslationTeamCues, initialTranslationTeamState,
   translationTeamTool, translationTeamReasoning, translationTeamModelConfig, translationTeamProgress, MAX_SUBAGENTS,
 } from "../worker/translation-team.js";
 import { DocumentModelError, modelConfig } from "../worker/document-translation.js";
@@ -23,8 +23,10 @@ function response(name: string, args: unknown): AssistantMessage {
     content: [{ type: "toolCall", id: "tool", name, arguments: args as ToolCall["arguments"] }],
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
 }
-function dispatch(document = input()) {
-  return { brief: "Concise technical subtitles; transaction=事务; preserve numbers and negation.", assignments: document.cues.map(c => ({ start_id: c.cue_id, end_id: c.cue_id, instructions: "Translate using the shared terminology." })) };
+function dispatch(document = input(), opening = false) {
+  return { brief: "Concise technical subtitles; transaction=事务; preserve numbers and negation.",
+    ...(opening ? { opening: { end_id: document.cues[0].cue_id, instructions: "Translate the opening promptly for viewing." } } : {}),
+    assignments: document.cues.slice(opening ? 1 : 0).map(c => ({ start_id: c.cue_id, end_id: c.cue_id, instructions: "Translate using the shared terminology." })) };
 }
 function manifest(context: Context) {
   return JSON.parse((context.messages[1] as { content: string }).content) as { id: string; shared_brief: string; assignment: { start_id: string } };
@@ -219,7 +221,7 @@ test("durable HTTP workflow runs nine concurrent model sessions, enforces aggreg
       active--;
     }
     const tools = main && payload.messages.some(m => m.role === "tool") && !payload.messages.some(m => m.tool_calls?.some(c => c.function.name === "dispatch_subagents"))
-      ? [{ name: "dispatch_subagents", args: dispatch() }] : scriptedAgentTools(payload);
+      ? [{ name: "dispatch_subagents", args: dispatch(input(), true) }] : scriptedAgentTools(payload);
     sendAgentTools(res, tools);
   });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));

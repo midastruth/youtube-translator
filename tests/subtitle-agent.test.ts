@@ -325,6 +325,55 @@ test("default document job edits a workspace, self-checks then publishes atomica
   }
 });
 
+test("token exhaustion preserves child drafts and manual continuation resets only the token allowance", { timeout: 15000 }, async t => {
+  let exhaust = true;
+  const f = await fixture(t, { intercept: async (payload, res) => {
+    const tools = scriptedAgentTools(payload);
+    if (!exhaust || !tools.some(tool => tool.name === "write_file")) return;
+    exhaust = false;
+    modelChunk(res, { tool_calls: tools.map((tool, index) => ({ index, id: `token-${index}`, type: "function", function: { name: tool.name, arguments: JSON.stringify(tool.args) } })) });
+    res.write(`data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: 20_000_000, completion_tokens: 100, total_tokens: 20_000_100 } })}\n\n`);
+    endModelStream(res, "tool_calls");
+    return true;
+  } });
+  const job = await f.worker.submitOrAttachJob(f.jobOptions); await job.taskPromise;
+  assert.equal(job.status, "failed");
+  assert.match(String(job.error), /Token 预算已耗尽/);
+  const before = await f.worker.snapshotJob(job);
+  assert.equal(before.token_budget_limit, 20_000_000);
+  assert.ok(before.token_budget_used >= 20_000_100);
+  assert.deepEqual(before.published_cues, []);
+  const saved = await f.worker.harness!.snapshot(DocumentResumeDoc, job.conversationId, f.worker.context);
+  const state = saved?.document as unknown as { children: { agent: { draft: Record<string, string> } }[] };
+  assert.ok(state.children.some(child => Object.keys(child.agent.draft).length > 0));
+  const calls = f.requests.length;
+  await f.restart();
+  const stored = await f.worker.getJob(job.jobKey);
+  assert.ok(stored);
+  assert.equal((await f.worker.snapshotJob(stored)).token_budget_used, before.token_budget_used, "service restart does not reset usage");
+  const resumed = await f.worker.submitOrAttachJob(f.jobOptions); await resumed.taskPromise;
+  assert.equal(resumed.jobId, job.jobId);
+  assert.equal(resumed.status, "succeeded");
+  const after = await f.worker.snapshotJob(resumed);
+  assert.ok(after.token_budget_used > 0 && after.token_budget_used < 20_000_000);
+  assert.equal(after.token_usage, before.token_usage + after.token_budget_used);
+  const doc = await f.worker.harness!.snapshot(SubtitleJobDoc, job.conversationId, f.worker.context);
+  assert.equal(doc?.network_attempts, f.requests.length, "request count is not reset");
+  assert.ok(f.requests.length > calls);
+  const rewrites = f.requests.slice(calls).flatMap(p => p.messages.filter(m => m.role === "assistant").flatMap(m => m.tool_calls ?? [])).filter(c => c.function.name === "write_file");
+  assert.ok(rewrites.length > 0, "resumed history retains the saved write turn");
+});
+
+test("automatic retries cannot reset token usage when failed calls omit usage", { timeout: 15000 }, async t => {
+  const f = await fixture(t, { failures: [503] });
+  const job = await f.worker.submitOrAttachJob({ ...f.jobOptions, tokenBudget: 1 }); await job.taskPromise;
+  assert.equal(job.status, "failed");
+  assert.match(String(job.error), /Token 预算已耗尽/);
+  assert.equal(f.requests.length, 1, "retry must stop before another network request");
+  const snapshot = await f.worker.snapshotJob(job);
+  assert.ok(snapshot.token_budget_used > 1, "unmetered failed requests are conservatively counted");
+});
+
 test("default document budget is unlimited beyond 128 calls and still counts actual usage", { timeout: 15000 }, async t => {
   const previous = process.env.TRANSLATION_REQUEST_BUDGET;
   delete process.env.TRANSLATION_REQUEST_BUDGET;

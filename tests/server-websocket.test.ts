@@ -238,6 +238,7 @@ describe("WebSocket Subtitle Processing Endpoint (/ws/subtitle/process)", () => 
         translate_base_url: `http://127.0.0.1:${mockModelPort}/v1`,
         translate_api_key: "test-document-key",
         translate_request_budget: 512,
+        translate_token_budget: 30_000_000,
         source_cues: [
           { start: 0, end: 1000, text: "The transaction failed." },
           { start: 2000, end: 3500, text: "Database connection closed." },
@@ -269,6 +270,8 @@ describe("WebSocket Subtitle Processing Endpoint (/ws/subtitle/process)", () => 
     assert.ok(job);
     const doc = await worker.harness!.snapshot(SubtitleJobDoc, job.conversationId, worker.context);
     assert.equal(doc?.budget_limit, 512);
+    assert.equal(doc?.token_budget_limit, 30_000_000);
+    assert.ok((doc?.token_usage ?? 0) > 0);
   });
 
   it("handles abrupt client disconnection without server crash", { timeout: 10_000 }, async () => {

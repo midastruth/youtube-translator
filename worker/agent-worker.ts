@@ -9,6 +9,7 @@ import { calculateJobKey } from "./keys.js";
 import type { JobRecord, SubmitJobOptions, TaskResult, StreamEvent, JobDocument } from "./types.js";
 import { DocumentResumeDoc, documentCredentials } from "./document-task.js";
 import { modelConfig } from "./document-translation.js";
+import { documentTokenBudget } from "./token-budget.js";
 import type { DocumentInput } from "./document-translation.js";
 import { TRANSLATION_TEAM_VERSION, TranslationTeamTask, initialTranslationTeamState, translationTeamReasoning } from "./translation-team.js";
 import { observeDocumentJob } from "./document-stream.js";
@@ -219,6 +220,7 @@ export class AgentWorker {
       const input = {
         jobId: `doc-${crypto.randomUUID()}`, jobKey, videoId: options.videoId || "", title: options.title || "",
         fromLang: options.fromLang || "en", toLang: options.toLang || "zh-CN", cues, config, teamReasoning, streamOpening: true, budgetLimit: documentRequestBudget(options.budgetLimit),
+        tokenBudget: documentTokenBudget(options.tokenBudget),
       };
       initialTranslationTeamState(input); // Validate before creating durable state.
       if (!documentCredentials.get(jobKey) && !process.env.OPENAI_API_KEY && !process.env.TRANSLATE_API_KEY) {
@@ -233,6 +235,7 @@ export class AgentWorker {
         doc.engine = "document"; doc.title = input.title; doc.video_id = input.videoId;
         doc.from_lang = input.fromLang; doc.to_lang = input.toLang; doc.source_cues = cues;
         doc.status = "running"; doc.stage = "editing"; doc.budget_limit = input.budgetLimit;
+        doc.token_budget_limit = input.tokenBudget;
       }, this.context);
       if (!taskId) throw new Error("Document task creation failed");
       const emitter = new EventEmitter(); emitter.on("error", () => {});
@@ -261,6 +264,7 @@ export class AgentWorker {
     if (saved.workflow !== TranslationTeamTask.definition.name) throw new Error("Translation checkpoint incompatible");
     const input = { ...(previous.input as DocumentInput), resume: true };
     input.budgetLimit = documentRequestBudget(options.budgetLimit, input.budgetLimit);
+    input.tokenBudget = documentTokenBudget(options.tokenBudget, input.tokenBudget);
     let taskId: TaskId<TaskResult> | undefined;
     const conversation = await this.activeHarness.conversation(existing.conversationId, this.context);
     if (!conversation) throw new Error("Document job state missing");
@@ -272,6 +276,10 @@ export class AgentWorker {
       taskId = await tx.createTask(TranslationTeamTask, input, { ownership: { kind: "conversation" } });
       doc.task_id = taskId; doc.status = "running"; doc.stage = String(saved.document!.stage);
       doc.budget_limit = input.budgetLimit; doc.final_result = null; doc.failed_cues = [];
+      // Only an explicit restart of a failed job grants a fresh token allowance.
+      // Attachments, automatic retries and worker restarts keep the old baseline.
+      doc.token_budget_limit = input.tokenBudget;
+      doc.token_budget_start = doc.token_usage ?? 0;
       delete doc.error;
     }, this.context);
     if (!taskId) throw new Error("Document task creation failed");
@@ -324,6 +332,9 @@ export class AgentWorker {
       published_cues: Object.values(doc?.published_cues || {}),
       failed_cues: doc?.failed_cues || [],
       final_result: doc?.final_result,
+      token_usage: doc?.token_usage ?? 0,
+      token_budget_used: (doc?.token_usage ?? 0) - (doc?.token_budget_start ?? 0),
+      token_budget_limit: doc?.token_budget_limit ?? 0,
     };
   }
 

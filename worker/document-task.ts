@@ -1,5 +1,6 @@
 import { defineDoc, defineTask } from "@earendil-works/pi-durable";
 import { SubtitleJobDoc } from "./job-document.js";
+import { checkTokenBudget } from "./token-budget.js";
 import { DocumentModelError, DocumentPermanentError } from "./document-translation.js";
 import type { DocumentInput, ModelCallOptions } from "./document-translation.js";
 import type { JsonObject } from "@earendil-works/pi-durable";
@@ -122,7 +123,14 @@ export const createDocumentTask = <State extends DurableState, Request, Response
               const doc = await tx.doc(SubtitleJobDoc, runtime.conversationId);
               if (doc.cancelled) throw new Error("Task cancelled");
               if (input.budgetLimit > 0 && doc.network_attempts >= input.budgetLimit) throw new DocumentPermanentError("budget", `翻译请求预算已耗尽（已用 ${doc.network_attempts} 次，上限 ${input.budgetLimit} 次，主/子 Agent 共享）；请提高 TRANSLATION_REQUEST_BUDGET 或 translate_request_budget 后继续，已保存草稿会保留`);
+              checkTokenBudget(input.tokenBudget, (doc.token_usage ?? 0) - (doc.token_budget_start ?? 0));
               doc.network_attempts++;
+            }, context);
+          },
+          recordTokens: async tokens => {
+            await runtime.commit(async tx => {
+              const doc = await tx.doc(SubtitleJobDoc, runtime.conversationId);
+              doc.token_usage = (doc.token_usage ?? 0) + tokens;
             }, context);
           },
         }), { signal: runtime.signal, save });

@@ -79,6 +79,7 @@ test("stream errors distinguish subtitle loading from translation and explain bu
     { meta: true, detail: "provider_error", prefix: "字幕翻译失败" },
     { meta: false, detail: "subagent-7: Document translation exhausted its model request budget", prefix: "翻译请求预算已耗尽" },
     { meta: false, detail: "翻译请求预算已耗尽；请提高预算后继续", prefix: "翻译请求预算已耗尽" },
+    { meta: true, detail: "subagent-1: 翻译 Token 预算已耗尽", prefix: "翻译 Token 预算已耗尽" },
   ]) {
     const browser = new BrowserFixture();
     try {
@@ -93,6 +94,10 @@ test("stream errors distinguish subtitle loading from translation and explain bu
       if (scenario.prefix === "翻译请求预算已耗尽") {
         assert.match(message, /512.*续翻已保存草稿/);
         assert.doesNotMatch(message, /字幕加载失败/);
+      }
+      if (scenario.prefix === "翻译 Token 预算已耗尽") {
+        assert.match(message, /草稿已保留.*重新开启翻译.*重置 Token 预算并续翻/);
+        assert.doesNotMatch(message, /512|请提高预算/);
       }
       assert.equal(browser.streams.length, 1, "budget failures do not start automatic fresh tasks");
     } finally { browser.close(); }

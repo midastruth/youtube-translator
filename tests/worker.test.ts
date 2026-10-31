@@ -100,6 +100,7 @@ test("HTTP snapshot delegates to the worker's committed application view", async
     t.mock.method(worker.harness, "snapshot", async () => undefined);
     assert.deepEqual(await worker.snapshotJob(job), {
       job_id: job.jobId, status: job.status, published_cues: [], failed_cues: [], final_result: undefined,
+      token_usage: 0, token_budget_used: 0, token_budget_limit: 0,
     });
     const applicationView = { job_id: "application-id", status: "application-status", published_cues: [], failed_cues: [], final_result: undefined };
     t.mock.method(worker, "snapshotJob", async (observedJob: typeof job) => {

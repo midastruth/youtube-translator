@@ -12,6 +12,7 @@ export const SubtitleJobDoc = defineDoc<JobDocument>({
     job_key: "", video_id: "", from_lang: "en", to_lang: "zh-CN",
     status: "pending", stage: "editing", source_cues: [], published_cues: {},
     failed_cues: [], network_attempts: 0, budget_limit: 0,
+    token_usage: 0, token_budget_start: 0, token_budget_limit: 0,
     cancelled: false, final_result: null,
   }),
   // Updated on every saved turn; write a full base periodically to bound replay.

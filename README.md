@@ -171,6 +171,7 @@ make build-extension
    - **主 Agent + 子 Agent**：主 Agent 阅读内容，评估翻译风格和术语，根据任务大小按语义分派 1～9 个子 Agent 并行翻译，最后检查合并译文、修订并验收。主、子 Agent 使用独立工具会话和同一模型配置。
    - **隔离文件工作区**：`source.json` 保留原文、编号和时间轴且只读；Agent 用文件工具操作 `translations.json` 与 `notes.md`。子 Agent 只能写自己片段的编号，但可用 `read_context` 查阅全文；共享主 Agent 的风格和术语规范。文件由 SQLite 检查点持久化，不开放任意宿主文件或 shell。
    - **分批编辑与恢复**：长字幕可分页读取、逐批写入和反复修改；工具会话与文件按轮保存，重启后继续。断网等错误耗尽自动重试后，再次点击开始会从最后保存的草稿、笔记和对话续翻，不会重新翻译已保存的部分；保持视频、目标语言、模型等设置一致。浏览器 API Key 需重新随请求提供，不会持久化。上下文过长时压缩会话，保留文件与笔记。
+   - **宽松 Token 预算**：主/子 Agent 每轮共享 **2000 万 Token**（输入、缓存输入与输出，含推理），可用 `.env` 的 `TRANSLATION_TOKEN_BUDGET` 或 API 的 `translate_token_budget` 调整，`0` 关闭。耗尽后保留草稿；用户重新开启翻译时重置本轮 Token 预算，从已保存内容续翻。自动重试、重连和服务重启不重置。按模型 usage 计数，缺失时保守估算；只阻止后续请求，在途请求仍保存，允许小幅超额。
    - **续翻边界**：尚未提交检查点的那一轮可能重做；手动续翻不重置累计请求预算。新任务默认关闭请求次数限制。若旧任务提示预算耗尽，可在扩展设置中将「Agent 任务请求预算」设为 `0`（关闭限制）或提高至 `512`，保存后重新开启翻译；留空使用服务端配置。也可在服务端 `.env` 设置 `TRANSLATION_REQUEST_BUDGET=0`（关闭限制；1～1000 启用上限），重启服务后再次开始；Docker Compose 用 `docker compose up -d --build server` 重新创建容器。SSE / WebSocket 也可传入 `translate_request_budget` 覆盖上限。保留相同视频与翻译设置即可续翻已保存草稿，提高上限或关闭限制可能增加 API 费用。主动取消的任务重新开始；升级前已失败且没有恢复检查点的任务无法追溯恢复。
    - **验收与关闭**：子任务完成后，主 Agent 审查实际合并译文并修订，调用 `accept_translation` 验收当前修订，再用 `close_subagents` 关闭子会话，最后 `validate_translation` → `finish_translation`。修改译文使验收和校验失效；普通回答不能发布，宿主复核后统一发布。
    - **模型与预算**：使用 `pi-ai` Chat Completions SSE + function tools；默认模型 `sol`，可配置。单次调用最多 10 分钟，临时 HTTP 499、429、5xx 等最多重试两次。主、子 Agent 默认不限制累计请求次数（`TRANSLATION_REQUEST_BUDGET=0`），但仍记录实际调用数；显式启用上限时，所有 Agent 共用一份预算。

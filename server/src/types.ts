@@ -34,6 +34,7 @@ export type SubtitleRequest = {
   translate_context_tokens?: number;
   translate_output_tokens?: number;
   translate_request_budget?: number;
+  translate_token_budget?: number;
   whisper_enabled?: boolean;
   whisper_api_key?: string;
   whisper_base_url?: string;

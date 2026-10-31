@@ -7,7 +7,7 @@ import type { SourceCue, InputCue, FinalResult, TaskResult } from "./domain-type
 export type SubmitJobOptions = {
   cues?: InputCue[]; videoId?: string; title?: string; fromLang?: string; toLang?: string;
   segmentation?: string; provider?: string; model?: string; baseUrl?: string;
-  budgetLimit?: number; engine?: string; apiKey?: string; contextTokens?: number; outputTokens?: number;
+  budgetLimit?: number; tokenBudget?: number; engine?: string; apiKey?: string; contextTokens?: number; outputTokens?: number;
 };
 export type JobRecord = {
   jobId: string; jobKey: string; taskId: TaskId<TaskResult> | null; conversationId: ConversationId;

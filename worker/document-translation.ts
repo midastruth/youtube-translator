@@ -1,5 +1,5 @@
 import { normalizeContext } from "@earendil-works/pi-ai";
-import type { Context, Model } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Context, Model } from "@earendil-works/pi-ai";
 import { stream } from "@earendil-works/pi-ai/api/openai-completions";
 import type { SourceCue } from "./domain-types.js";
 import { modelEndpoint } from "./model-endpoint.js";
@@ -21,6 +21,8 @@ export type ModelConfig = {
 export type DocumentInput = {
   jobId: string; jobKey: string; videoId: string; title: string; fromLang: string; toLang: string;
   cues: SourceCue[]; config: ModelConfig; budgetLimit: number;
+  // Shared per manual run; absent in older checkpoints (unlimited).
+  tokenBudget?: number;
   // Snapshotted per-role settings. Older team tasks inherit their persisted global effort.
   teamReasoning?: { main: ReasoningEffort; subagent: ReasoningEffort };
   // New team jobs require a dedicated opening assignment. Absent in old team tasks.
@@ -86,7 +88,20 @@ export class DocumentStreamError extends Error {
   }
 }
 
-export type ModelCallOptions = { apiKey?: string; signal?: AbortSignal; reserve: () => Promise<void>; cacheKey?: string };
+export type ModelCallOptions = {
+  apiKey?: string; signal?: AbortSignal; reserve: () => Promise<void>; cacheKey?: string;
+  recordTokens?: (tokens: number) => Promise<void>;
+};
+
+/** Cached input counts too; output already includes hidden reasoning tokens. */
+export function turnTokenUsage(response: AssistantMessage, context: Context, outputTokens: number): number {
+  const usage = response.usage;
+  const total = usage && usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+  if (Number.isSafeInteger(total) && total > 0) return total;
+  // Missing usage must not bypass the budget; conservatively charge the full
+  // output allowance for unmetered turns, including failed/truncated streams.
+  return tokenEstimate(context) + outputTokens;
+}
 
 /** Stable per job+agent, at most 64 chars (OpenAI prompt_cache_key limit), and reveals no job data. */
 export function promptCacheSession(input: DocumentInput, agent = "main") {
@@ -158,6 +173,7 @@ export async function callDocumentTurn(input: DocumentInput, context: Context, o
   // No tool execution or publication until the entire stream has finished safely.
   for await (const _event of events) { /* Final response is checked below. */ }
   const response = await events.result();
+  await options.recordTokens?.(turnTokenUsage(response, context, input.config.outputTokens));
   // pi returns failures as messages, not rejected promises. Never parse partial
   // output or persist its raw errorMessage: provider bodies may contain secrets.
   options.signal?.throwIfAborted();

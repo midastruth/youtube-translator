@@ -12,6 +12,8 @@ export type JobDocument = {
   // Submitted, self-checked opening; provisional until whole-document acceptance.
   preview_cues?: Record<string, PublishedCue>;
   network_attempts: number; budget_limit: number;
+  // Lifetime usage and the baseline of the current user-started run.
+  token_usage?: number; token_budget_start?: number; token_budget_limit?: number;
   cancelled: boolean; final_result: FinalResult | null;
   engine?: string; job_id?: string; title?: string; task_id?: number; error?: string; progress?: string;
 };

@@ -432,6 +432,14 @@ export function validateSubtitleRequest(body: any): void {
     }
   }
 
+  if (body.translate_token_budget !== undefined && body.translate_token_budget !== null) {
+    if (!Number.isSafeInteger(body.translate_token_budget) || body.translate_token_budget < 0) {
+      const err = new Error("translate_token_budget must be a nonnegative safe integer (0 disables the limit)");
+      (err as any).statusCode = 422;
+      throw err;
+    }
+  }
+
   if (body.translate_context_tokens !== undefined && body.translate_context_tokens !== null) {
     if (typeof body.translate_context_tokens !== "number" || !Number.isFinite(body.translate_context_tokens) || body.translate_context_tokens <= 0) {
       const err = new Error("translate_context_tokens must be a positive number");
@@ -1101,6 +1109,7 @@ export function createApp(deps?: Partial<AppDependencies>): http.RequestListener
               contextTokens: body.translate_context_tokens,
               outputTokens: body.translate_output_tokens,
               budgetLimit: body.translate_request_budget,
+              tokenBudget: body.translate_token_budget,
             });
           } catch (err: any) {
             // Submission boundary: expose a failed submission as an SSE error.

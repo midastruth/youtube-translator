@@ -410,6 +410,7 @@ describe("Server API Endpoints & Gateway Integration", () => {
           translate_base_url: `http://127.0.0.1:${address.port}/v1`,
           translate_api_key: "test-key-123",
           translate_request_budget: 512,
+          translate_token_budget: 30_000_000,
           translate_to: "zh-CN",
           source_cues: [{ start: 1500, end: 3500, text: "A database transaction." }],
         }),
@@ -428,7 +429,10 @@ describe("Server API Endpoints & Gateway Integration", () => {
       assert.ok(translatedCue.translation.startsWith("测试翻译："));
       assert.equal(events.at(-1)?.type, "done");
       assert.ok(calls.length > 0);
-      for (const call of calls) assert.equal((call as unknown as { request_budget: number }).request_budget, 512);
+      for (const call of calls) {
+        assert.equal((call as unknown as { request_budget: number }).request_budget, 512);
+        assert.equal((call as unknown as { token_budget: number }).token_budget, 30_000_000);
+      }
     } finally {
       restoreEndpoint();
       modelServer.closeAllConnections();

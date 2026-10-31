@@ -1,12 +1,24 @@
-import { defineTask } from "@earendil-works/pi-durable";
+import { defineDoc, defineTask } from "@earendil-works/pi-durable";
 import { SubtitleJobDoc } from "./task-definition.js";
 import { advanceDocument, callDocumentModel, DocumentModelError, DocumentPermanentError, finalDocumentCues, initialDocumentState } from "./document-translation.js";
 import type { DocumentInput, ModelCallOptions } from "./document-translation.js";
+import type { JsonObject } from "@earendil-works/pi-durable";
 import type { PublishedCue, TaskResult } from "./domain-types.js";
 
 // Credentials deliberately never enter task inputs, checkpoints, SQLite or model context.
 export const documentCredentials = new Map<string, string>();
 type DurableState = { stage: string; cursor: number; feedback: string };
+
+// Terminal task receipts do not retain their checkpoint. Keep the last committed
+// workspace separately so an explicit retry can create a successor task in the
+// same conversation, even after a worker restart. Never store credentials here.
+export const DocumentResumeDoc = defineDoc<{
+  workflow: string; document: JsonObject | null;
+}>({
+  kind: "youtube.document_resume", version: 1, scope: "conversation",
+  history: "latest", fork: "initial",
+  initial: () => ({ workflow: "", document: null }),
+});
 
 /** Shared persistence, cancellation, retry and atomic-publication boundary. */
 export const createDocumentTask = <State extends DurableState, Request, Response>(workflow: {
@@ -19,8 +31,15 @@ export const createDocumentTask = <State extends DurableState, Request, Response
 }) => defineTask<DocumentInput, { phase: string; document: State; failures: number }, TaskResult>({
   name: workflow.name,
   version: 1,
-  initial: input => ({ phase: "run", document: workflow.initial(input), failures: 0 }),
+  initial: input => ({ phase: input.resume ? "restore" : "run", document: workflow.initial(input), failures: 0 }),
   phases: {
+    restore: async (_task, runtime, context) => {
+      const saved = await runtime.snapshot(DocumentResumeDoc, runtime.conversationId, context);
+      if (!saved?.document || saved.workflow !== workflow.name) throw new Error("Translation checkpoint missing or incompatible");
+      await runtime.commit(async () => ({
+        status: "running", checkpoint: { phase: "run", document: saved.document as unknown as State, failures: 0 },
+      }), context);
+    },
     run: async (task, runtime, context) => {
       const input = task.input;
       const checkpoint = task.state.checkpoint;
@@ -36,6 +55,8 @@ export const createDocumentTask = <State extends DurableState, Request, Response
             // Atomic publication: never expose an unsubmitted or invalid draft.
             doc.published_cues = Object.fromEntries(cues.map(c => [c.cue_id, c]));
             doc.final_result = result; doc.status = "succeeded"; doc.stage = "published";
+            const saved = await tx.doc(DocumentResumeDoc, runtime.conversationId);
+            saved.document = null;
             return { status: "terminal", outcome: { status: "completed", result } };
           }, context);
           documentCredentials.delete(input.jobKey);
@@ -92,6 +113,9 @@ export const createDocumentTask = <State extends DurableState, Request, Response
         await runtime.commit(async tx => {
           const doc = await tx.doc(SubtitleJobDoc, runtime.conversationId);
           doc.status = "failed"; doc.stage = "failed"; doc.error = message;
+          const saved = await tx.doc(DocumentResumeDoc, runtime.conversationId);
+          saved.workflow = workflow.name;
+          saved.document = JSON.parse(JSON.stringify(checkpoint.document)) as JsonObject;
           doc.failed_cues = input.cues.map(c => c.cue_id);
           const result = { status: "failed", total_cues: input.cues.length, failed_cues: input.cues.length, published_cues: 0, cues: [] };
           doc.final_result = result;
@@ -106,6 +130,8 @@ export const createDocumentTask = <State extends DurableState, Request, Response
     await runtime.commit(async tx => {
       const doc = await tx.doc(SubtitleJobDoc, runtime.conversationId);
       doc.cancelled = true; doc.status = "cancelled"; doc.stage = "cancelled";
+      const saved = await tx.doc(DocumentResumeDoc, runtime.conversationId);
+      saved.document = null;
       return { status: "terminal", outcome: { status: "completed", result: { cancelled: true, published_cues: [] } } };
     }, context);
   },

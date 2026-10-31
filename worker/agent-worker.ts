@@ -9,8 +9,9 @@ import { SubtitleTranslationTask, SubtitleJobDoc, TaskMocks } from "./task-defin
 import { calculateJobKey } from "./keys.js";
 import type { JobRecord, SubmitJobOptions, TaskResult, StreamEvent, JobDocument } from "./types.js";
 import { observeJobEvents } from "./job-stream.js";
-import { DocumentTranslationTask, documentCredentials } from "./document-task.js";
+import { DocumentTranslationTask, DocumentResumeDoc, documentCredentials } from "./document-task.js";
 import { modelConfig } from "./document-translation.js";
+import type { DocumentInput } from "./document-translation.js";
 import { SUBTITLE_AGENT_VERSION, SubtitleEditingTask, initialSubtitleAgentState } from "./subtitle-agent.js";
 import { observeDocumentJob } from "./document-stream.js";
 import type { TaskId, ConversationId } from "@earendil-works/pi-durable";
@@ -181,7 +182,7 @@ export class AgentWorker {
   }: SubmitJobOptions): Promise<JobRecord> {
     if (engine === "document") return this.submitDocumentJob({
       cues, videoId, title, fromLang, toLang, segmentation, provider, model, baseUrl,
-      apiKey, contextTokens, outputTokens, budgetLimit: budgetLimit ?? 128,
+      apiKey, contextTokens, outputTokens, budgetLimit,
     });
     const effectiveJobKey =
       jobKey ||
@@ -349,6 +350,10 @@ export class AgentWorker {
         if (existing.status === "succeeded") documentCredentials.delete(jobKey);
         return existing;
       }
+      if (existing?.status === "failed") {
+        const saved = await this.activeHarness.snapshot(DocumentResumeDoc, existing.conversationId, this.context);
+        if (saved?.document) return this.resumeDocumentJob(existing, options);
+      }
       if (existing) this.jobs.delete(jobKey);
       const input = {
         jobId: `doc-${crypto.randomUUID()}`, jobKey, videoId: options.videoId || "", title: options.title || "",
@@ -370,27 +375,13 @@ export class AgentWorker {
         doc.status = "running"; doc.stage = "editing"; doc.budget_limit = input.budgetLimit;
       }, this.context);
       if (!taskId) throw new Error("Document task creation failed");
-      const id = taskId;
       const emitter = new EventEmitter(); emitter.on("error", () => {});
       const job: JobRecord = {
-        jobId: input.jobId, jobKey, taskId: id, conversationId: conversation.id, engine: "document",
+        jobId: input.jobId, jobKey, taskId, conversationId: conversation.id, engine: "document",
         videoId: input.videoId, title: input.title, fromLang: input.fromLang, toLang: input.toLang,
         cues, status: "running", emitter, aborted: false,
       };
-      this.jobs.set(jobKey, job);
-      job.taskPromise = (async () => {
-        try {
-          await this.activeHarness.waitForTask(id, this.context);
-          const doc = await this.activeHarness.snapshot(SubtitleJobDoc, conversation.id, this.context);
-          if (!doc) throw new Error("Document job state missing");
-          job.status = doc.status; job.finalResult = doc.final_result;
-          if (doc.error) job.error = new Error(doc.error);
-        } catch (error) {
-          // Completion-observer boundary: retain a failed record and its cause
-          // rather than letting a background promise reject unobserved.
-          job.status = "failed"; job.error = error;
-        }
-      })();
+      this.watchDocumentJob(job);
       return job;
     })();
     this.pendingJobs.set(jobKey, pending);
@@ -398,6 +389,56 @@ export class AgentWorker {
     // Submission cleanup only; initialization/storage failures still propagate.
     catch (error) { documentCredentials.delete(jobKey); throw error; }
     finally { this.pendingJobs.delete(jobKey); }
+  }
+
+  private async resumeDocumentJob(existing: JobRecord, options: SubmitJobOptions): Promise<JobRecord> {
+    if (!documentCredentials.get(existing.jobKey) && !process.env.OPENAI_API_KEY && !process.env.TRANSLATE_API_KEY) {
+      throw new Error("全文翻译需要 API Key；请在扩展或 Worker 环境变量中配置");
+    }
+    const previous = existing.taskId && await this.activeHarness.getTask(existing.taskId, this.context);
+    const saved = await this.activeHarness.snapshot(DocumentResumeDoc, existing.conversationId, this.context);
+    if (!previous || !saved?.document) throw new Error("Translation checkpoint missing");
+    const isEditor = saved.workflow === SubtitleEditingTask.definition.name;
+    if (!isEditor && saved.workflow !== DocumentTranslationTask.definition.name) throw new Error("Translation checkpoint incompatible");
+    const input = { ...(previous.input as unknown as DocumentInput), resume: true };
+    input.budgetLimit = options.budgetLimit ?? input.budgetLimit;
+    if (!Number.isSafeInteger(input.budgetLimit) || input.budgetLimit < 1 || input.budgetLimit > 1000) throw new Error("Invalid document request budget");
+    let taskId: TaskId<TaskResult> | undefined;
+    const conversation = await this.activeHarness.conversation(existing.conversationId, this.context);
+    if (!conversation) throw new Error("Document job state missing");
+    await conversation.commit(async tx => {
+      const doc = await tx.doc(SubtitleJobDoc, existing.conversationId);
+      if (doc.cancelled || doc.status !== "failed" || doc.task_id !== existing.taskId) throw new Error("Translation job is no longer resumable");
+      // Retrying must not silently reset the shared request budget.
+      if (doc.network_attempts >= input.budgetLimit) throw new Error("翻译请求预算已耗尽；请提高预算后继续");
+      taskId = isEditor
+        ? await tx.createTask(SubtitleEditingTask, input, { ownership: { kind: "conversation" } })
+        : await tx.createTask(DocumentTranslationTask, input, { ownership: { kind: "conversation" } });
+      doc.task_id = taskId; doc.status = "running"; doc.stage = String(saved.document!.stage);
+      doc.budget_limit = input.budgetLimit; doc.final_result = null; doc.failed_cues = [];
+      delete doc.error;
+    }, this.context);
+    if (!taskId) throw new Error("Document task creation failed");
+    const emitter = new EventEmitter(); emitter.on("error", () => {});
+    const job: JobRecord = { ...existing, taskId, status: "running", error: undefined, finalResult: null, taskPromise: null, emitter };
+    this.watchDocumentJob(job);
+    return job;
+  }
+
+  private watchDocumentJob(job: JobRecord) {
+    this.jobs.set(job.jobKey, job);
+    job.taskPromise = (async () => {
+      try {
+        await this.activeHarness.waitForTask(job.taskId!, this.context);
+        const doc = await this.activeHarness.snapshot(SubtitleJobDoc, job.conversationId, this.context);
+        if (!doc) throw new Error("Document job state missing");
+        job.status = doc.status; job.finalResult = doc.final_result;
+        if (doc.error) job.error = new Error(doc.error);
+      } catch (error) {
+        // Completion-observer boundary: never leave an unobserved rejection.
+        job.status = "failed"; job.error = error;
+      }
+    })();
   }
 
   async abortJob(jobId: string) {

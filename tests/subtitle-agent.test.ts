@@ -11,6 +11,7 @@ import { modelConfig } from "../worker/document-translation.js";
 import type { DocumentInput } from "../worker/document-translation.js";
 import { AgentWorker } from "../worker/agent-worker.js";
 import { SubtitleJobDoc } from "../worker/task-definition.js";
+import { DocumentResumeDoc } from "../worker/document-task.js";
 import { trustModelEndpoint } from "./support/model-endpoint.js";
 import { endModelStream, modelChunk, sendModelJson } from "./support/model-stream.js";
 import { scriptedAgentTools, sendAgentTools, type AgentPayload } from "./support/subtitle-agent-model.js";
@@ -383,7 +384,7 @@ test("budget exhaustion and chat-only pseudo-completion never publish partial tr
   });
 });
 
-test("authentication failures do not retry or leak provider bodies; corrected credentials can start a new job", { timeout: 15000 }, async t => {
+test("authentication failures do not retry or leak provider bodies; corrected credentials resume the same job", { timeout: 15000 }, async t => {
   const f = await fixture(t, { intercept: async (_payload, res, authorization) => {
     if (authorization === "Bearer bad-key") { res.writeHead(401); res.end("private bad-key provider response"); return true; }
   } });
@@ -392,7 +393,65 @@ test("authentication failures do not retry or leak provider bodies; corrected cr
   const events = []; for await (const event of f.worker.observeJobStream(failed)) events.push(event);
   assert.equal(events.at(-1)?.type, "error"); assert.doesNotMatch(JSON.stringify(events), /private|bad-key/);
   const retry = await f.worker.submitOrAttachJob(f.jobOptions); await retry.taskPromise;
-  assert.notEqual(retry.jobId, failed.jobId); assert.equal(retry.status, "succeeded");
+  assert.equal(retry.jobId, failed.jobId); assert.notEqual(retry.taskId, failed.taskId);
+  assert.equal(retry.status, "succeeded");
+});
+
+test("exhausted network retries preserve the workspace for manual continuation, including after restart", { timeout: 15000 }, async t => {
+  for (const restart of [false, true]) await t.test(restart ? "after restart" : "same worker", async t => {
+    let offline = true;
+    const f = await fixture(t, { intercept: async (payload, res) => {
+      const last = lastTool(payload);
+      if (last?.name === "read_file" && JSON.parse(last.arguments).path === "source.json") {
+        sendAgentTools(res, [...scriptedAgentTools(payload), { name: "write_file", args: { path: "notes.md", content: "transaction=事务；已保存草稿" } }]);
+        return true;
+      }
+      if (offline && last?.name === "write_file") { res.destroy(); return true; }
+    } });
+    const failed = await f.worker.submitOrAttachJob(f.jobOptions); await failed.taskPromise;
+    assert.equal(failed.status, "failed"); assert.equal(f.requests.length, 5);
+    const saved = await f.worker.harness!.snapshot(DocumentResumeDoc, failed.conversationId, f.worker.context);
+    assert.deepEqual(saved?.document?.draft, { a: "数据库事务：a", b: "数据库事务：b" });
+    assert.equal(saved?.document?.revision, 1);
+    assert.equal(saved?.document?.notes, "transaction=事务；已保存草稿");
+    assert.ok(Array.isArray(saved?.document?.messages));
+    assert.deepEqual((await f.worker.snapshotJob(failed)).published_cues, []);
+    const failedEvents = []; for await (const event of f.worker.observeJobStream(failed)) failedEvents.push(event);
+    assert.equal(failedEvents.at(-1)?.type, "error");
+    if (restart) await f.restart();
+    offline = false;
+    const calls = f.requests.length;
+    const [resumed, attached] = await Promise.all([
+      f.worker.submitOrAttachJob(f.jobOptions), f.worker.submitOrAttachJob(f.jobOptions),
+    ]);
+    assert.equal(resumed, attached);
+    assert.equal(resumed.jobId, failed.jobId); assert.equal(resumed.conversationId, failed.conversationId);
+    assert.notEqual(resumed.taskId, failed.taskId);
+    await resumed.taskPromise;
+    assert.equal(resumed.status, "succeeded"); assert.equal(resumed.error, undefined);
+    assert.equal(f.requests.length - calls, 3, "only read/check/submit remain; committed writes must not repeat");
+    assert.match(JSON.stringify(f.requests[calls].messages), /transaction=事务/);
+    const doc = await f.worker.harness!.snapshot(SubtitleJobDoc, resumed.conversationId, f.worker.context);
+    assert.equal(doc?.network_attempts, f.requests.length); assert.equal(doc?.error, undefined);
+    assert.equal(doc?.failed_cues.length, 0);
+    assert.equal((await f.worker.harness!.snapshot(DocumentResumeDoc, resumed.conversationId, f.worker.context))?.document, null);
+    const events = []; for await (const event of f.worker.observeJobStream(resumed)) events.push(event);
+    assert.equal(events.at(-1)?.type, "done"); assert.equal(events.filter(e => e.type === "cue").length, 2);
+    for (const name of await fs.readdir(f.directory)) if (name.startsWith("state.db")) {
+      assert.equal((await fs.readFile(`${f.directory}/${name}`)).includes(Buffer.from(f.jobOptions.apiKey)), false);
+    }
+  });
+});
+
+test("manual continuation cannot reset the shared budget; an explicitly raised budget preserves saved work", { timeout: 15000 }, async t => {
+  const f = await fixture(t);
+  const failed = await f.worker.submitOrAttachJob({ ...f.jobOptions, budgetLimit: 2 }); await failed.taskPromise;
+  assert.equal(failed.status, "failed"); assert.equal(f.requests.length, 2);
+  await assert.rejects(f.worker.submitOrAttachJob(f.jobOptions), /预算已耗尽/);
+  assert.equal(f.requests.length, 2);
+  const resumed = await f.worker.submitOrAttachJob({ ...f.jobOptions, budgetLimit: 8 }); await resumed.taskPromise;
+  assert.equal(resumed.jobId, failed.jobId); assert.equal(resumed.status, "succeeded");
+  assert.equal(f.requests.length, 5, "the initial read and saved write must not repeat");
 });
 
 test("explicit cancellation aborts live model I/O and never publishes saved but unsubmitted edits", { timeout: 15000 }, async t => {
@@ -406,4 +465,7 @@ test("explicit cancellation aborts live model I/O and never publishes saved but 
   assert.deepEqual((await f.worker.snapshotJob(job)).published_cues, []);
   const events = []; for await (const event of f.worker.observeJobStream(job)) events.push(event);
   assert.equal(events.at(-1)?.code, "task_cancelled"); hold.release();
+  assert.equal((await f.worker.harness!.snapshot(DocumentResumeDoc, job.conversationId, f.worker.context))?.document, null);
+  const fresh = await f.worker.submitOrAttachJob(f.jobOptions); await fresh.taskPromise;
+  assert.notEqual(fresh.jobId, job.jobId); assert.equal(fresh.status, "succeeded");
 });

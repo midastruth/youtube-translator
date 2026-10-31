@@ -22,6 +22,8 @@ export type ModelConfig = {
 export type DocumentInput = {
   jobId: string; jobKey: string; videoId: string; title: string; fromLang: string; toLang: string;
   cues: SourceCue[]; config: ModelConfig; budgetLimit: number;
+  // Explicit retry of a failed task restores its conversation's saved checkpoint.
+  resume?: boolean;
 };
 export type Chapter = { start_id: string; end_id: string; title: string };
 export type Brief = { summary: string; glossary: { term: string; meaning: string; translation: string }[] };

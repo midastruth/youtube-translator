@@ -7,7 +7,6 @@ youtube-translator/
 ├── server/              统一 TypeScript 服务端（单端口 8787，内置 Worker）
 ├── worker/              字幕编辑 Agent（pi-durable 持久化与文件工作区）
 ├── extension/           轻量浏览器扩展（Chrome 121+ / Firefox 128+）
-├── backend/             [历史兼容] Python FastAPI 后端 (youtube-ingest)
 ├── docker-compose.yml
 ├── Makefile
 └── README.md
@@ -32,7 +31,7 @@ youtube-translator/
 SSE / WebSocket 实时回传事件（外部字幕时间轴统一为毫秒） → 扩展渲染到 YouTube 播放器
 ```
 
-> **架构演进说明**：系统已全面升级为以 TypeScript 单体架构为主（`server/` 默认内置 `worker/`，监听单一端口 `8787`）。原 Python 后端已沉淀为历史兼容实现，不再是运行时依赖。
+> **架构演进说明**：系统已全面升级为以 TypeScript 单体架构为主（`server/` 默认内置 `worker/`，监听单一端口 `8787`）。原 Python 后端已移除；Python 仅作为 yt-dlp 等外部工具的运行依赖。
 
 ---
 
@@ -70,9 +69,8 @@ Docker Compose 默认只启动 `server`（统一 TypeScript 单体服务）与 `
 
 > **环境与测试边界提示**：当前开发环境中宿主机 Docker socket 存在权限限制（`socket permission denied` on `/var/run/docker.sock`），无法连接 Docker 守护进程；本项目不声称已在当前环境中实测构建或运行真实 Docker 镜像，所有自动化测试均在纯本地 Node 环境下运行；上述 Docker 命令遵循标准的 Dockerfile / Compose 配置契约。
 
-#### 可选历史兼容入口（选读）
+#### 可选独立 Worker 入口（选读）
 - **独立内部 Worker**：如需单独以独立进程/端口（8788）运行 Worker 调试，可执行 `npm run worker` 或 `docker compose --profile legacy up worker`。
-- **Python 后端实现**：保留在 `backend/` 目录下供对比与历史参考，若需启动可执行 `make start-backend`。
 
 ---
 
@@ -191,6 +189,10 @@ make build-extension
 - **密钥安全与存储**：
   - **扩展前端**：用户在选项页配置的 API Key 会持久化存储于浏览器的本地扩展存储（`chrome.storage.local`）中，用户须妥善保护本机浏览器 profile 安全。
   - **服务端与 Worker**：请求中携带的密钥仅留存于运行时内存中用于发起 LLM 调用，**绝不写入任务检查点数据库（SQLite）或任何磁盘文件**。
+- **访问边界**：
+  - 服务端默认只监听 `127.0.0.1`（Docker Compose 也只绑定宿主机回环地址）；服务端会用部署方的 API Key 发起调用，暴露到局域网/公网前须自行加访问控制。
+  - 浏览器请求（HTTP、SSE、WebSocket）只接受 `ALLOWED_ORIGINS` 白名单中的来源，默认为 `https://www.youtube.com`、`chrome-extension://*`、`moz-extension://*`；其他网页一律 403，CORS 不再返回 `*`。
+  - 模型与 Whisper 端点均由服务端固定（`OPENAI_BASE_URL` / `WHISPER_BASE_URL`），请求中的 `translate_base_url` / `whisper_base_url` 必须与之完全一致，且不跟随重定向；服务端密钥只发往所属服务商（如 `OPENAI_API_KEY` 不会发往默认的 Groq 端点）。
 
 实现与限制细节详见 [`docs/document-translation.md`](docs/document-translation.md) 与 [`docs/translation-architecture.md`](docs/translation-architecture.md)。
 

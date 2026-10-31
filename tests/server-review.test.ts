@@ -9,7 +9,7 @@ import { startServer, type ServerOptions } from "../server/src/server.js";
 import { SubtitleCache } from "../server/src/cache.js";
 import { AgentWorker } from "../worker/agent-worker.js";
 import { WhisperClient, type WhisperClientOptions } from "../server/src/transcribe.js";
-import { trustModelEndpoint } from "./support/model-endpoint.js";
+import { trustModelEndpoint, trustWhisperEndpoint } from "./support/model-endpoint.js";
 import { respondAsSubtitleAgent } from "./support/subtitle-agent-model.js";
 
 // Independent acceptance checks: exercise the public HTTP contract, not just module mocks.
@@ -193,6 +193,7 @@ test("review: Whisper fallback sends the language hint, shares concurrent work a
   await new Promise<void>(resolve => model.listen(0, "127.0.0.1", resolve));
   t.after(async () => { model.closeAllConnections(); await new Promise<void>(resolve => model.close(() => resolve())); });
   const address = model.address(); assert.ok(address && typeof address !== "string");
+  t.after(trustWhisperEndpoint(`http://127.0.0.1:${address.port}/v1`));
   class FastWhisperClient extends WhisperClient {
     constructor(options: WhisperClientOptions = {}) { super({ ...options, retries: 1, timeoutSeconds: 0.5 }); }
   }

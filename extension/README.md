@@ -55,7 +55,6 @@ Firefox 临时扩展在浏览器重启后自动移除；长期安装需打包并
 
 ### 历史兼容说明 (Legacy)
 - 若需要配合旧版独立 Worker 调试，可以在根目录运行 `npm run worker`（默认端口 8788）。
-- 旧版 Python FastAPI 后端可通过 `make start-backend` 启动，但已不再是默认运行依赖。
 
 ## 开发与验收
 

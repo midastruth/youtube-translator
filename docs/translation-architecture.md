@@ -109,7 +109,6 @@ flowchart TD
 | **持久化任务边界** | `worker/document-task.ts` | pi-durable 检查点、重试、预算、取消与原子发布 |
 | **AgentWorker 核心** | `worker/agent-worker.ts` | 任务队列管理、事件流观察、生命周期调度 |
 | **任务文档** | `worker/job-document.ts` | 团队与流式观察者共用的持久化状态 |
-| **[历史兼容实现]** | `backend/src/youtube_ingest/server.py` | 原 Python FastAPI 后端，仅作历史兼容参考保留 |
 
 ---
 

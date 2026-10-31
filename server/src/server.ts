@@ -89,7 +89,8 @@ export function createServer(options?: Partial<ServerOptions>): {
 export async function startServer(options?: Partial<ServerOptions>): Promise<RunningServer> {
   const rawPort = options?.port ?? process.env.PORT ?? 8787;
   const port = Number(rawPort);
-  const host = options?.host ?? process.env.HOST ?? "0.0.0.0";
+  // Loopback by default: the API spends deployment keys. Containers set HOST=0.0.0.0.
+  const host = options?.host ?? process.env.HOST ?? "127.0.0.1";
 
   const { server, cache, worker, ready, close } = createServer(options);
 

@@ -9,6 +9,7 @@ import {
 import { getTranslationProfile } from "./cache.js";
 import { translateStream } from "./translate.js";
 import { sendWebSocket } from "./streaming.js";
+import { checkRequestOrigin } from "./origin.js";
 import type { SubtitleRequest } from "./types.js";
 
 export function attachWebSocket(server: http.Server, deps?: Partial<AppDependencies> | ResolvedDependencies): () => Promise<void> {
@@ -22,6 +23,11 @@ export function attachWebSocket(server: http.Server, deps?: Partial<AppDependenc
       const url = new URL(request.url || "/", "http://localhost");
       if (url.pathname !== "/ws/subtitle/process") {
         socket.end("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
+        return;
+      }
+      // WebSockets bypass CORS entirely; the Origin check is the only browser boundary.
+      if (checkRequestOrigin(request) === false) {
+        socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
         return;
       }
       wss.handleUpgrade(request, socket, head, ws => wss.emit("connection", ws, request));

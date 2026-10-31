@@ -16,7 +16,8 @@ services:
     depends_on:
       - pot-provider
     ports:
-      - "${PORT:-8787}:8787"
+      # 仅绑定宿主机回环地址；如需局域网访问，请改为 "${PORT:-8787}:8787" 并自行加访问控制
+      - "127.0.0.1:${PORT:-8787}:8787"
     volumes:
       - server-data:/app/cache
       # Optional Netscape-format YouTube cookies can be placed here.
@@ -24,6 +25,7 @@ services:
     environment:
       - HOST=0.0.0.0
       - PORT=8787
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-}
       - CACHE_DIR=/app/cache
       - TRANSLATION_AGENT_STORAGE=/app/cache/worker-storage.db
       - CACHE_METADATA_TTL_SECONDS=${CACHE_METADATA_TTL_SECONDS:-86400}

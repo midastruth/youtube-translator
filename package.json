@@ -18,7 +18,6 @@
     "test:coverage": "npm run build && node --import ./scripts/register-typescript.ts --experimental-test-coverage --test-coverage-include='worker/**/*.ts' --test-coverage-include='extension/src/types.ts' --test-coverage-include='extension/src/subtitles.ts' --test-coverage-include='extension/src/stream-request.ts' --test-coverage-include='extension/src/subtitle-stream.ts' --test tests/*.test.ts",
     "test:unit": "npm run build && node --import ./scripts/register-typescript.ts --test tests/*.test.ts",
     "test:acceptance": "npm run build && MISE_BABASHKA_VERSION=1.13.225 bb scripts/acceptance.bb",
-    "test:backend": "cd backend && uv run pytest",
     "worker": "npm run build && node --env-file-if-exists=.env dist/worker/server.js"
   },
   "dependencies": {

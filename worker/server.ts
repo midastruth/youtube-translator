@@ -10,14 +10,10 @@ export async function createWorkerServer({ storagePath = STORAGE_PATH, port = PO
   await worker.start();
 
   const server = http.createServer(async (req, res) => {
-    // CORS
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-
-    if (req.method === "OPTIONS") {
-      res.writeHead(204);
-      res.end();
+    // Internal service API: browsers (which always send Origin cross-site) are never callers.
+    if (req.headers.origin !== undefined) {
+      res.writeHead(403, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ detail: "Browser access to the internal worker is not allowed" }));
       return;
     }
 

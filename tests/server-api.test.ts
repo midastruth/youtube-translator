@@ -75,7 +75,8 @@ describe("Server API Endpoints & Gateway Integration", () => {
 
     const res = await fetch(`${baseUrl}/api/health`);
     assert.equal(res.status, 200);
-    assert.equal(res.headers.get("access-control-allow-origin"), "*");
+    // Non-browser callers send no Origin and receive no CORS grant.
+    assert.equal(res.headers.get("access-control-allow-origin"), null);
 
     const data = await res.json();
     assert.equal(data.status, "ok");
@@ -91,9 +92,11 @@ describe("Server API Endpoints & Gateway Integration", () => {
     });
     baseUrl = `http://127.0.0.1:${runningServer.port}`;
 
-    const res = await fetch(`${baseUrl}/api/health`, { method: "OPTIONS" });
+    const origin = "https://www.youtube.com";
+    const res = await fetch(`${baseUrl}/api/health`, { method: "OPTIONS", headers: { Origin: origin } });
     assert.equal(res.status, 204);
-    assert.equal(res.headers.get("access-control-allow-origin"), "*");
+    assert.equal(res.headers.get("access-control-allow-origin"), origin);
+    assert.equal(res.headers.get("access-control-allow-credentials"), null);
     assert.ok(res.headers.get("access-control-allow-methods")?.includes("GET"));
   });
 

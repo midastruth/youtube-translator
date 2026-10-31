@@ -1,6 +1,5 @@
 /**
  * YouTube extraction helpers via yt-dlp CLI.
- * Mirrors backend/src/youtube_ingest/youtube.py.
  */
 
 import { execFile } from "node:child_process";

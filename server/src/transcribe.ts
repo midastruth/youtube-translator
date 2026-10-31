@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { IngestError } from "./errors.js";
+import { normalizeEndpoint } from "../../worker/model-endpoint.js";
 import type { SubtitleCue } from "./types.js";
 
 const SENTENCE_BOUNDARY = /(?<=[.!?。！？])(?:\s+|$|\n+)|\n+/;
@@ -42,6 +43,33 @@ export interface WhisperClientOptions {
   retries?: number;
 }
 
+const DEFAULT_WHISPER_BASE_URL = "https://api.groq.com/openai/v1";
+
+/** The only Whisper destination this deployment trusts. A caller-supplied URL
+ * must match it exactly; it can never redirect audio or credentials elsewhere. */
+export function whisperEndpoint(baseUrl?: string): string {
+  const trusted = normalizeEndpoint(
+    process.env.WHISPER_BASE_URL || process.env.OPENAI_BASE_URL || DEFAULT_WHISPER_BASE_URL
+  );
+  if (baseUrl && normalizeEndpoint(baseUrl) !== trusted) {
+    throw new IngestError("Whisper endpoint is not trusted; configure WHISPER_BASE_URL on the server");
+  }
+  return trusted;
+}
+
+/** Deployment keys are only sent to the provider they belong to. */
+export function deploymentWhisperKey(endpoint: string): string | undefined {
+  if (process.env.WHISPER_API_KEY) return process.env.WHISPER_API_KEY;
+  if (process.env.GROQ_API_KEY && new URL(endpoint).hostname === "api.groq.com") {
+    return process.env.GROQ_API_KEY;
+  }
+  if (process.env.OPENAI_API_KEY) {
+    const openai = normalizeEndpoint(process.env.OPENAI_BASE_URL || "https://api.openai.com/v1");
+    if (endpoint === openai) return process.env.OPENAI_API_KEY;
+  }
+  return undefined;
+}
+
 export class WhisperClient {
   public apiKey?: string;
   public baseUrl: string;
@@ -50,23 +78,16 @@ export class WhisperClient {
   public retries: number;
 
   constructor(options?: WhisperClientOptions) {
-    this.apiKey =
-      options?.apiKey ||
-      process.env.WHISPER_API_KEY ||
-      process.env.GROQ_API_KEY ||
-      process.env.OPENAI_API_KEY;
-    this.baseUrl = (
-      options?.baseUrl ||
-      process.env.WHISPER_BASE_URL ||
-      process.env.OPENAI_BASE_URL ||
-      "https://api.groq.com/openai/v1"
-    ).replace(/\/+$/, "");
+    this.baseUrl = whisperEndpoint(options?.baseUrl);
+    this.apiKey = options?.apiKey || deploymentWhisperKey(this.baseUrl);
     this.model = options?.model || process.env.WHISPER_MODEL || "whisper-large-v3";
     this.timeoutSeconds = options?.timeoutSeconds ?? 180.0;
     this.retries = options?.retries ?? 3;
 
     if (!this.apiKey) {
-      throw new IngestError("Set WHISPER_API_KEY (or GROQ_API_KEY) before audio transcription");
+      throw new IngestError(
+        "Set WHISPER_API_KEY (or GROQ_API_KEY for Groq, OPENAI_API_KEY for OPENAI_BASE_URL) before audio transcription"
+      );
     }
   }
 
@@ -109,6 +130,8 @@ export class WhisperClient {
           },
           body: formData,
           signal: controller.signal,
+          // Credentials must never follow a redirect to another destination.
+          redirect: "error",
         });
 
         if (!res.ok) {

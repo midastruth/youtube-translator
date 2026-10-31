@@ -19,6 +19,7 @@ import type {
   PreparedEvents,
 } from "./types.js";
 import { IngestError, TranslateError } from "./errors.js";
+import { checkRequestOrigin, setCorsHeaders } from "./origin.js";
 import { AgentWorker } from "../../worker/agent-worker.js";
 import { SubtitleCache, getTranslationProfile, type SubtitleCacheOptions } from "./cache.js";
 import {
@@ -33,7 +34,7 @@ import {
 } from "./subtitle-processing.js";
 import { translateSubtitles as defaultTranslateSubtitles, type TranslateOptions } from "./translate.js";
 import { splitAudio as defaultSplitAudio } from "./audio.js";
-import { WhisperClient as DefaultWhisperClient, transcribeTimedChunks as defaultTranscribeTimedChunks } from "./transcribe.js";
+import { WhisperClient as DefaultWhisperClient, transcribeTimedChunks as defaultTranscribeTimedChunks, whisperEndpoint } from "./transcribe.js";
 
 export { IngestError, TranslateError };
 
@@ -176,7 +177,6 @@ export function browserSourceEvents(
 }
 
 export function sendJson(res: http.ServerResponse, statusCode: number, data: any): void {
-  setCorsHeaders(res);
   const payload = JSON.stringify(data);
   res.writeHead(statusCode, {
     "Content-Type": "application/json; charset=utf-8",
@@ -189,12 +189,7 @@ export function sendError(res: http.ServerResponse, statusCode: number, detail: 
   sendJson(res, statusCode, { detail });
 }
 
-export function setCorsHeaders(res: http.ServerResponse): void {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, Accept");
-  res.setHeader("Access-Control-Allow-Credentials", "true");
-}
+export { setCorsHeaders } from "./origin.js";
 
 export async function parseJsonBody<T = any>(req: http.IncomingMessage): Promise<T> {
   const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10MB limit to prevent OOM
@@ -407,6 +402,17 @@ export function validateSubtitleRequest(body: any): void {
   for (const field of stringFields) {
     if (body[field] !== undefined && body[field] !== null && typeof body[field] !== "string") {
       const err = new Error(`Field '${field}' must be a string`);
+      (err as any).statusCode = 422;
+      throw err;
+    }
+  }
+
+  // Only the deployment chooses where audio and keys are sent (SSRF / key exfiltration).
+  if (body.whisper_base_url) {
+    try {
+      whisperEndpoint(body.whisper_base_url);
+    } catch (cause) {
+      const err = new Error("whisper_base_url is not trusted; configure WHISPER_BASE_URL on the server", { cause });
       (err as any).statusCode = 422;
       throw err;
     }
@@ -646,8 +652,9 @@ export async function processSubtitleFlow(
           const chunksDir = path.join(tmpDir, "chunks");
           const chunks = await deps.splitAudio(audioPath, 600, chunksDir);
           const client = new deps.WhisperClient({
-            apiKey: req.whisper_api_key || process.env.WHISPER_API_KEY || process.env.GROQ_API_KEY || process.env.OPENAI_API_KEY,
-            baseUrl: req.whisper_base_url || process.env.WHISPER_BASE_URL,
+            // Deployment keys are paired with their endpoints inside WhisperClient.
+            apiKey: req.whisper_api_key || undefined,
+            baseUrl: req.whisper_base_url || undefined,
             model: req.whisper_model || process.env.WHISPER_MODEL,
           });
           const rawCues = await deps.transcribeTimedChunks(
@@ -781,7 +788,14 @@ export function createApp(deps?: Partial<AppDependencies>): http.RequestListener
   };
 
   return async (req: http.IncomingMessage, res: http.ServerResponse) => {
-    setCorsHeaders(res);
+    const origin = checkRequestOrigin(req);
+    if (origin === false) {
+      // Untrusted web pages must not spend deployment keys from a visitor's browser.
+      res.writeHead(403, { "Content-Type": "application/json; charset=utf-8", "Vary": "Origin" });
+      res.end(JSON.stringify({ detail: "Origin not allowed" }));
+      return;
+    }
+    setCorsHeaders(res, origin);
 
     if (req.method === "OPTIONS") {
       res.writeHead(204);
@@ -1035,7 +1049,6 @@ export function createApp(deps?: Partial<AppDependencies>): http.RequestListener
           "Cache-Control": "no-cache",
           "Connection": "keep-alive",
           "X-Accel-Buffering": "no",
-          "Access-Control-Allow-Origin": "*",
         });
 
         const abortController = new AbortController();

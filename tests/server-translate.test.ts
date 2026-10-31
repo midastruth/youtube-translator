@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { trustModelEndpoint } from "./support/model-endpoint.js";
+import { trustModelEndpoint, trustWhisperEndpoint } from "./support/model-endpoint.js";
 import fs from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
@@ -600,7 +600,7 @@ describe("HTTP Timeout on Stalled Response Body", () => {
     }
   });
 
-  it("WhisperClient times out when server sends headers but stalls body", { timeout: 5000 }, async () => {
+  it("WhisperClient times out when server sends headers but stalls body", { timeout: 5000 }, async t => {
     const tmpFile = path.join(os.tmpdir(), `dummy-audio-${Date.now()}.mp3`);
     await fs.writeFile(tmpFile, "dummy audio content");
 
@@ -612,6 +612,7 @@ describe("HTTP Timeout on Stalled Response Body", () => {
 
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const port = (server.address() as any).port;
+    t.after(trustWhisperEndpoint(`http://127.0.0.1:${port}`));
 
     const client = new WhisperClient({
       apiKey: "test-whisper",

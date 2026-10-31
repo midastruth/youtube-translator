@@ -4,10 +4,6 @@ node_modules
 tmp
 cache
 cookies
-backend/.venv
-backend/cache
-backend/cookies
-**/__pycache__
 **/.env
 .env
 .pi

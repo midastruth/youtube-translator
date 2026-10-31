@@ -2,7 +2,7 @@
 
 ## 结论
 
-本地代码与协议验收通过。默认入口为 `npm start` / `make start`，仅一个对外端口 `8787`，HTTP、SSE、WebSocket 与持久化 AgentWorker 在同一进程内连接。Python 后端保留为历史兼容实现，不再是默认 API 服务运行依赖；`yt-dlp`、`ffmpeg` 仍为外部工具。
+本地代码与协议验收通过。默认入口为 `npm start` / `make start`，仅一个对外端口 `8787`，HTTP、SSE、WebSocket 与持久化 AgentWorker 在同一进程内连接。原 Python 后端现已移除；`yt-dlp`、`ffmpeg` 仍为外部工具。
 
 未执行付费真实模型质量评测、真实 YouTube 视频在线抓取或浏览器人工安装验收；Docker 守护进程权限不足，未构建或运行镜像。本结论不等同于这些上线环境验收。
 
@@ -50,4 +50,4 @@ git diff --check
 - 当前仅支持 `document` 多 Agent 团队与 `legacy` 快速模式；旧 `agent` 原型、单 Agent 和固定阶段流程已移除。
 - 测试中的模型端点为受控本地服务，验证真实服务与 Worker 的集成，不证明未见视频的翻译质量。
 - 扩展选项中的密钥仍存于 `chrome.storage.local`；不持久化请求密钥的保证针对 Worker 任务数据库，不等于扩展不保存用户配置。
-- 改动未自动提交；已有用户改动和历史 Python 源码未删除。
+- 验收时未自动提交改动，也未删除已有用户改动；历史 Python 源码已在后续清理中移除。

@@ -10,7 +10,8 @@ import { calculateJobKey } from "./keys.js";
 import type { JobRecord, SubmitJobOptions, TaskResult, StreamEvent, JobDocument } from "./types.js";
 import { observeJobEvents } from "./job-stream.js";
 import { DocumentTranslationTask, documentCredentials } from "./document-task.js";
-import { DOCUMENT_WORKFLOW_VERSION, initialDocumentState, modelConfig } from "./document-translation.js";
+import { modelConfig } from "./document-translation.js";
+import { SUBTITLE_AGENT_VERSION, SubtitleEditingTask, initialSubtitleAgentState } from "./subtitle-agent.js";
 import { observeDocumentJob } from "./document-stream.js";
 import type { TaskId, ConversationId } from "@earendil-works/pi-durable";
 
@@ -55,7 +56,7 @@ export class AgentWorker {
       this.extension = defineExtension({
         name: "translation_agent",
         tools: WHITELIST_TOOLS,
-        tasks: [SubtitleTranslationTask, DocumentTranslationTask],
+        tasks: [SubtitleTranslationTask, DocumentTranslationTask, SubtitleEditingTask],
       });
       this.registry.install(this.extension);
     }
@@ -167,7 +168,7 @@ export class AgentWorker {
     toLang = "zh-CN",
     segmentation = "rule",
     provider = "openai",
-    model = process.env.TRANSLATION_AGENT_MODEL || "gpt-4o",
+    model = process.env.TRANSLATION_AGENT_MODEL || "sol",
     baseUrl = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1",
     requestId = null,
     budgetLimit,
@@ -323,7 +324,7 @@ export class AgentWorker {
     const jobKey = calculateJobKey({
       videoId: options.videoId, sourceCues: cues, fromLang: options.fromLang, toLang: options.toLang,
       segmentationVersion: options.segmentation, engine: "document", provider: "openai", model: config.model, baseUrl: config.baseUrl,
-      workflowVersion: DOCUMENT_WORKFLOW_VERSION, promptVersion: DOCUMENT_WORKFLOW_VERSION, reviewVersion: DOCUMENT_WORKFLOW_VERSION,
+      workflowVersion: SUBTITLE_AGENT_VERSION, promptVersion: SUBTITLE_AGENT_VERSION, reviewVersion: SUBTITLE_AGENT_VERSION,
       styleConfig: JSON.stringify({ context: config.contextTokens, output: config.outputTokens, title: options.title || "" }),
     });
     if (options.apiKey) documentCredentials.set(jobKey, options.apiKey);
@@ -350,19 +351,19 @@ export class AgentWorker {
         fromLang: options.fromLang || "en", toLang: options.toLang || "zh-CN", cues, config, budgetLimit: options.budgetLimit ?? 128,
       };
       if (!Number.isSafeInteger(input.budgetLimit) || input.budgetLimit < 1 || input.budgetLimit > 1000) throw new Error("Invalid document request budget");
-      initialDocumentState(input); // Validate before creating durable state.
+      initialSubtitleAgentState(input); // Validate before creating durable state.
       if (!documentCredentials.get(jobKey) && !process.env.OPENAI_API_KEY && !process.env.TRANSLATE_API_KEY) {
         throw new Error("全文翻译需要 API Key；请在扩展或 Worker 环境变量中配置");
       }
       const conversation = await this.activeHarness.createConversation({ ownership: { kind: "ownerless" } }, this.context);
       let taskId: TaskId<TaskResult> | undefined;
       await conversation.commit(async tx => {
-        taskId = await tx.createTask(DocumentTranslationTask, input, { ownership: { kind: "conversation" } });
+        taskId = await tx.createTask(SubtitleEditingTask, input, { ownership: { kind: "conversation" } });
         const doc = await tx.doc(SubtitleJobDoc, conversation.id);
         doc.job_key = jobKey; doc.job_id = input.jobId; doc.task_id = taskId;
         doc.engine = "document"; doc.title = input.title; doc.video_id = input.videoId;
         doc.from_lang = input.fromLang; doc.to_lang = input.toLang; doc.source_cues = cues;
-        doc.status = "running"; doc.stage = "analyze"; doc.budget_limit = input.budgetLimit;
+        doc.status = "running"; doc.stage = "editing"; doc.budget_limit = input.budgetLimit;
       }, this.context);
       if (!taskId) throw new Error("Document task creation failed");
       const id = taskId;

@@ -5,7 +5,7 @@ YouTube 双语字幕翻译系统 — 统一 TypeScript 服务端 + 轻量浏览�
 ```text
 youtube-translator/
 ├── server/              统一 TypeScript 服务端（单端口 8787，内置 Worker）
-├── worker/              全文高质量翻译 AgentWorker（pi-durable 状态机引擎）
+├── worker/              字幕编辑 Agent（pi-durable 持久化与文件工作区）
 ├── extension/           轻量浏览器扩展（Chrome 121+ / Firefox 128+）
 ├── backend/             [历史兼容] Python FastAPI 后端 (youtube-ingest)
 ├── docker-compose.yml
@@ -21,11 +21,11 @@ youtube-translator/
   ▼
 统一 TypeScript 服务端 (server/src)
   │  yt-dlp CLI / 浏览器字幕兜底 / Whisper 媒体转写 → 清洗展平与智能断句
-  ├─ 全文高质量模式 (document) ── 进程内存零跳转 ──► 内置 AgentWorker
-  │                                                  ├─ 全文阅读理解与术语提取
-  │                                                  ├─ 语义章节规划与上下文翻译
-  │                                                  ├─ 双语审校与一致性审计
-  │                                                  └─ 严格校验与原子发布
+  ├─ 字幕编辑 Agent (document) ── 进程内存零跳转 ──► 内置 AgentWorker
+  │                                                  ├─ 原文只读，译文与笔记可编辑
+  │                                                  ├─ 单 Agent 自主阅读、搜索与修改
+  │                                                  ├─ 文件和会话按轮持久化，可恢复
+  │                                                  └─ 校验当前修订后显式提交、原子发布
   └─ 快速模式 (legacy) ──► 独立逐句 / 10~12 条上下文分块快速翻译 (OpenAI / DeepL)
   ▼
 SSE / WebSocket 实时回传事件（外部字幕时间轴统一为毫秒） → 扩展渲染到 YouTube 播放器
@@ -97,6 +97,18 @@ Docker Compose 默认只启动 `server`（统一 TypeScript 单体服务）与 `
 
 Cookie 文件仅限本机使用，不要提交到 Git；YouTube Cookie 失效后需重新导出。
 
+### 模型流失败排查
+
+`Model API stream failed` 表示模型调用失败，不是 YouTube 字幕提取失败。新版提示带有安全错误分类（不会显示上游原始正文或密钥）：
+
+- `connection`：检查运行服务端的机器/容器能否访问模型接口，以及代理、TLS、`OPENAI_BASE_URL`；模型请求不跟随重定向。
+- `invalid_response`：接口以 HTTP 200 返回 JSON/HTML 而不是 SSE。`OPENAI_BASE_URL` 应为 API 根路径（例如 `https://api.openai.com/v1`），不要填写网页地址或完整 `/chat/completions` 路径。
+- `missing_finish_reason`：流结束但缺少 `choices[].finish_reason`；检查上游 SSE 兼容性与网关超时。仅返回 `[DONE]` 不足以确认输出完整，系统不会接受可能被截断的译文。
+- `content_filter` / `network_error`：上游明确报告内容过滤或网络错误；检查其策略或服务状态。
+- `provider_error`：其他流内错误；确认模型支持 `/chat/completions` SSE 和工具调用，并在上游服务侧查看详细原因。
+
+如果仍只有旧版 `failed or ended prematurely` 提示，请更新并重启服务端；排查时提供错误分类、API 基础地址和模型名，**不要提供 API Key 或带密钥的日志**。
+
 ### 浏览器字幕兜底
 
 若服务端 yt-dlp 被拦截或找不到可用字幕轨道，浏览器扩展会自动读取 YouTube 播放器自身已加载的字幕（json3，保留逐词时间戳），上传给服务端走同样的断句与翻译流程。该兜底只在服务端无法提供轨道时启用，不会将浏览器的敏感 Cookie 发给服务端。
@@ -129,17 +141,18 @@ make build-extension
 
 ## 翻译引擎与质量说明
 
-新安装默认使用“全文高质量”（`document` 模式）；已有显式保存的快速模式设置保持不变；可在扩展设置中切换。
+新安装默认使用“字幕编辑 Agent”（`document` 模式）；已有显式保存的快速模式设置保持不变；可在扩展设置中切换。
 
 ### 翻译模式区分
 
-1. **全文高质量模式 (document)**：
-   - **真实大模型驱动**：使用与 pi 相同的 `pi-ai` Chat Completions 流式调用，需要支持 SSE 与 function tools 的 OpenAI-compatible 模型；不强制端点支持 `response_format`，JSON 结果由宿主严格校验。
-   - **连接与重试**：单次模型调用最多 10 分钟，显式取消会立即中断；临时 HTTP 499、429 与 5xx 错误由持久化任务最多重试两次，每次计入调用预算。模型流式接收不等于提前发布字幕，全部审校通过后仍统一发布。
-   - **文档级全局理解**：先读取完整字幕，提取全文主题、意图与跨句术语。
-   - **语义章节与长文本覆盖**：输入与预计输出均可容纳时合并为全文翻译；超出容量时按语义章节划分并共享全文理解。
-   - **双语审校与一致性审计**：在发布前结合全文背景进行双语审校与有限语义修订，全部通过后原子发布。
-   - **真实模型与质量边界**：翻译质量取决于底层真实 LLM 的理解能力与上下文窗口，端到端测试覆盖了协议、状态持久化与防护边界，不宣称在所有未见视频上均具备 100% 完美译文。
+1. **字幕编辑 Agent (document)**：
+   - **像编码 Agent 一样工作**：一个真实大模型自主读取、搜索、编辑和自查字幕，不再强制执行分析、分章、审计等固定阶段。
+   - **隔离文件工作区**：`source.json` 保留原文、编号和时间轴且只读；Agent 用 `read_file` / `search_file` / `write_file` / `edit_file` 操作 `translations.json` 与 `notes.md`。文件由 SQLite 检查点持久化，不开放任意宿主文件或 shell。
+   - **分批编辑与恢复**：长字幕可分页读取、逐批写入和反复修改；工具会话与文件按轮保存，重启后继续。上下文过长时压缩会话，保留文件与笔记。
+   - **显式提交**：Agent 自查后调用 `validate_translation`，当前修订校验通过才能 `finish_translation`。修改译文会使校验失效；普通回答不能发布，宿主再次校验后统一发布双语字幕。
+   - **模型与预算**：使用 `pi-ai` Chat Completions SSE + function tools；默认模型 `sol`，可配置。单次调用最多 10 分钟，临时 HTTP 499、429、5xx 等最多重试两次，所有轮次计入任务预算。
+   - **质量边界**：编号、时间轴和完整性由程序保证；语义质量依赖真实模型的理解与自查能力，结构校验不等于语义审校。自动化测试不消耗真实模型 token。
+   - 历史固定阶段工作流仅保留用于恢复旧任务，新任务使用独立版本，不复用旧工作流缓存。
 
 2. **快速模式 (legacy)**：
    - 适用于快速生成，支持 OpenAI-compatible 与 DeepL API。

@@ -1,6 +1,6 @@
 # YouTube 双语字幕翻译架构
 
-根据当前 TypeScript 统一单体服务端与 Worker 源码梳理；明确区分当前产品主打的文档级真实模型翻译（`document`）、轻量快速翻译（`legacy`）与旧版规则状态机原型（`agent`）。
+根据当前 TypeScript 统一单体服务端与 Worker 源码梳理；明确区分默认的字幕编辑 Agent（`document`）、轻量快速翻译（`legacy`）与旧版规则状态机原型（`agent`）。
 
 > **历史架构图说明**：仓库中保留的 `docs/translation-architecture.png` 为早期 Python 后端经网络中转调度外部 Node Worker 的历史架构设计，仅作历史对比存档参考；当前生产运行架构完全以本文描述的 **TypeScript 统一单体服务（单端口 8787、内置 Worker 内存直连）**为准。
 
@@ -23,8 +23,8 @@ flowchart TD
     
     C --> Q{translate_engine}
     
-    Q -->|document：默认全文高质量| DW[进程内直连 AgentWorker]
-    DW <--> DB[(SQLite：任务检查点与笔记)]
+    Q -->|document：默认字幕编辑 Agent| DW[单 Agent 自主阅读、编辑、检查与提交]
+    DW <--> DB[(SQLite：文件工作区与工具会话)]
     DW <--> LLM[pi-ai 流式调用：ChatCompletions SSE + Tools]
     
     Q -->|legacy：快速模式| L[server/src/translate.ts 快速翻译调度]
@@ -79,15 +79,14 @@ flowchart TD
 
 ## 3. 全文高质量模式 (Document) 与旧版 Agent 原型的边界
 
-### A. 全文高质量工作流 (`document` 模式)
-- **实现位置**：`worker/document-translation.ts`、`worker/document-task.ts` 与 `worker/document-stream.ts`。
-- **驱动引擎**：使用与 pi 相同的 `pi-ai` 流式适配器调用**真实大语言模型**，要求支持 Chat Completions SSE 与 Function Calling。通过提示词要求 JSON，宿主在流完整结束后严格解析校验，不强制 `response_format`。单次调用总时限 10 分钟，任务可即时取消；网络重试统一由持久化任务计费预算约束。
-- **全生命周期阶段**：
-  1. `analyze`：全文阅读理解、语义分析、主题/背景提取与章节规划。
-  2. `consolidate`：超长视频分层归并全文摘要。
-  3. `translate`：语义章节内结合全文背景翻译。
-  4. `audit` & `review`：双语对照审校、跨章术语一致性校验，支持最多两轮有限语义修正。
-  5. `publish`：校验全部 `cue_id` 映射无误后原子发布，未通过前不展示未审校草稿。
+### A. 字幕编辑 Agent (`document` 模式)
+- **实现位置**：`worker/subtitle-agent.ts`，复用 `worker/document-task.ts` 的持久化、重试和原子发布边界，以及 `worker/document-translation.ts` 的 SSE 传输。
+- **驱动方式**：一个真实模型像编码 Agent 一样自主选择读取、搜索、写入、精确编辑与检查工具，不再强制安排分析、分章、审校等固定阶段。模型端点需支持 Chat Completions SSE 与 Function Calling，不要求 `response_format`。
+- **工作区**：只读 `source.json` 保存编号、时间轴和原文；可编辑 `translations.json` 保存编号到译文的映射，`notes.md` 保存术语、计划和上下文。它们是 SQLite 持久化的虚拟文件，不开放任意宿主路径、shell 或外网权限。
+- **持久化循环**：每个完整模型轮次执行工具后，将文件、修订号和工具会话一起提交；模型可自行继续读取、翻译或修正。超长会话压缩后保留文件和笔记。单次调用总时限 10 分钟，取消即时中断，所有请求与重试消耗预算。
+- **发布门禁**：Agent 自查后调用 `validate_translation`，成功验证当前修订才能 `finish_translation`。程序再次核对全部编号、非空译文与原始时间轴后原子发布；普通聊天回答不能提交。
+- **质量边界**：程序保证结构与完整性，不保证语义正确。翻译与语义自查由同一个 Agent 完成，不能将结构校验称作独立双语审校。
+- **历史兼容**：旧固定阶段 `document_subtitle_translation` 任务继续注册用于恢复；新任务使用 `subtitle_editing_agent` 及独立缓存版本。详见 [字幕编辑 Agent](document-translation.md)。
 
 ### B. 旧版 Agent 原型状态机 (`agent` 模式边界声明)
 - **实现位置**：`worker/task-definition.ts`。
@@ -110,8 +109,9 @@ flowchart TD
 | **媒体转写** | `server/src/transcribe.ts` & `audio.ts` | ffmpeg 分块、Whisper API 转写及秒级时间轴拼接 |
 | **快速翻译** | `server/src/translate.ts` | Legacy 模式快速翻译、`[$i]` 标记解析与超时防护 |
 | **字幕断句** | `server/src/subtitle-processing.ts` | 文本清洗、非语音段落过滤、规则与统计智能断句 |
-| **文档翻译工作流** | `worker/document-translation.ts` | **真实大模型**阅读理解、语义分章、双语审校与一致性审计 |
-| **文档任务状态机** | `worker/document-task.ts` | 基于 pi-durable 的持久化检查点与 SQLite 状态存储 |
+| **字幕编辑 Agent** | `worker/subtitle-agent.ts` | 单 Agent 文件工具、会话、上下文压缩与显式提交 |
+| **模型传输与历史流程** | `worker/document-translation.ts` | 共享 SSE 模型调用；保留历史固定阶段流程 |
+| **持久化任务边界** | `worker/document-task.ts` | pi-durable 检查点、重试、预算、取消与原子发布 |
 | **AgentWorker 核心** | `worker/agent-worker.ts` | 任务队列管理、事件流观察、生命周期调度 |
 | **旧版状态机原型** | `worker/task-definition.ts` | 旧版规则状态机测试框架（`defaultDraft` 占位） |
 | **[历史兼容实现]** | `backend/src/youtube_ingest/server.py` | 原 Python FastAPI 后端，仅作历史兼容参考保留 |

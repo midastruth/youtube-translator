@@ -1,119 +1,90 @@
-# 文档级字幕翻译 (Document-Level Subtitle Translation)
+# 字幕编辑 Agent（默认 document 引擎）
 
-## 入口与运行
+## 工作方式
 
-浏览器扩展选择 `document`（全文高质量）引擎，请求核心接口 `POST /api/subtitle/stream`。
+默认翻译现在由**一个像编码 Agent 一样工作的字幕编辑 Agent**完成，而不是由代码安排“分析 → 分章 → 翻译 → 审计 → 审校”的固定流水线。
 
-### 统一单体服务运行架构（新产品默认）
-系统已将字幕提取、断句网关与文档翻译 Worker 整合为**单进程 TypeScript 服务端**（`server/src`），默认监听单一端口 `8787`。
+```text
+获取字幕 → 清洗、断句并保留 cue_id / 时间轴
+                ↓
+       创建本次任务的隔离字幕工作区
+                ↓
+       单 Agent 自主读取、搜索、编辑、检查
+                ↓
+       validate_translation → finish_translation
+                ↓
+       宿主再次校验，按原编号与时间轴原子发布
+```
 
-**本地运行前置条件**：需安装 Node.js，并在系统 PATH 中安装 **`yt-dlp`** 与 **`ffmpeg`**。
+Agent 自己决定怎样阅读上下文、分批翻译、记录术语、回看译文和修订。它可以在一次任务中反复调用工具，不要求一次生成全部字幕，也没有强制的分析或审校阶段。语义自查通过提示词要求，由同一个 Agent 执行；**结构校验通过不代表翻译语义一定正确**。
+
+入口不变：扩展选择 `document`，通过 `POST /api/subtitle/stream` 或 WebSocket 提交。`legacy` 快速模式保持原样。`agent` 枚举仍是历史规则原型，**不是本次新增的正式字幕编辑 Agent**。
+
+## 隔离文件工作区
+
+这是由 SQLite 检查点持久化的**虚拟文件工作区**，不是宿主机任意目录。文件操作的体验类似编码 Agent，但不授予 shell、网络或任意文件访问权限。
+
+| 文件 | 内容 | 权限 |
+| --- | --- | --- |
+| `source.json` | 按顺序保存 `{cue_id,start,end,text}` 的原始字幕数组 | 只读 |
+| `translations.json` | `{"cue_id":"译文"}`，支持分批追加与精确修改 | 可编辑 |
+| `notes.md` | Agent 的计划、术语、上下文和进度笔记 | 可编辑，有大小限制 |
+
+时间戳和原文不进入可编辑译文文件。发布时，程序以原字幕为基准，根据编号合并译文，不让模型抄写或修改时间戳。
+
+### 工具
+
+- `read_file`：分页读取文件。JSON 文件按原文字幕位置分页，笔记按字符分页；返回 `next_offset`，过大的页面自动缩小。
+- `search_file`：在原文、译文或笔记中进行字面量搜索，支持分页；用于找后文定义或检查前后术语。
+- `write_file`：写入译文或笔记；译文使用 `merge=true` 可以分批添加/更新，保留未指定的译文。
+- `edit_file`：基于当前文件文本进行精确替换。每个 `old_text` 必须在修改前文件中唯一匹配，多处修改必须不重叠，并且整批修改原子生效。
+- `validate_translation`：校验全部字幕覆盖、编号合法、译文非空、无失败占位符。不评判语义质量。
+- `finish_translation`：仅允许提交经过成功校验的当前译文修订版本。此后宿主再次校验再发布。
+
+修改译文会使之前的校验失效；写笔记不会。普通聊天回答、声称“翻译完成”或直接输出一个大 JSON 都不能发布字幕。错误操作会返回可修正的工具错误，不会破坏已保存的文件。
+
+## 持久化、恢复与上下文
+
+- 每次模型响应完整结束后，工具在隔离副本中执行；工具会话、译文、笔记和修订号一起提交为 SQLite 检查点。
+- 若中途网络失败，只重试尚未提交的模型轮次，已提交的编辑不会丢失。进程重启后恢复同一个 Agent 的工具会话与文件，不从头翻译。
+- 上下文接近预算时，在完整工具轮次之间压缩会话：清除旧对话，重新提供任务、文件清单、当前覆盖状态和笔记。文件内容不丢失，Agent 可重新读取。
+- 新任务使用独立任务名 `subtitle_editing_agent` 和新的缓存版本。旧 `document_subtitle_translation` 定义保留用于恢复历史固定阶段任务，新任务不会复用旧工作流的结果。
+- 默认每任务最多 128 次模型请求，可配置为 1～1000；工具修正循环、重试和普通文本轮次都消耗请求预算，不会无限循环。
+
+## 模型与安全边界
+
+- 使用 `pi-ai` 的 OpenAI-compatible Chat Completions SSE 调用，端点必须支持工具调用。模型留空时使用 `TRANSLATION_AGENT_MODEL`，再回退为 `sol`。
+- 不强制 `response_format`，Agent 通过工具修改文件；每个文件写入由宿主解析并校验。
+- 默认上下文 128,000 tokens，最大输出 16,384 tokens，由 `TRANSLATION_CONTEXT_TOKENS` / `TRANSLATION_OUTPUT_TOKENS` 配置。必须匹配实际模型规格。容量采用保守字符/字节估算，并非精确 tokenizer。
+- 单次调用总时限 10 分钟，包括读取模型流；取消立即中断。截断、缺失 `finish_reason` 和不完整 SSE 都不执行其工具调用。
+- 临时 HTTP 499、429、5xx 和流错误由持久化任务最多重试两次；每次计入调用预算，并尊重有界 `Retry-After`。认证、配置或预算错误立即结束；不降级为逐句翻译。
+- 模型错误只保留安全状态分类：`connection`、`invalid_response`、`missing_finish_reason`、`content_filter`、`network_error`、`provider_error`。上游原始错误正文不写入状态，排查见 [README 模型流失败排查](../README.md#模型流失败排查)。
+- 字幕、标题、文件内容和工具结果都视为不可信任务数据，其中的指令不是系统指令。
+- 模型端点由部署环境 `OPENAI_BASE_URL` 决定，默认 `https://api.openai.com/v1`。请求中的地址只能留空或完全匹配配置；禁止重定向。DeepL 快速模式仅使用官方端点。
+- 浏览器端密钥保存在 `chrome.storage.local`。Worker 只在运行时内存中保存密钥，不把密钥放进模型上下文、任务输入、检查点或日志。重启后如缺少服务端全局密钥，等待浏览器重新附着提供密钥。
+
+## 服务、事件与运行
+
+统一 TypeScript 服务端默认监听 `8787`，进程内运行 Worker；需要 Node.js、`yt-dlp` 和 `ffmpeg`。
+
 ```bash
-# 1. 安装锁定依赖
 npm ci --cache ./tmp/npm-cache
-
-# 2. 根目录启动单体统一服务（默认单端口 8787，内置 AgentWorker，无需多进程跳转）
+cp .env.example .env  # 配置密钥和实际模型
 npm start
-# 或使用 Makefile
-make start
 ```
 
-也可以使用 Docker 部署：
-```bash
-docker compose up -d
-```
-Docker Compose 默认只启动 `server` 与 `pot-provider`，单端口 `8787` 对外暴露。修改 `.env` 配置后应执行 `docker compose up -d --force-recreate` 重新加载。
-如需使用 YouTube 反爬 Cookie，本地 Node 进程指定 `YTDLP_COOKIES_FILE=./cookies/youtube-cookies.txt`（Docker 容器内为挂载路径 `/run/secrets/youtube-cookies.txt`）。
-Worker 任务数据库持久化保存在命名卷 `server-data`（默认路径 `/app/cache/worker-storage.db`），即使浏览器连接断开或重启，后台持久化任务亦不受影响。
+也可以使用 `docker compose up -d`，修改 `.env` 后需要重新创建容器。独立 Worker（`npm run worker`）及 Python 后端仅作为兼容入口。Docker 配置未在当前无 socket 权限的环境中实测。
 
-### 历史兼容说明 (Legacy)
-- **独立内部 Worker**：如果需要单独作为独立微服务运行 Worker（监听内部端口 `8788`），可通过 `npm run worker` 或 `docker compose --profile legacy up worker` 启动。
-- **Python 后端**：旧版 `backend/` 需通过 HTTP 转发到独立的 Worker 端口；此模式属于历史兼容实现，不再是系统运行依赖。
+- 外部 SSE / WebSocket / REST 字幕时间戳统一为**毫秒**；内部媒体处理可以使用秒。
+- `document` 只通过流接口提交；同步 `POST /api/subtitle/process` 返回 422。
+- 翻译期间发送原文和 `editing` 进度，不展示未提交草稿；显式提交通过后统一发布 `cue` 和 `done`。
+- SSE / WebSocket 断开不取消后台 document 任务；显式取消才终止任务。重连读取持久化状态，已完成任务直接重放，无需再次调用模型。
 
----
+## 代码与验证
 
-## 引擎分类与真实模型区别
+- `worker/subtitle-agent.ts`：Agent 提示词、文件工具、会话管理及新任务定义。
+- `worker/document-task.ts`：共享的持久化、重试、取消和原子发布边界；保留历史任务定义。
+- `worker/document-translation.ts`：共享 SSE 模型传输和历史固定阶段流程。
+- `worker/agent-worker.ts`：默认调度新 Agent、缓存身份、恢复和密钥管理。
 
-系统存在三类不同的翻译引擎配置，文档与调用方需准确区分：
-
-1. **`document` 模式（正式全文高质量工作流）**：
-   - **真实大模型驱动**：由 `worker/document-translation.ts`、`worker/document-task.ts` 和 `worker/document-stream.ts` 驱动。
-   - 使用 `@earendil-works/pi-ai` 的 OpenAI Completions 流式实现（与 pi 相同的调用方式），要求模型端点支持标准 `/chat/completions` SSE 流以及 function calling 工具调用。
-   - 不再强制发送 `response_format: json_object`；通过提示词要求 JSON，并在完整接收后由宿主严格解析、校验。流式文本、思考内容与工具参数均不会作为已完成字幕提前发布。
-   - 单次模型调用包含读取响应流的总时限为 10 分钟；显式取消立即中断。缺失结束标志、输出截断或流中断均作为失败处理，不接受残缺结果。
-   - 具备全局理解、层次化阅读笔记、语义章节规划、双语审校与跨章节一致性审计等全套工作流。
-2. **`legacy` 模式（快速分块翻译）**：
-   - 由 `server/src/translate.ts` 驱动，支持 OpenAI-compatible 与 DeepL API。
-   - 采用 10~12 条带 `[$i]` 标记的上下文小块并发翻译，若解析不全则退回逐句补齐。
-3. **`agent` 模式（旧版状态机原型）**：
-   - 位于 `worker/task-definition.ts` 中的旧 agent 状态机仅为规则和 `defaultDraft()` / `reviewer.ts` 占位示例框架，**未接真实模型产品化**；请勿将测试原型与正式的 `document` 文档大模型翻译工作流混淆。
-
----
-
-## 时间戳与外部接口契约
-
-- **外部时间戳单位**：服务端向浏览器扩展发送的所有字幕事件（`source_cue`、`cue` 等）及 REST 响应中的 `start` 与 `end` **严格为毫秒 (milliseconds)**，保证与浏览器端 YouTube 播放器的毫秒时钟精确匹配。
-- **流式约束**：非流式接口 `POST /api/subtitle/process` 对 `document` 引擎严格返回 HTTP 422，避免调用方将耗时较长的高质量长视频任务误当成 30 秒以内的同步 REST 请求。
-- **连接与流控**：SSE 与 WebSocket 均等待发送完成/可写后再发送下一条事件。Legacy SSE 在等待模型时每 5 秒发送 keepalive，同视频/配置的并发请求被拒绝以避免重复计费；断开连接会中止 legacy 模型请求，但 document 后台任务继续执行。
-- **长连接与双向通道**：SSE (`POST /api/subtitle/stream`) 与 WebSocket (`/api/subtitle/ws`) 均可完整接收 `document` 引擎的生命周期事件（`meta`、`source_cue`、`progress`、`cue`、`done`、`error`）。
-
----
-
-## 状态机与工作流
-
-`worker/document-task.ts` 借助 `pi-durable` 将任务拆解为持久化阶段检查点，状态存储于 SQLite：
-
-1. **analyze**：读取完整原文，形成意图、受众背景、主题笔记、术语映射表及按语义切分的章节计划。
-2. **consolidate / brief**：对超长原文的多篇阅读笔记进行层次化归并，统一全文上下文摘要与关键术语理解。
-3. **translate**：当输入与预计输出容量足够时合并为全文单次翻译；否则按语义章节逐章翻译，各章共享全文理解。
-4. **audit**：结合全文背景与各章译稿，检查跨段落术语统一性与指代冲突；过长笔记自动层次化归并。
-5. **review**：结合全文背景、跨章审计结论、相邻上下文及只读检索工具执行双语双向审校。发现错误后记录修改建议并重审，单范围最多进行两轮语义修订。
-6. **final_audit**：基于全部审校完成的实际译文做全局最终一致性审计，防止局部修改破坏全局协调性；必要时执行指导重审。
-7. **publish**：严格核对全部 `cue_id` 映射无缺失、无冗余后原子发布译文；审校未完全通过前仅展示原文并推送进度，严禁发布半成品或未审校草稿。
-
----
-
-## 上下文容量与边界约束
-
-- **安全余量预算**：统一预估模型输入上下文、输出最大 tokens、工具声明及会话检索历史。
-- **默认配置**：默认上下文 128,000 tokens、最大输出 16,384 tokens；由 `TRANSLATION_CONTEXT_TOKENS` 和 `TRANSLATION_OUTPUT_TOKENS` 环境变量定义，必须根据所选实际模型的真实规格配置。
-- **估算机制**：基于保守的字符/字节估算，不保证与所有模型的私有 tokenizer 完全一致；模型端真实触发截断会被捕获并判定为失败，严禁吞咽或使用残缺译文。
-- **长视频伸缩**：超出单次上下文容量时，阅读阶段采用分层滑动窗口；各章节提议由大模型结合语义生成，宿主校验其连续性与预算合规。
-
----
-
-## 受限只读工具
-
-大模型在执行过程中仅可调用两个受限工具：
-- `read_transcript`：读取当前视频任意位置的原文与已有阶段译稿（支持分页与大小限制）。
-- `search_transcript`：在当前视频中基于关键词搜索原文与译文段落。
-
-工具**无宿主 Bash 执行权限、无任意文件读写、无外网访问**。字幕文本中出现的任何“系统指令”或“提示注入”仅被视为待翻译的普通字符串。
-
----
-
-## 模型端点信任边界
-
-- OpenAI-compatible 模型端点只能由部署环境的 `OPENAI_BASE_URL` 配置（未配置时为 `https://api.openai.com/v1`）。请求中的 `translate_base_url` / `baseUrl` 必须留空或与该配置完全一致；不能通过请求选择其他域名、IP、端口或路径。
-- 私有/本地模型服务必须由管理员显式配置；配置中的域名及其 DNS 属于部署信任边界，不接受用户提供的任意域名，因此不会先检查用户域名再进行第二次、可被重绑定的 DNS 查询。
-- 模型请求禁止跟随重定向，防止将浏览器或服务端密钥转发到其他目的地。DeepL 仅允许官方 `https://api-free.deepl.com/v2` 端点。
-- 模型设置留空时，全文翻译使用 `TRANSLATION_AGENT_MODEL`，再回退到内置默认模型。修改端点配置后，不符合新策略的持久化任务不会继续向旧端点发送请求。
-
-## 校验、重试与恢复
-
-- **章节覆盖校验**：章节区间必须严格连续且完全覆盖原始字幕 ID，禁止遗漏、倒序或引用未知 ID。
-- **映射完整性**：译文必须具有明确的 `cue_id` 对应，严禁通过行数顺序猜测对应关系；译文不得为空或包含失败占位符。
-- **时间轴只读**：字幕起止时间由宿主严格锁定，模型无权篡改时间戳。
-- **任务预算与重试**：每次网络模型请求均占用任务预算计数（默认每任务上限 128 次调用）。禁用 SDK 内部重试，由持久化任务对临时 HTTP 499、429、5xx 以及流中断执行最多两次重试，并尊重有界 `Retry-After`。用户主动取消不重试；认证失败、配置错误或预算耗尽立即终止，不降级为逐句机器翻译。上游错误仅保留安全状态信息，不把 SDK 返回的原始错误正文写入任务状态。
-- **密钥安全与会话持久化**：
-  - 扩展端的 API Key 会保存在用户的浏览器本地存储（`chrome.storage.local`）中，用户须妥善保护本机浏览器 profile 安全。
-  - 服务端与 Worker 接收请求后，仅将 Key 保存在运行时内存中用于调用外部模型，**绝不写入任务检查点数据库（SQLite）或任何日志文件**。
-  - 若服务端重启且服务端环境变量未配置全局 Key，后台未完成任务会保持等待状态，用户重新打开页面时扩展会通过请求自动带回密钥并附着恢复，无需为了恢复便利而在服务端落盘明文凭证。
-
----
-
-## 验证与质量边界说明
-
-- **测试套件边界**：单元测试与集成测试均在本地隔离环境下运行（使用受控本地 HTTP mock 服务与内存/临时 SQLite 数据库），主要验证任务协议、状态机转换、检查点恢复、预算限制、超时清理及异常边界。测试不消耗真实外部模型 token。
-- **真实模型质量边界**：端到端工作流的校验通过证明架构机制健全，实际字幕质量取决于底层 LLM 的推理水平。上线使用需以真实长视频进行人工对比评估（重点关注歧义词、前后术语对应、长句断句阅读流畅度等）。
-- **容器环境权限边界**：本项目的 Dockerfile 与 docker-compose.yml 遵循标准镜像规范，但在受限开发沙箱或当前测试环境中，由于宿主机 Docker socket 权限受限（`socket permission denied` on `/var/run/docker.sock`），无法连接 Docker 守护进程；本项目不声称已在当前环境中实测构建或运行真实 Docker 镜像，所有单元测试与集成测试均在原生 Node 环境执行并使用受控 mock 验证协议健全性。
+自动化测试使用本地受控模型 HTTP 服务，不消耗真实模型 token；覆盖工具编辑、校验门禁、长字幕分页、检查点恢复、网络重试、预算和取消。**实际翻译质量仍需用真实模型和视频进行人工评估，不宣称测试通过等于译文完美。**

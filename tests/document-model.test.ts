@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import { test, type TestContext } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
-import { callDocumentModel, DocumentModelError, initialDocumentState, modelConfig } from "../worker/document-translation.js";
+import { callDocumentModel, DocumentModelError, DocumentStreamError, initialDocumentState, modelConfig } from "../worker/document-translation.js";
 import type { DocumentInput } from "../worker/document-translation.js";
 import { trustModelEndpoint } from "./support/model-endpoint.js";
 import { endModelStream, modelChunk, sendModelJson } from "./support/model-stream.js";
@@ -79,7 +79,84 @@ test("a stream ending without finish_reason rejects even syntactically complete 
     modelChunk(res, { content: '{"translation":"not reviewed"}' });
     res.end("data: [DONE]\n\n");
   });
-  await assert.rejects(model.call(), /Model API stream failed or ended prematurely/);
+  await assert.rejects(model.call(), error => {
+    assert.ok(error instanceof DocumentStreamError);
+    assert.equal(error.code, "missing_finish_reason");
+    assert.match(error.message, /finish_reason/);
+    return true;
+  });
+});
+
+test("an EOF without DONE or finish_reason still rejects complete JSON", { timeout: 5000 }, async t => {
+  const model = await endpoint(t, async (req, res) => {
+    await body(req);
+    modelChunk(res, { content: '{"translation":"not reviewed"}' });
+    res.end();
+  });
+  await assert.rejects(model.call(), error => error instanceof DocumentStreamError && error.code === "missing_finish_reason");
+});
+
+test("HTTP 200 JSON and HTML responses identify a non-SSE endpoint without exposing bodies", { timeout: 5000 }, async t => {
+  for (const contentType of ["application/json", "text/html; charset=utf-8", "application/problem+json"]) {
+    await t.test(contentType, async t => {
+      const model = await endpoint(t, async (req, res) => {
+        await body(req);
+        res.writeHead(200, { "Content-Type": contentType });
+        res.end('private body ephemeral-key {"translation":"not reviewed"}');
+      });
+      await assert.rejects(model.call(), error => {
+        assert.ok(error instanceof DocumentStreamError);
+        assert.equal(error.code, "invalid_response");
+        assert.match(error.message, /SSE/);
+        assert.doesNotMatch(error.message, /private|ephemeral-key|not reviewed/);
+        return true;
+      });
+      assert.equal(model.reservations(), 1);
+    });
+  }
+});
+
+test("provider finish errors have safe, distinct diagnostics", { timeout: 5000 }, async t => {
+  for (const reason of ["content_filter", "network_error", "private-ephemeral-key"]) {
+    await t.test(reason, async t => {
+      const model = await endpoint(t, async (req, res) => {
+        await body(req);
+        modelChunk(res, { content: '{"translation":"not reviewed"}' });
+        endModelStream(res, reason);
+      });
+      await assert.rejects(model.call(), error => {
+        assert.ok(error instanceof DocumentStreamError);
+        assert.equal(error.code, reason === "private-ephemeral-key" ? "provider_error" : reason);
+        assert.doesNotMatch(error.message, /private|ephemeral-key|not reviewed/);
+        return true;
+      });
+    });
+  }
+});
+
+test("SSE error bodies are never exposed as diagnostics", { timeout: 5000 }, async t => {
+  const model = await endpoint(t, async (req, res) => {
+    await body(req);
+    res.writeHead(200, { "Content-Type": "text/event-stream" });
+    res.end(`data: ${JSON.stringify({ error: { message: "private body ephemeral-key" } })}\n\n`);
+  });
+  await assert.rejects(model.call(), error => {
+    assert.ok(error instanceof DocumentStreamError);
+    assert.equal(error.code, "provider_error");
+    assert.doesNotMatch(error.message, /private|ephemeral-key/);
+    return true;
+  });
+});
+
+test("connection failures are identified without SDK retries", { timeout: 5000 }, async t => {
+  let hits = 0;
+  const model = await endpoint(t, async (req, _res) => {
+    await body(req); hits++;
+    req.socket.destroy();
+  });
+  await assert.rejects(model.call(), error => error instanceof DocumentStreamError && error.code === "connection");
+  assert.equal(hits, 1);
+  assert.equal(model.reservations(), 1);
 });
 
 test("length-limited output cannot masquerade as a completed JSON response", { timeout: 5000 }, async t => {

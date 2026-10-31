@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { trustModelEndpoint } from "./support/model-endpoint.js";
 import { sendModelJson } from "./support/model-stream.js";
+import { respondAsSubtitleAgent } from "./support/subtitle-agent-model.js";
 import http from "node:http";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -50,7 +51,9 @@ describe("WebSocket Subtitle Processing Endpoint (/ws/subtitle/process)", () => 
           return;
         }
 
-        // pi streaming branch for document translation operations with tools
+        // The default document engine is a single workspace-editing agent.
+        if (respondAsSubtitleAgent(payload, res, id => `译文：${id}`)) return;
+        // Retained compatibility mock for older fixed-stage tasks.
         const userMsg = payload.messages?.find((m: any) => m.role === "user")?.content;
         const request = JSON.parse(userMsg);
         const cues = (request.data as { source?: { cue_id: string; start: number; end: number }[] })?.source || [];

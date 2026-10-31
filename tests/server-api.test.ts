@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { trustModelEndpoint } from "./support/model-endpoint.js";
-import { sendModelJson } from "./support/model-stream.js";
+import { respondAsSubtitleAgent } from "./support/subtitle-agent-model.js";
 import http from "node:http";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -368,7 +368,6 @@ describe("Server API Endpoints & Gateway Integration", () => {
 
   it("POST /api/subtitle/stream integrates directly with real AgentWorker for document mode", async () => {
     const calls: ModelRequest[] = [];
-    const context = { summary: "Database transactions.", glossary: [] };
 
     // Local mock OpenAI HTTP server
     const modelServer = http.createServer(async (req, res) => {
@@ -380,22 +379,9 @@ describe("Server API Endpoints & Gateway Integration", () => {
       const request = JSON.parse(userMessage.content) as ModelRequest;
       calls.push(request);
 
-      const cues = (request.data as { source?: { cue_id: string; start: number; end: number }[] })?.source || [];
-      let answer: unknown;
-      switch (request.operation) {
-        case "analyze":
-          assert.deepEqual(cues.map(c => [c.start, c.end]), [[1500, 3500]]);
-          answer = { ...context, chapters: [{ start_id: cues[0].cue_id, end_id: cues[0].cue_id, title: "Test" }] };
-          break;
-        case "brief": answer = context; break;
-        case "translate": answer = { ...context, translations: cues.map(c => ({ cue_id: c.cue_id, translation: `测试翻译：${c.cue_id}` })) }; break;
-        case "audit": answer = { guidance: "Guidance" }; break;
-        case "review": answer = { ...context, passed: true, issues: [], corrections: [] }; break;
-        case "final_audit": answer = { passed: true, guidance: "Final guidance" }; break;
-        default: throw new Error(`Unexpected operation: ${request.operation}`);
-      }
+      assert.equal(request.operation, "translate_workspace");
       assert.equal(payload.stream, true);
-      sendModelJson(res, answer);
+      assert.equal(respondAsSubtitleAgent(payload, res, id => `测试翻译：${id}`), true);
     });
 
     await new Promise<void>(resolve => modelServer.listen(0, "127.0.0.1", resolve));

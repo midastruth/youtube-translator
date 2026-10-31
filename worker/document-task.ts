@@ -1,17 +1,25 @@
 import { defineTask } from "@earendil-works/pi-durable";
 import { SubtitleJobDoc } from "./task-definition.js";
 import { advanceDocument, callDocumentModel, DocumentModelError, DocumentPermanentError, finalDocumentCues, initialDocumentState } from "./document-translation.js";
-import type { DocumentInput, DocumentState } from "./document-translation.js";
-import type { TaskResult } from "./domain-types.js";
+import type { DocumentInput, ModelCallOptions } from "./document-translation.js";
+import type { PublishedCue, TaskResult } from "./domain-types.js";
 
 // Credentials deliberately never enter task inputs, checkpoints, SQLite or model context.
 export const documentCredentials = new Map<string, string>();
-type Checkpoint = { phase: string; document: DocumentState; failures: number };
+type DurableState = { stage: string; cursor: number; feedback: string };
 
-export const DocumentTranslationTask = defineTask<DocumentInput, Checkpoint, TaskResult>({
-  name: "document_subtitle_translation",
+/** Shared persistence, cancellation, retry and atomic-publication boundary. */
+export const createDocumentTask = <State extends DurableState, Request, Response>(workflow: {
+  name: string;
+  initial: (input: DocumentInput) => State;
+  advance: (input: DocumentInput, state: State, call: (request: Request) => Promise<Response>) => Promise<State>;
+  call: (input: DocumentInput, state: State, request: Request, options: ModelCallOptions) => Promise<Response>;
+  finalCues: (input: DocumentInput, state: State) => PublishedCue[];
+  progress?: (input: DocumentInput, state: State) => string;
+}) => defineTask<DocumentInput, { phase: string; document: State; failures: number }, TaskResult>({
+  name: workflow.name,
   version: 1,
-  initial: input => ({ phase: "run", document: initialDocumentState(input), failures: 0 }),
+  initial: input => ({ phase: "run", document: workflow.initial(input), failures: 0 }),
   phases: {
     run: async (task, runtime, context) => {
       const input = task.input;
@@ -20,12 +28,12 @@ export const DocumentTranslationTask = defineTask<DocumentInput, Checkpoint, Tas
       if (current?.cancelled) return;
       try {
         if (checkpoint.document.stage === "publish") {
-          const cues = finalDocumentCues(input, checkpoint.document);
+          const cues = workflow.finalCues(input, checkpoint.document);
           const result = { status: "succeeded", total_cues: cues.length, failed_cues: 0, published_cues: cues.length, cues };
           await runtime.commit(async tx => {
             const doc = await tx.doc(SubtitleJobDoc, runtime.conversationId);
             if (doc.cancelled) return { status: "terminal", outcome: { status: "completed", result: { cancelled: true, published_cues: [] } } };
-            // Atomic publication: never expose an unreviewed draft as final subtitles.
+            // Atomic publication: never expose an unsubmitted or invalid draft.
             doc.published_cues = Object.fromEntries(cues.map(c => [c.cue_id, c]));
             doc.final_result = result; doc.status = "succeeded"; doc.stage = "published";
             return { status: "terminal", outcome: { status: "completed", result } };
@@ -44,9 +52,9 @@ export const DocumentTranslationTask = defineTask<DocumentInput, Checkpoint, Tas
         await runtime.commit(async tx => {
           const doc = await tx.doc(SubtitleJobDoc, runtime.conversationId);
           doc.status = "running"; doc.stage = checkpoint.document.stage;
-          doc.progress = `${checkpoint.document.cursor + 1}`;
+          doc.progress = workflow.progress?.(input, checkpoint.document) ?? `${checkpoint.document.cursor + 1}`;
         }, context);
-        const next = await advanceDocument(input, checkpoint.document, request => callDocumentModel(input, checkpoint.document, request, {
+        const next = await workflow.advance(input, checkpoint.document, request => workflow.call(input, checkpoint.document, request, {
           apiKey: documentCredentials.get(input.jobKey), signal: runtime.signal,
           reserve: async () => {
             await runtime.commit(async tx => {
@@ -61,6 +69,7 @@ export const DocumentTranslationTask = defineTask<DocumentInput, Checkpoint, Tas
           const doc = await tx.doc(SubtitleJobDoc, runtime.conversationId);
           if (doc.cancelled) return { status: "terminal", outcome: { status: "completed", result: { cancelled: true, published_cues: [] } } };
           doc.stage = next.stage;
+          doc.progress = workflow.progress?.(input, next) ?? `${next.cursor + 1}`;
           return { status: "running", checkpoint: { phase: "run", document: next, failures: 0 } };
         }, context);
       } catch (error) {
@@ -100,4 +109,10 @@ export const DocumentTranslationTask = defineTask<DocumentInput, Checkpoint, Tas
       return { status: "terminal", outcome: { status: "completed", result: { cancelled: true, published_cues: [] } } };
     }, context);
   },
+});
+
+// Retained under its original task name so in-flight v1 jobs can still resume.
+export const DocumentTranslationTask = createDocumentTask({
+  name: "document_subtitle_translation", initial: initialDocumentState,
+  advance: advanceDocument, call: callDocumentModel, finalCues: finalDocumentCues,
 });

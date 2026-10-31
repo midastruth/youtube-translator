@@ -42,7 +42,7 @@ export function inputBudget(config: ModelConfig) {
 export function outputBudget(config: ModelConfig) { return Math.floor(config.outputTokens * 0.7); }
 export function modelConfig(options: Partial<ModelConfig> = {}): ModelConfig {
   const config = {
-    model: options.model || process.env.TRANSLATION_AGENT_MODEL || "gpt-4o",
+    model: options.model || process.env.TRANSLATION_AGENT_MODEL || "sol",
     baseUrl: modelEndpoint(options.baseUrl),
     contextTokens: options.contextTokens ?? Number(process.env.TRANSLATION_CONTEXT_TOKENS || 128000),
     outputTokens: options.outputTokens ?? Number(process.env.TRANSLATION_OUTPUT_TOKENS || 16384),
@@ -337,9 +337,28 @@ export class DocumentModelError extends Error {
   }
 }
 
-export async function callDocumentModel(input: DocumentInput, state: DocumentState, request: ModelRequest, options: {
-  apiKey?: string; signal?: AbortSignal; reserve: () => Promise<void>;
-}): Promise<unknown> {
+const STREAM_FAILURES = {
+  connection: "无法连接模型接口；请检查服务端网络、代理、TLS 和 OPENAI_BASE_URL（不允许重定向）",
+  invalid_response: "模型接口返回了 JSON/HTML 而不是 SSE 流；请检查 OPENAI_BASE_URL 是否为 API 根路径，以及接口是否支持 stream:true",
+  missing_finish_reason: "模型流缺少 finish_reason 结束标志；可能被网关截断或接口不兼容，请检查上游 SSE 实现与代理超时",
+  content_filter: "模型服务因内容过滤终止输出；请检查上游内容策略或更换模型",
+  network_error: "模型服务报告 network_error；请检查上游服务和网关连接后重试",
+  provider_error: "模型流发生连接或协议错误；请确认接口支持 /chat/completions SSE 和工具调用，并检查上游服务日志",
+} as const;
+
+/** Only static, allowlisted diagnostics may enter durable state or browser errors. */
+export class DocumentStreamError extends Error {
+  readonly code: keyof typeof STREAM_FAILURES;
+  constructor(code: keyof typeof STREAM_FAILURES) {
+    super(`Model API stream failed [${code}]: ${STREAM_FAILURES[code]}`);
+    this.code = code;
+  }
+}
+
+export type ModelCallOptions = { apiKey?: string; signal?: AbortSignal; reserve: () => Promise<void> };
+
+/** One complete, budgeted provider turn. The caller owns tools and durable conversation state. */
+export async function callDocumentTurn(input: DocumentInput, context: Context, options: ModelCallOptions) {
   const apiKey = options.apiKey || process.env.OPENAI_API_KEY || process.env.TRANSLATE_API_KEY;
   if (!apiKey) throw new DocumentPermanentError("configuration", "全文翻译需要 OpenAI-compatible API Key；请在扩展或 Worker 环境变量中配置");
   // Revalidate persisted inputs too: a restored job must obey current policy.
@@ -350,44 +369,70 @@ export async function callDocumentModel(input: DocumentInput, state: DocumentSta
     maxTokens: input.config.outputTokens, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     compat: { maxTokensField: "max_tokens", supportsStore: false },
   };
+  if (tokenEstimate(context) > inputBudget(input.config)) throw new DocumentPermanentError("budget", "Conversation exceeds context budget; reduce requested context");
+  options.signal?.throwIfAborted();
+  await options.reserve();
+  // Consume the provider's SSE stream, including fragmented tool calls.
+  const signal = AbortSignal.any([AbortSignal.timeout(600000), ...(options.signal ? [options.signal] : [])]);
+  let httpError: DocumentModelError | undefined;
+  let transportError: DocumentStreamError | undefined;
+  const events = stream(model, normalizeContext(context), {
+    apiKey, signal, timeoutMs: 600000, temperature: 0.1, maxTokens: input.config.outputTokens,
+    // Retries belong to the durable task so every network attempt reserves budget.
+    maxRetries: 0,
+    fetch: async (url, init) => {
+      // SDK defaults must not weaken endpoint policy or forward keys on redirects.
+      let result: Response;
+      try { result = await fetch(url, { ...init, redirect: "error" }); }
+      catch {
+        transportError = new DocumentStreamError("connection");
+        throw transportError;
+      }
+      if (!result.ok) {
+        const retryAfter = result.headers.get("retry-after") || "";
+        const seconds = Number(retryAfter);
+        const delay = retryAfter ? (Number.isFinite(seconds) ? seconds * 1000 : Date.parse(retryAfter) - Date.now()) : 1000;
+        httpError = new DocumentModelError(result.status, Number.isFinite(delay) ? Math.min(30000, Math.max(1000, delay)) : 1000);
+      } else {
+        // A gateway may return an HTML login page or a non-streaming JSON
+        // response with HTTP 200. Do not read or persist that private body.
+        const contentType = result.headers.get("content-type")?.split(";")[0].trim().toLowerCase();
+        if (contentType === "text/html" || contentType === "application/json" || contentType?.endsWith("+json")) {
+          transportError = new DocumentStreamError("invalid_response");
+          await result.body?.cancel().catch(() => {});
+          throw transportError;
+        }
+      }
+      return result;
+    },
+  });
+  // No tool execution or publication until the entire stream has finished safely.
+  for await (const _event of events) { /* Final response is checked below. */ }
+  const response = await events.result();
+  // pi returns failures as messages, not rejected promises. Never parse partial
+  // output or persist its raw errorMessage: provider bodies may contain secrets.
+  options.signal?.throwIfAborted();
+  if (httpError) throw httpError;
+  if (signal.aborted) throw new Error("Model API request timed out after 600s");
+  if (transportError) throw transportError;
+  if (response.stopReason === "error" || response.stopReason === "aborted") {
+    const code = response.rawStopReason === "content_filter" ? "content_filter"
+      : response.rawStopReason === "network_error" ? "network_error"
+      : response.errorMessage === "Stream ended without finish_reason" ? "missing_finish_reason"
+      : "provider_error";
+    throw new DocumentStreamError(code);
+  }
+  if (response.stopReason === "length") throw new Error("Model output missing or truncated; increase output limit or edit smaller batches");
+  return response;
+}
+
+export async function callDocumentModel(input: DocumentInput, state: DocumentState, request: ModelRequest, options: ModelCallOptions): Promise<unknown> {
   const context: Context = {
     systemPrompt: DOCUMENT_SYSTEM_PROMPT, tools: DOCUMENT_TOOLS,
     messages: [{ role: "user", content: JSON.stringify(request), timestamp: Date.now() }],
   };
   for (let turn = 0; turn < 8; turn++) {
-    if (tokenEstimate(context) > inputBudget(input.config)) throw new DocumentPermanentError("budget", "Retrieval conversation exceeds context budget; reduce requested context");
-    options.signal?.throwIfAborted();
-    await options.reserve();
-    // Like pi, consume the provider's SSE stream, including fragmented tool calls.
-    // Keep a bounded ten-minute turn and propagate task cancellation immediately.
-    const signal = AbortSignal.any([AbortSignal.timeout(600000), ...(options.signal ? [options.signal] : [])]);
-    let httpError: DocumentModelError | undefined;
-    const events = stream(model, normalizeContext(context), {
-      apiKey, signal, timeoutMs: 600000, temperature: 0.1, maxTokens: input.config.outputTokens,
-      // Retries belong to the durable task so every network attempt reserves budget.
-      maxRetries: 0,
-      fetch: async (url, init) => {
-        // SDK defaults must not weaken endpoint policy or forward keys on redirects.
-        const result = await fetch(url, { ...init, redirect: "error" });
-        if (!result.ok) {
-          const retryAfter = result.headers.get("retry-after") || "";
-          const seconds = Number(retryAfter);
-          const delay = retryAfter ? (Number.isFinite(seconds) ? seconds * 1000 : Date.parse(retryAfter) - Date.now()) : 1000;
-          httpError = new DocumentModelError(result.status, Number.isFinite(delay) ? Math.min(30000, Math.max(1000, delay)) : 1000);
-        }
-        return result;
-      },
-    });
-    // Drain updates without publishing unreviewed text or buffering every delta.
-    for await (const _event of events) { /* Final output is validated below. */ }
-    const response = await events.result();
-    // pi returns failures as messages, not rejected promises. Never parse partial
-    // output or persist its raw errorMessage: provider bodies may contain secrets.
-    options.signal?.throwIfAborted();
-    if (httpError) throw httpError;
-    if (signal.aborted) throw new Error("Model API request timed out after 600s");
-    if (response.stopReason === "error" || response.stopReason === "aborted") throw new Error("Model API stream failed or ended prematurely");
-    if (response.stopReason === "length") throw new Error("Model output missing or truncated; increase output limit or use smaller semantic chapters");
+    const response = await callDocumentTurn(input, context, options);
     const toolCalls = response.content.filter(block => block.type === "toolCall");
     if (toolCalls.length) {
       context.messages.push(response);

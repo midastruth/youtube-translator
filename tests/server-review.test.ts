@@ -11,7 +11,7 @@ import { AgentWorker } from "../worker/agent-worker.js";
 import type { ModelRequest } from "../worker/document-translation.js";
 import { WhisperClient, type WhisperClientOptions } from "../server/src/transcribe.js";
 import { trustModelEndpoint } from "./support/model-endpoint.js";
-import { sendModelJson } from "./support/model-stream.js";
+import { respondAsSubtitleAgent } from "./support/subtitle-agent-model.js";
 
 // Independent acceptance checks: exercise the public HTTP contract, not just module mocks.
 const source = [
@@ -213,7 +213,6 @@ test("review: public document SSE uses the real durable worker and reattaches wi
     else process.env.TRANSLATION_AGENT_MODEL = previousModel;
   });
   const calls: ModelRequest[] = [];
-  const context = { summary: "Database transactions, not payments.", glossary: [] };
   const model = http.createServer(async (req, res) => {
     try {
       let raw = ""; for await (const chunk of req) raw += String(chunk);
@@ -223,20 +222,8 @@ test("review: public document SSE uses the real durable worker and reattaches wi
       const request = JSON.parse(payload.messages.find(m => m.role === "user")!.content) as ModelRequest;
       calls.push(request);
       await delay(35); // Completion must remain observable after the POST body has ended.
-      const cues = (request.data as { source?: { cue_id: string; start: number; end: number }[] }).source || [];
-      let answer: unknown;
-      switch (request.operation) {
-        case "analyze":
-          assert.deepEqual(cues.map(c => [c.start, c.end]), source.map(c => [c.start, c.end]));
-          answer = { ...context, chapters: [{ start_id: cues[0].cue_id, end_id: cues.at(-1)!.cue_id, title: "Transactions" }] }; break;
-        case "brief": answer = context; break;
-        case "translate": answer = { ...context, translations: cues.map(c => ({ cue_id: c.cue_id, translation: `数据库事务：${c.cue_id}` })) }; break;
-        case "audit": answer = { guidance: "Use the database sense consistently." }; break;
-        case "review": answer = { ...context, passed: true, issues: [], corrections: [] }; break;
-        case "final_audit": answer = { passed: true, guidance: "Consistent database terminology." }; break;
-        default: throw new Error(`Unexpected model operation ${request.operation}`);
-      }
-      sendModelJson(res, answer);
+      assert.equal(request.operation, "translate_workspace");
+      assert.equal(respondAsSubtitleAgent(payload, res), true);
     } catch (err) {
       res.writeHead(500); res.end(String(err));
     }
@@ -254,7 +241,8 @@ test("review: public document SSE uses the real durable worker and reattaches wi
   assert.equal(first.at(-1)?.type, "done", JSON.stringify(first));
   assert.deepEqual(first.filter(e => e.type === "cue").map(c => [c.index, c.start, c.end]), [[0, 1500, 3500], [1, 6000, 8000]]);
   assert.ok(first.filter(e => e.type === "cue").every(c => c.translation?.startsWith("数据库事务：")));
-  assert.ok(calls.some(c => c.operation === "final_audit"));
+  assert.ok(calls.length >= 5);
+  assert.ok(calls.every(c => c.operation === "translate_workspace"));
   const count = calls.length;
   const replay = await sse(await app.post("/api/subtitle/stream", request));
   assert.equal(replay.at(-1)?.type, "done");

@@ -23,6 +23,8 @@ export const DocumentResumeDoc = defineDoc<{
   kind: "youtube.document_resume", version: 1, scope: "conversation",
   history: "latest", fork: "initial",
   initial: () => ({ workflow: "", document: null }),
+  // Rarely written and always replaced wholesale, so store each change as a base.
+  checkpointWhen: () => true,
 });
 
 /** Shared persistence, cancellation, retry and atomic-publication boundary. */
@@ -96,13 +98,15 @@ export const createDocumentTask = <State extends DurableState, Request, Response
           documentCredentials.delete(input.jobKey);
           return;
         }
-        while (!documentCredentials.get(input.jobKey) && !process.env.OPENAI_API_KEY && !process.env.TRANSLATE_API_KEY) {
+        if (!documentCredentials.get(input.jobKey) && !process.env.OPENAI_API_KEY && !process.env.TRANSLATE_API_KEY) {
           // After restart, a browser-only key must be supplied again by reattaching.
+          // Durable sleep ends this phase; it reruns from the top once due.
           await runtime.commit(async tx => {
             const doc = await tx.doc(SubtitleJobDoc, runtime.conversationId);
             doc.stage = "awaiting_credentials";
+            return { status: "sleeping", until: runtime.now() + 1000, checkpoint };
           }, context);
-          await runtime.sleep(runtime.now() + 1000, context);
+          return;
         }
         await runtime.commit(async tx => {
           const doc = await tx.doc(SubtitleJobDoc, runtime.conversationId);
@@ -110,7 +114,7 @@ export const createDocumentTask = <State extends DurableState, Request, Response
           doc.progress = workflow.progress?.(input, checkpoint.document) ?? `${checkpoint.document.cursor + 1}`;
         }, context);
         const wakeAt = workflow.wakeAt?.(checkpoint.document) ?? 0;
-        if (wakeAt > runtime.now()) await runtime.sleep(wakeAt, context);
+        if (wakeAt > runtime.now()) return await runtime.sleepUntil(wakeAt, checkpoint, context);
         const next = await workflow.advance(input, checkpoint.document, (request, cacheKey) => workflow.call(input, checkpoint.document, request, {
           apiKey: documentCredentials.get(input.jobKey), signal: runtime.signal, cacheKey,
           reserve: async () => {
@@ -131,13 +135,14 @@ export const createDocumentTask = <State extends DurableState, Request, Response
         const terminal = error instanceof DocumentPermanentError ||
           (error instanceof DocumentModelError && error.status >= 400 && error.status < 500 && ![429, 499].includes(error.status));
         if (!terminal && checkpoint.failures < 2) {
-          if (error instanceof DocumentModelError) await runtime.sleep(runtime.now() + error.retryAfterMs * (checkpoint.failures + 1), context);
-          await runtime.commit(async () => ({
-            status: "running", checkpoint: {
-              ...checkpoint, failures: checkpoint.failures + 1,
-              document: { ...latest, feedback: message },
-            },
-          }), context);
+          const next = {
+            ...checkpoint, failures: checkpoint.failures + 1,
+            document: { ...latest, feedback: message },
+          };
+          // Back off with a durable sleep so a restart does not restart the wait.
+          await runtime.commit(async () => error instanceof DocumentModelError
+            ? { status: "sleeping", until: runtime.now() + error.retryAfterMs * (checkpoint.failures + 1), checkpoint: next }
+            : { status: "running", checkpoint: next }, context);
           return;
         }
         await runtime.commit(async tx => {

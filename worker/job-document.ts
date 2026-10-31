@@ -14,4 +14,6 @@ export const SubtitleJobDoc = defineDoc<JobDocument>({
     failed_cues: [], network_attempts: 0, budget_limit: 0,
     cancelled: false, final_result: null,
   }),
+  // Updated on every saved turn; write a full base periodically to bound replay.
+  checkpointWhen: (_value, _ops, { deltasSinceBase }) => deltasSinceBase >= 64,
 });

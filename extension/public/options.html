@@ -69,6 +69,9 @@
     <input type="text" id="translateBaseUrl" placeholder="https://api.openai.com/v1">
     <label>翻译模型</label>
     <input type="text" id="translateModel" placeholder="sol">
+    <label>Agent 任务请求预算（默认关闭，留空使用服务端配置）</label>
+    <input type="number" id="translateRequestBudget" min="0" max="1000" step="1" placeholder="0 关闭限制；1～1000 设置上限">
+    <div class="hint">主、子 Agent 共享的累计模型调用上限，不是 Token 数。0 表示不限制请求次数，仍记录实际调用；留空继承服务端配置（新任务默认关闭）。预算耗尽后可设为 0 或提高上限，保存并重新开启翻译以续翻已保存草稿。不会清零已用次数，关闭限制可能增加 API 费用。仅用于 Agent 团队模式。</div>
     <label>快速模式：块内上下文翻译（字幕编辑 Agent 忽略此项）</label>
     <select id="translateWhole">
       <option value="false">否 — 逐句并行；长视频仍使用小块上下文</option>

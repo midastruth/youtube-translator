@@ -55,6 +55,9 @@ function applyTranslationSettings(body: StreamRequest, settings: ExtensionSettin
   if (settings.translateApiKey) body.translate_api_key = settings.translateApiKey;
   if (settings.translateBaseUrl) body.translate_base_url = settings.translateBaseUrl;
   if (settings.translateModel) body.translate_model = settings.translateModel;
+  if (body.translate_engine === "document" && settings.translateRequestBudget !== undefined) {
+    body.translate_request_budget = settings.translateRequestBudget;
+  }
   if (settings.translateWhole) body.translate_whole = true;
 }
 

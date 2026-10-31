@@ -192,13 +192,19 @@ test("one failed child retains siblings' committed work and retries only its own
 });
 
 test("durable HTTP workflow runs nine concurrent model sessions, enforces aggregate budget, resumes and publishes only after main acceptance", { timeout: 15000 }, async t => {
-  const names = ["TRANSLATION_MAIN_REASONING_EFFORT", "TRANSLATION_SUBAGENT_REASONING_EFFORT"] as const;
+  const names = ["TRANSLATION_MAIN_REASONING_EFFORT", "TRANSLATION_SUBAGENT_REASONING_EFFORT", "TRANSLATION_REQUEST_BUDGET"] as const;
   const previous = names.map(name => process.env[name]);
   t.after(() => names.forEach((name, i) => { if (previous[i] === undefined) delete process.env[name]; else process.env[name] = previous[i]; }));
   process.env.TRANSLATION_MAIN_REASONING_EFFORT = "high";
   process.env.TRANSLATION_SUBAGENT_REASONING_EFFORT = "medium";
   const settings: { main: boolean; effort: unknown; cap: unknown; temperature: unknown }[] = [];
   let active = 0, peak = 0, requests = 0;
+  // Keep the first wave open until all nine children have arrived. SQLite
+  // reservations may stagger arrivals; a fixed 10ms window measures timing,
+  // not whether child model calls can actually overlap.
+  let releaseFirstWave!: () => void;
+  const firstWave = new Promise<void>(resolve => { releaseFirstWave = resolve; });
+  let firstWaveComplete = false;
   const server = http.createServer(async (req, res) => {
     let body = ""; for await (const chunk of req) body += chunk;
     const payload = JSON.parse(body) as AgentPayload;
@@ -206,9 +212,11 @@ test("durable HTTP workflow runs nine concurrent model sessions, enforces aggreg
     const main = !!payload.tools?.some(t => t.function.name === "dispatch_subagents");
     const wire = payload as unknown as Record<string, unknown>;
     settings.push({ main, effort: wire.reasoning_effort, cap: wire.max_completion_tokens, temperature: wire.temperature });
-    if (!main) {
+    if (!main && !firstWaveComplete) {
       active++; peak = Math.max(peak, active);
-      await new Promise(resolve => setTimeout(resolve, 10)); active--;
+      if (active === 9) { firstWaveComplete = true; releaseFirstWave(); }
+      await firstWave;
+      active--;
     }
     const tools = main && payload.messages.some(m => m.role === "tool") && !payload.messages.some(m => m.tool_calls?.some(c => c.function.name === "dispatch_subagents"))
       ? [{ name: "dispatch_subagents", args: dispatch() }] : scriptedAgentTools(payload);
@@ -220,7 +228,8 @@ test("durable HTTP workflow runs nine concurrent model sessions, enforces aggreg
   const directory = await fs.mkdtemp("./tmp/team-integration-");
   let worker = new AgentWorker({ storagePath: `${directory}/state.db` }); await worker.start();
   t.after(async () => { await worker.close(); restore(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await fs.rm(directory, { recursive: true, force: true }); });
-  const options = { engine: "document", cues: source, apiKey: "private-team-key", baseUrl: `http://127.0.0.1:${address.port}/v1`, budgetLimit: 15 };
+  process.env.TRANSLATION_REQUEST_BUDGET = "15";
+  const options = { engine: "document", cues: source, apiKey: "private-team-key", baseUrl: `http://127.0.0.1:${address.port}/v1` };
   const failed = await worker.submitOrAttachJob(options);
   process.env.TRANSLATION_MAIN_REASONING_EFFORT = "off";
   process.env.TRANSLATION_SUBAGENT_REASONING_EFFORT = "off";
@@ -229,15 +238,22 @@ test("durable HTTP workflow runs nine concurrent model sessions, enforces aggreg
   assert.equal(requests, 15, "all children and main share a single hard request budget");
   assert.equal(peak, 9);
   assert.deepEqual((await worker.snapshotJob(failed)).published_cues, []);
+  assert.match(String(failed.error), /已用 15 次，上限 15 次.*共享.*TRANSLATION_REQUEST_BUDGET/);
+  process.env.TRANSLATION_MAIN_REASONING_EFFORT = "high";
+  process.env.TRANSLATION_SUBAGENT_REASONING_EFFORT = "medium";
+  await assert.rejects(worker.submitOrAttachJob(options), /预算已耗尽/);
+  assert.equal(requests, 15, "manual retry cannot reset the budget");
   await worker.close(); worker = new AgentWorker({ storagePath: `${directory}/state.db` }); await worker.start();
   process.env.TRANSLATION_MAIN_REASONING_EFFORT = "high";
   process.env.TRANSLATION_SUBAGENT_REASONING_EFFORT = "medium";
-  const resumed = await worker.submitOrAttachJob({ ...options, budgetLimit: 100 }); await resumed.taskPromise;
+  process.env.TRANSLATION_REQUEST_BUDGET = "0";
+  const resumed = await worker.submitOrAttachJob(options); await resumed.taskPromise;
   assert.equal(resumed.jobId, failed.jobId);
   assert.equal(resumed.status, "succeeded");
   assert.equal(resumed.finalResult?.cues.length, 9);
   const doc = await worker.harness!.snapshot(SubtitleJobDoc, resumed.conversationId, worker.context);
   assert.equal(doc?.network_attempts, requests);
+  assert.equal(doc?.budget_limit, 0, "disabling the limit resumes saved work without resetting usage");
   assert.equal(peak, 9);
   const before = requests;
   assert.equal((await worker.submitOrAttachJob({ ...options, budgetLimit: 100 })).status, "succeeded");

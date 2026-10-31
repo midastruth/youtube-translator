@@ -1,6 +1,7 @@
 export type ExtensionSettings = {
   backendUrl: string; languages: string; toLang: string; segmentation: string;
   translateEngine: string; translateProvider: string; translateApiKey: string; translateBaseUrl: string; translateModel: string;
+  translateRequestBudget?: number;
   translateWhole: boolean; autoTranslate: boolean; enabled: boolean;
   whisperEnabled: boolean; whisperApiKey: string; whisperBaseUrl: string; whisperModel: string; whisperLanguage: string;
   isBilingual: boolean; fontSizeOrig: number; fontSizeTran: number; positionY: number;
@@ -19,6 +20,7 @@ export type StreamRequest = {
   source_events?: Json3Event[]; source_cues?: Subtitle[]; source_video_id?: string; source_title?: string; source_language?: string;
   language?: string; translate_to?: string; translate_engine?: string; translate_provider?: string;
   translate_api_key?: string; translate_base_url?: string; translate_model?: string; translate_whole?: boolean;
+  translate_request_budget?: number;
   whisper_enabled?: boolean; whisper_api_key?: string; whisper_base_url?: string; whisper_model?: string; whisper_language?: string;
 };
 export type SubtitleEvent = {

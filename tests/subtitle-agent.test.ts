@@ -261,6 +261,31 @@ test("default document job edits a workspace, self-checks then publishes atomica
   }
 });
 
+test("default document budget is unlimited beyond 128 calls and still counts actual usage", { timeout: 15000 }, async t => {
+  const previous = process.env.TRANSLATION_REQUEST_BUDGET;
+  delete process.env.TRANSLATION_REQUEST_BUDGET;
+  t.after(() => {
+    if (previous === undefined) delete process.env.TRANSLATION_REQUEST_BUDGET;
+    else process.env.TRANSLATION_REQUEST_BUDGET = previous;
+  });
+  let extraReads = 130;
+  const f = await fixture(t, { intercept: async (payload, res) => {
+    const manifest = JSON.parse(payload.messages.find(m => m.role === "user")!.content!);
+    assert.equal(manifest.request_budget, "unlimited");
+    if (extraReads-- > 0) {
+      sendAgentTools(res, [{ name: "read_file", args: { path: "source.json", offset: 0, count: 100 } }]);
+      return true;
+    }
+  } });
+  const job = await f.worker.submitOrAttachJob(f.jobOptions); await job.taskPromise;
+  assert.equal(job.status, "succeeded");
+  assert.ok(f.requests.length > 128);
+  const doc = await f.worker.harness!.snapshot(SubtitleJobDoc, job.conversationId, f.worker.context);
+  assert.equal(doc?.budget_limit, 0);
+  assert.equal(doc?.network_attempts, f.requests.length);
+  assert.equal(job.finalResult?.cues.length, cues.length);
+});
+
 test("reasoning effort is stable across agent turns, separates cache keys and survives restart", { timeout: 15000 }, async t => {
   const previous = process.env.TRANSLATION_REASONING_EFFORT;
   t.after(() => {

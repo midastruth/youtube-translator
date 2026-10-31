@@ -61,6 +61,7 @@ export function attachWebSocket(server: http.Server, deps?: Partial<AppDependenc
             model: body.translate_model || undefined, baseUrl: body.translate_base_url,
             apiKey: body.translate_api_key, engine: body.translate_engine,
             contextTokens: body.translate_context_tokens, outputTokens: body.translate_output_tokens,
+            budgetLimit: body.translate_request_budget,
           });
           // Disconnect only detaches this observer; the document job is durable.
           for await (const event of resolved.worker.observeJobStream(job, { signal, heartbeatIntervalMs: 5000 })) {

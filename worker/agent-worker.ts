@@ -17,6 +17,16 @@ import { TRANSLATION_TEAM_VERSION, TranslationTeamTask, initialTranslationTeamSt
 import { observeDocumentJob } from "./document-stream.js";
 import type { TaskId, ConversationId } from "@earendil-works/pi-durable";
 
+/** Explicit overrides apply to new jobs and manual continuation, never reset usage. */
+export function documentRequestBudget(requested?: number, fallback = 0): number {
+  const configured = process.env.TRANSLATION_REQUEST_BUDGET?.trim();
+  const budget = requested ?? (configured ? Number(configured) : fallback);
+  if (!Number.isSafeInteger(budget) || budget < 0 || budget > 1000) {
+    throw new Error("翻译请求预算必须是 0～1000 的整数，0 表示关闭限制（TRANSLATION_REQUEST_BUDGET）");
+  }
+  return budget;
+}
+
 export class AgentWorker {
   storagePath: string;
   workerId: string;
@@ -360,9 +370,8 @@ export class AgentWorker {
       if (existing) this.jobs.delete(jobKey);
       const input = {
         jobId: `doc-${crypto.randomUUID()}`, jobKey, videoId: options.videoId || "", title: options.title || "",
-        fromLang: options.fromLang || "en", toLang: options.toLang || "zh-CN", cues, config, teamReasoning, budgetLimit: options.budgetLimit ?? 128,
+        fromLang: options.fromLang || "en", toLang: options.toLang || "zh-CN", cues, config, teamReasoning, budgetLimit: documentRequestBudget(options.budgetLimit),
       };
-      if (!Number.isSafeInteger(input.budgetLimit) || input.budgetLimit < 1 || input.budgetLimit > 1000) throw new Error("Invalid document request budget");
       initialTranslationTeamState(input); // Validate before creating durable state.
       if (!documentCredentials.get(jobKey) && !process.env.OPENAI_API_KEY && !process.env.TRANSLATE_API_KEY) {
         throw new Error("全文翻译需要 API Key；请在扩展或 Worker 环境变量中配置");
@@ -405,8 +414,7 @@ export class AgentWorker {
     const isEditor = saved.workflow === SubtitleEditingTask.definition.name;
     if (!isTeam && !isEditor && saved.workflow !== DocumentTranslationTask.definition.name) throw new Error("Translation checkpoint incompatible");
     const input = { ...(previous.input as unknown as DocumentInput), resume: true };
-    input.budgetLimit = options.budgetLimit ?? input.budgetLimit;
-    if (!Number.isSafeInteger(input.budgetLimit) || input.budgetLimit < 1 || input.budgetLimit > 1000) throw new Error("Invalid document request budget");
+    input.budgetLimit = documentRequestBudget(options.budgetLimit, input.budgetLimit);
     let taskId: TaskId<TaskResult> | undefined;
     const conversation = await this.activeHarness.conversation(existing.conversationId, this.context);
     if (!conversation) throw new Error("Document job state missing");
@@ -414,7 +422,7 @@ export class AgentWorker {
       const doc = await tx.doc(SubtitleJobDoc, existing.conversationId);
       if (doc.cancelled || doc.status !== "failed" || doc.task_id !== existing.taskId) throw new Error("Translation job is no longer resumable");
       // Retrying must not silently reset the shared request budget.
-      if (doc.network_attempts >= input.budgetLimit) throw new Error("翻译请求预算已耗尽；请提高预算后继续");
+      if (input.budgetLimit > 0 && doc.network_attempts >= input.budgetLimit) throw new Error(`翻译请求预算已耗尽（已用 ${doc.network_attempts} 次，上限 ${input.budgetLimit} 次，主/子 Agent 共享）；请提高 TRANSLATION_REQUEST_BUDGET 或 translate_request_budget 后继续，已保存草稿会保留`);
       taskId = isTeam
         ? await tx.createTask(TranslationTeamTask, input, { ownership: { kind: "conversation" } })
         : isEditor ? await tx.createTask(SubtitleEditingTask, input, { ownership: { kind: "conversation" } })

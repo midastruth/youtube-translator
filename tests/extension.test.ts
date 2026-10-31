@@ -23,6 +23,82 @@ test("settings page saves existing values, trims backend, and sends real content
   } finally { browser.close(); }
 });
 
+test("request budget is validated, persisted and sent by the document extension", async () => {
+  const browser = new BrowserFixture();
+  try {
+    const document = browser.options();
+    const budget = document.getElementById("translateRequestBudget") as HTMLInputElement;
+    assert.equal(budget.value, "");
+    for (const invalid of ["-1", "1001", "1.5"]) {
+      budget.value = invalid;
+      document.getElementById("saveButton")!.click();
+      assert.equal(browser.settings.translateRequestBudget, undefined);
+      assert.equal(budget.checkValidity(), false);
+    }
+    budget.value = "512";
+    document.getElementById("saveButton")!.click();
+    assert.equal(browser.settings.translateRequestBudget, 512);
+    assert.equal((browser.options().getElementById("translateRequestBudget") as HTMLInputElement).value, "512");
+    browser.execute("content"); browser.toggle();
+    await eventually(() => browser.streams.length === 1);
+    assert.equal(browser.streams[0].body.translate_request_budget, 512);
+    assert.equal(browser.streams[0].body.translate_engine, "document");
+  } finally { browser.close(); }
+});
+
+test("zero request budget disables the limit and is not dropped as a falsy setting", async () => {
+  const browser = new BrowserFixture({ translateRequestBudget: 512 });
+  try {
+    const document = browser.options();
+    (document.getElementById("translateRequestBudget") as HTMLInputElement).value = "0";
+    document.getElementById("saveButton")!.click();
+    assert.equal(browser.settings.translateRequestBudget, 0);
+    assert.equal((browser.options().getElementById("translateRequestBudget") as HTMLInputElement).value, "0");
+    browser.execute("content"); browser.toggle();
+    await eventually(() => browser.streams.length === 1);
+    assert.equal(browser.streams[0].body.translate_request_budget, 0);
+  } finally { browser.close(); }
+});
+
+test("blank request budget removes the override and inherits the server limit", async () => {
+  const browser = new BrowserFixture({ translateRequestBudget: 512 });
+  try {
+    const document = browser.options();
+    (document.getElementById("translateRequestBudget") as HTMLInputElement).value = "";
+    document.getElementById("saveButton")!.click();
+    assert.equal(browser.settings.translateRequestBudget, undefined);
+    browser.execute("content"); browser.toggle();
+    await eventually(() => browser.streams.length === 1);
+    assert.equal(browser.streams[0].body.translate_request_budget, undefined);
+  } finally { browser.close(); }
+});
+
+test("stream errors distinguish subtitle loading from translation and explain budget continuation", async () => {
+  for (const scenario of [
+    { meta: false, detail: "No captions", prefix: "字幕加载失败" },
+    { meta: true, detail: "provider_error", prefix: "字幕翻译失败" },
+    { meta: false, detail: "subagent-7: Document translation exhausted its model request budget", prefix: "翻译请求预算已耗尽" },
+    { meta: false, detail: "翻译请求预算已耗尽；请提高预算后继续", prefix: "翻译请求预算已耗尽" },
+  ]) {
+    const browser = new BrowserFixture();
+    try {
+      browser.execute("content"); browser.toggle();
+      await eventually(() => browser.streams.length === 1);
+      if (scenario.meta) browser.send([{ type: "meta", total_cues: 2054 }]);
+      browser.send([{ type: "error", detail: scenario.detail }]);
+      browser.finish();
+      await eventually(() => browser.dom.window.document.querySelector(".status")?.textContent?.startsWith(scenario.prefix) === true);
+      const message = browser.dom.window.document.querySelector(".status")!.textContent!;
+      assert.ok(message.includes(scenario.detail));
+      if (scenario.prefix === "翻译请求预算已耗尽") {
+        assert.match(message, /512.*续翻已保存草稿/);
+        assert.doesNotMatch(message, /字幕加载失败/);
+      }
+      assert.equal(browser.streams.length, 1, "budget failures do not start automatic fresh tasks");
+    } finally { browser.close(); }
+  }
+});
+
 test("duplicate cue replaces one subtitle; actual background action exports milliseconds", async () => {
   const browser = new BrowserFixture();
   try {

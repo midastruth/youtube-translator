@@ -31,6 +31,7 @@ function loadSettings() {
     setVal("translateApiKey", settings.translateApiKey || "");
     setVal("translateBaseUrl", settings.translateBaseUrl || "");
     setVal("translateModel", settings.translateModel || "");
+    setVal("translateRequestBudget", settings.translateRequestBudget ?? "");
     setVal("translateWhole", settings.translateWhole ? "true" : "false");
     setVal("whisperEnabled", settings.whisperEnabled ? "true" : "false");
     setVal("whisperApiKey", settings.whisperApiKey || "");
@@ -56,6 +57,12 @@ function downloadVtt() {
 }
 
 function saveSettings() {
+  const budgetInput = document.getElementById("translateRequestBudget") as HTMLInputElement;
+  const rawBudget = budgetInput.value.trim();
+  const budget = rawBudget ? Number(rawBudget) : undefined;
+  budgetInput.setCustomValidity(budget !== undefined && (!Number.isSafeInteger(budget) || budget < 0 || budget > 1000)
+    ? "请输入 0～1000 的整数（0 关闭限制），或留空使用服务端配置" : "");
+  if (!budgetInput.reportValidity()) return;
   chrome.storage.local.get(["ytsSettings"], (data: StoredSettings) => {
     // Keep page-controlled display state such as positionY.
     const settings = { ...(data.ytsSettings || {}) };
@@ -70,6 +77,8 @@ function saveSettings() {
     }
 
     settings.backendUrl = (settings.backendUrl || "").replace(/\/+$/, "") || "http://localhost:8787";
+    if (budget === undefined) delete settings.translateRequestBudget;
+    else settings.translateRequestBudget = budget;
     settings.translateWhole = getVal("translateWhole") === "true";
     settings.whisperEnabled = getVal("whisperEnabled") === "true";
     settings.isBilingual = getVal("isBilingual") === "true";

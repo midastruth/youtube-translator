@@ -11,6 +11,7 @@ import { WebSocket } from "ws";
 import { startServer, type RunningServer } from "../server/src/server.js";
 import { SubtitleCache } from "../server/src/cache.js";
 import { AgentWorker } from "../worker/agent-worker.js";
+import { SubtitleJobDoc } from "../worker/task-definition.js";
 
 describe("WebSocket Subtitle Processing Endpoint (/ws/subtitle/process)", () => {
   let tmpDir: string;
@@ -275,6 +276,7 @@ describe("WebSocket Subtitle Processing Endpoint (/ws/subtitle/process)", () => 
         translate_engine: "document",
         translate_base_url: `http://127.0.0.1:${mockModelPort}/v1`,
         translate_api_key: "test-document-key",
+        translate_request_budget: 512,
         source_cues: [
           { start: 0, end: 1000, text: "The transaction failed." },
           { start: 2000, end: 3500, text: "Database connection closed." },
@@ -302,6 +304,10 @@ describe("WebSocket Subtitle Processing Endpoint (/ws/subtitle/process)", () => 
     // Terminal done
     const done = messages.find((m) => m.type === "done");
     assert.ok(done, "Should complete with done event");
+    const [job] = worker.jobs.values();
+    assert.ok(job);
+    const doc = await worker.harness!.snapshot(SubtitleJobDoc, job.conversationId, worker.context);
+    assert.equal(doc?.budget_limit, 512);
   });
 
   it("handles abrupt client disconnection without server crash", { timeout: 10_000 }, async () => {

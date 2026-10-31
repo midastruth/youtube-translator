@@ -271,6 +271,7 @@ async function load(pageUrl: string) {
   refresh();
   overlay();
   showStatus("正在连接字幕后端…");
+  let sourceLoaded = false;
   try {
     const baseUrl = (settings.backendUrl || DEF.backendUrl).replace(/\/+$/, "");
     const langs = (settings.languages || DEF.languages)
@@ -337,6 +338,7 @@ async function load(pageUrl: string) {
 
         if (event.type === "meta") {
           totalCues = Number(event.total_cues) || 0;
+          sourceLoaded ||= totalCues > 0;
           restoredCues = Math.min(
             totalCues,
             Math.max(0, Number(event.completed_cues) || 0),
@@ -431,13 +433,16 @@ async function load(pageUrl: string) {
     const baseUrl = (settings.backendUrl || DEF.backendUrl).replace(/\/+$/, "");
     const detail = String(e?.message || e || "");
     const botBlocked = /sign in to confirm|not a bot|confirm you.?re not a bot/i.test(detail);
+    const budgetExhausted = /预算.*耗尽|exhausted.*budget|budget limit reached/i.test(detail);
     const message = e instanceof TypeError
       ? `无法连接后端 ${baseUrl}，请先启动服务`
       : botBlocked
         ? "字幕加载失败（Backend 400）：YouTube 拦截了后端请求，请配置 yt-dlp cookies.txt 后重启后端"
         : e?.code === "translation_already_running"
           ? e.message
-          : `字幕加载失败：${detail}`;
+          : budgetExhausted
+            ? `翻译请求预算已耗尽：请在扩展设置中将“任务请求预算”设为 0（关闭限制）或提高上限（如 512），保存后重新开启翻译，可续翻已保存草稿。原始错误：${detail}`
+            : `${sourceLoaded ? "字幕翻译失败" : "字幕加载失败"}：${detail}`;
     showStatus(message, "error", Math.max(0, Number(e?.hideAfterMs) || 0));
     console.error("[YTS]", e);
   } finally {

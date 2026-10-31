@@ -86,7 +86,7 @@ export const createDocumentTask = <State extends DurableState, Request, Response
             await runtime.commit(async tx => {
               const doc = await tx.doc(SubtitleJobDoc, runtime.conversationId);
               if (doc.cancelled) throw new Error("Task cancelled");
-              if (doc.network_attempts >= input.budgetLimit) throw new DocumentPermanentError("budget", "Document translation exhausted its model request budget");
+              if (input.budgetLimit > 0 && doc.network_attempts >= input.budgetLimit) throw new DocumentPermanentError("budget", `翻译请求预算已耗尽（已用 ${doc.network_attempts} 次，上限 ${input.budgetLimit} 次，主/子 Agent 共享）；请提高 TRANSLATION_REQUEST_BUDGET 或 translate_request_budget 后继续，已保存草稿会保留`);
               doc.network_attempts++;
             }, context);
           },

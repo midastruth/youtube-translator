@@ -13,6 +13,26 @@ import { setTimeout as delay } from "node:timers/promises";
 
 export const TRANSLATION_TEAM_VERSION = "subtitle-translation-team-v2-streaming";
 export const MAX_SUBAGENTS = 9; // Remainder agents; the dedicated opening is additional.
+/** The opening covers roughly this share of the video (1 hour -> first 10 minutes). */
+export const OPENING_DURATION_RATIO = 1 / 6;
+const OPENING_MIN_RATIO = 0.75, OPENING_MAX_RATIO = 1.5, OPENING_SMALL_CUES = 30;
+
+/** Host-computed opening range, proportional to video length. Deterministic from the source. */
+export function openingTarget(cues: DocumentInput["cues"]) {
+  const duration = Math.max(...cues.map(c => c.end));
+  const target = Math.round(duration * OPENING_DURATION_RATIO);
+  const at = (ms: number) => { const i = cues.findIndex(c => c.end >= ms); return i < 0 ? cues.length - 1 : i; };
+  // Leave room for sentence/topic boundaries; tiny sources may always use a small opening.
+  const lower = at(target * OPENING_MIN_RATIO);
+  const min = lower < OPENING_SMALL_CUES ? 0 : lower, max = Math.max(at(target * OPENING_MAX_RATIO), Math.min(cues.length, OPENING_SMALL_CUES) - 1);
+  // Short videos: a 1/6 slice is too small to justify a separate agent; keep ~30 cues.
+  const suggested = Math.min(max, Math.max(at(target), Math.min(cues.length, OPENING_SMALL_CUES) - 1));
+  return { min, max, suggested, duration, target };
+}
+function openingTargetSummary(input: DocumentInput) {
+  const t = openingTarget(input.cues), id = (i: number) => input.cues[i].cue_id;
+  return { video_duration_ms: t.duration, target_end_ms: t.target, suggested_end_id: id(t.suggested), allowed_end_id_range: [id(t.min), id(t.max)], suggested_cues: t.suggested + 1 };
+}
 
 /** Resolve deployment overrides once, before caching or persisting the task. */
 export function translationTeamReasoning(config: ModelConfig): NonNullable<DocumentInput["teamReasoning"]> {
@@ -39,13 +59,13 @@ export type TranslationTeamState = SubtitleAgentState & {
 
 export const TEAM_PROMPT = `${SUBTITLE_AGENT_PROMPT}
 You are the MAIN agent coordinating a translation team, not the bulk translator.
-Quickly read representative source (opening plus later definitions) to assess subject, audience, tone, subtitle style and terminology; do not spend many turns exhaustively reading before delegation. Save useful notes. Then call dispatch_subagents with a shared style/terminology brief, a dedicated opening assignment, and 0 to 9 further contiguous, non-overlapping semantic assignments covering the REMAINDER. The opening always starts at the first source cue. Choose its end_id according to total translation volume, cue density and sentence/topic boundaries: aim for a small, quickly translatable first viewing buffer (usually 30-90 seconds, about 10-30 ordinary cues), not a large chapter. For tiny sources the opening may cover everything and assignments may be empty. Do not allocate the opening to any other child. Choose the remaining parallelism proportional to source length/complexity, at most 9. Avoid splitting sentences or dependent explanations. All children receive the same immutable brief and can read the whole source for context. Put explicit source term -> target term decisions in the brief. Assignments can be large: children paginate and translate incrementally. Historical tasks without stream_opening may still use assignments covering the whole source without opening.
+Quickly read representative source (opening plus later definitions) to assess subject, audience, tone, subtitle style and terminology; do not spend many turns exhaustively reading before delegation. Save useful notes. Then call dispatch_subagents with a shared style/terminology brief, a dedicated opening assignment, and 0 to 9 further contiguous, non-overlapping semantic assignments covering the REMAINDER. The opening always starts at the first source cue. Its size is proportional to video length: about the first 1/6 of the video (e.g. a 1-hour video needs roughly the first 10 minutes). The host reports opening_target with suggested_end_id and the allowed end_id range; choose end_id within that range at a nearby sentence/topic boundary. For tiny sources the opening may cover everything and assignments may be empty. Do not allocate the opening to any other child. Choose the remaining parallelism proportional to source length/complexity, at most 9. Avoid splitting sentences or dependent explanations. All children receive the same immutable brief and can read the whole source for context. Put explicit source term -> target term decisions in the brief. Assignments can be large: children paginate and translate incrementally. Historical tasks without stream_opening may still use assignments covering the whole source without opening.
 The host runs every child independently and checkpoints each completed turn; a fast child never waits for a slow sibling's turn. The opening child submits a self-checked preview for immediate viewing while other children keep translating. It is provisional, not final main-agent acceptance. The host returns control after all translations are complete. Do not translate the whole source yourself before delegation. You can inspect live team status in the latest workspace_status message. After completion, read and check the actual merged translations against the source, especially boundaries, terminology, numbers and negation. Use search/edit tools to fix problems. You are responsible for semantic acceptance; structure validation alone is NOT review.
 After your review and corrections, call accept_translation with a concrete review summary, then close_subagents to release child sessions. Finally validate_translation and finish_translation. Any translation edit invalidates acceptance. You cannot submit until all children are completed, accepted and closed. Ordinary chat is not completion.`;
 
 export const TEAM_TOOLS: Tool[] = [
   ...SUBTITLE_AGENT_TOOLS,
-  { name: "dispatch_subagents", description: "Launch a dedicated opening agent plus up to 9 independent translation agents. Opening starts at the first cue; assignments cover the remainder exactly once in source order. Required opening for stream_opening tasks; optional only for historical tasks. One immutable shared brief. Can be called only once.", parameters: Type.Object({
+  { name: "dispatch_subagents", description: "Launch a dedicated opening agent plus up to 9 independent translation agents. Opening starts at the first cue and covers about the first 1/6 of the video (end_id within opening_target's allowed range); assignments cover the remainder exactly once in source order. Required opening for stream_opening tasks; optional only for historical tasks. One immutable shared brief. Can be called only once.", parameters: Type.Object({
     brief: Type.String({ minLength: 1, maxLength: 12000 }),
     opening: Type.Optional(Type.Object({ end_id: Type.String(), instructions: Type.String({ minLength: 1, maxLength: 2000 }) }, { additionalProperties: false })),
     assignments: Type.Array(Type.Object({ start_id: Type.String(), end_id: Type.String(), instructions: Type.String({ minLength: 1, maxLength: 2000 }) }, { additionalProperties: false }), { minItems: 0, maxItems: MAX_SUBAGENTS }),
@@ -84,8 +104,12 @@ export function translationTeamTool(input: DocumentInput, state: TranslationTeam
     if (state.children.length) throw new WorkspaceError("Subagents already dispatched; inspect merged translations after completion");
     if (!a || typeof a.brief !== "string" || !a.brief.trim() || a.brief.length > 12000 || !Array.isArray(a.assignments) || a.assignments.length > MAX_SUBAGENTS) throw new WorkspaceError("Provide a shared brief, opening and up to 9 remainder assignments");
     const opening = a.opening as { end_id: string; instructions: string } | undefined;
-    if (input.streamOpening && !opening) throw new WorkspaceError("Provide a small opening assignment for immediate viewing, plus assignments covering the remainder");
+    if (input.streamOpening && !opening) throw new WorkspaceError("Provide an opening assignment (about the first 1/6 of the video) for immediate viewing, plus assignments covering the remainder");
     if (opening && (typeof opening !== "object" || typeof opening.end_id !== "string")) throw new WorkspaceError("Invalid opening assignment");
+    if (opening && input.streamOpening) {
+      const t = openingTarget(input.cues), end = input.cues.findIndex(c => c.cue_id === opening.end_id);
+      if (end >= 0 && (end < t.min || end > t.max)) throw new WorkspaceError(`Opening must cover about the first 1/6 of the video (until ~${Math.round(t.target / 1000)}s): choose end_id between ${input.cues[t.min].cue_id} and ${input.cues[t.max].cue_id}, near ${input.cues[t.suggested].cue_id}`);
+    }
     const assignments: Assignment[] = [
       ...(opening ? [{ start_id: input.cues[0].cue_id, end_id: opening.end_id, instructions: opening.instructions }] : []),
       ...a.assignments as Assignment[],
@@ -134,7 +158,8 @@ function mainHooks(input: DocumentInput, state: TranslationTeamState): AgentHook
     tools: TEAM_TOOLS, cacheKey: "main",
     context: context => ({ ...context, systemPrompt: TEAM_PROMPT, messages: [
       ...context.messages.slice(0, 1),
-      { role: "user", timestamp: 0, content: JSON.stringify({ role: "main", stream_opening: !!input.streamOpening, shared_brief: state.brief,
+      { role: "user", timestamp: 0, content: JSON.stringify({ role: "main", stream_opening: !!input.streamOpening,
+        ...(input.streamOpening ? { opening_target: openingTargetSummary(input) } : {}), shared_brief: state.brief,
         subagents: state.children.map(c => ({ id: c.id, kind: c.kind, start_id: c.start_id, end_id: c.end_id, instructions: c.instructions })),
       }) }, ...context.messages.slice(1),
     ] }),
@@ -151,7 +176,7 @@ async function advanceChild(input: DocumentInput, state: TranslationTeamState, c
   try {
     const next = await advanceSubtitleAgent(assigned, child.agent, call, {
       tools: CHILD_TOOLS, cacheKey: child.id,
-      context: context => ({ ...context, systemPrompt: `${SUBTITLE_AGENT_PROMPT}\nYou are a translation SUBAGENT. Translate ONLY your assigned source.json IDs. Follow the MAIN agent's shared style and terminology brief. Use read_context to check later definitions or surrounding sentences in the full source. Submit your own complete assignment with validate_translation and finish_translation; the MAIN agent will review it.${child.kind === "opening" ? " You are the dedicated OPENING agent: viewers are waiting for these first subtitles. Work efficiently, avoid unnecessary notes/tool turns, self-review and submit this small opening promptly. It will be shown provisionally before whole-document review." : ""}`, messages: [
+      context: context => ({ ...context, systemPrompt: `${SUBTITLE_AGENT_PROMPT}\nYou are a translation SUBAGENT. Translate ONLY your assigned source.json IDs. Follow the MAIN agent's shared style and terminology brief. Use read_context to check later definitions or surrounding sentences in the full source. Submit your own complete assignment with validate_translation and finish_translation; the MAIN agent will review it.${child.kind === "opening" ? " You are the dedicated OPENING agent: viewers are waiting for these first subtitles. Work efficiently, avoid unnecessary notes/tool turns, translate in large paginated batches, self-review and submit the opening promptly. It will be shown provisionally before whole-document review." : ""}`, messages: [
         ...context.messages.slice(0, 1), { role: "user", timestamp: 0, content: JSON.stringify({ role: "subagent", id: child.id, kind: child.kind, shared_brief: state.brief, assignment: { start_id: child.start_id, end_id: child.end_id, instructions: child.instructions } }) }, ...context.messages.slice(1),
       ] }),
       tool: (s, name, args) => {

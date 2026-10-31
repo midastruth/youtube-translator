@@ -8,7 +8,7 @@ import { DocumentResumeDoc } from "../worker/document-task.js";
 import { DocumentModelError, modelConfig } from "../worker/document-translation.js";
 import type { DocumentInput } from "../worker/document-translation.js";
 import {
-  initialTranslationTeamState, advanceTranslationTeam, translationTeamTool, translationTeamPreviewCues,
+  initialTranslationTeamState, advanceTranslationTeam, translationTeamTool, translationTeamPreviewCues, openingTarget,
 } from "../worker/translation-team.js";
 import type { TranslationTeamState } from "../worker/translation-team.js";
 import { SubtitleJobDoc } from "../worker/task-definition.js";
@@ -65,6 +65,25 @@ test("opening plus nine remainder assignments are disjoint, cover everything, an
   const tiny = { ...document, cues: source.slice(0, 2) }, tinyState = initialTranslationTeamState(tiny);
   translationTeamTool(tiny, tinyState, "dispatch_subagents", { ...plan(), assignments: [] });
   assert.equal(tinyState.children.length, 1, "tiny jobs need only the dedicated opening agent");
+});
+
+test("opening scales with video length: a one-hour video opens with about the first ten minutes", () => {
+  // 1 hour, one 3-second cue every 3 seconds -> 1200 cues.
+  const hour = Array.from({ length: 1200 }, (_, i) => ({ cue_id: `h${i}`, start: i * 3000, end: i * 3000 + 2900, text: `Sentence ${i}.` }));
+  const t = openingTarget(hour);
+  assert.ok(Math.abs(t.target - 600_000) < 1000);
+  assert.ok(hour[t.suggested].end >= t.target && hour[t.suggested - 1].end < t.target, "first cue reaching the 10-minute mark");
+  assert.ok(hour[t.min].end >= 450_000 && hour[t.max].end <= 900_000 + 3000);
+  const document = { ...input(), cues: hour }, state = initialTranslationTeamState(document);
+  const dispatch = (end: number) => translationTeamTool(document, state, "dispatch_subagents", { brief: "b",
+    opening: { end_id: hour[end].cue_id, instructions: "Translate the opening." },
+    assignments: [{ start_id: hour[end + 1].cue_id, end_id: hour[1199].cue_id, instructions: "Translate the rest." }] });
+  assert.throws(() => dispatch(19), /first 1\/6/, "a 60-second opening is far too small for an hour");
+  assert.throws(() => dispatch(600), /first 1\/6/);
+  dispatch(t.suggested);
+  assert.equal(state.children[0].id, "opening-agent"); assert.equal(state.children[0].end_id, hour[t.suggested].cue_id);
+  // Short videos still allow a small (up to ~30 cue) opening.
+  assert.equal(openingTarget(source).min, 0); assert.equal(openingTarget(source).max, source.length - 1);
 });
 
 test("fast children advance and checkpoint multiple turns while a slow sibling is still in its first turn", { timeout: 5000 }, async t => {

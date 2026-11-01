@@ -24,7 +24,7 @@ export type StreamRequest = {
   whisper_enabled?: boolean; whisper_api_key?: string; whisper_base_url?: string; whisper_model?: string; whisper_language?: string;
 };
 export type SubtitleEvent = {
-  type: string; total_cues?: number; completed_cues?: number; failed_cues?: number; index?: number;
+  type: string; from_lang?: string; total_cues?: number; completed_cues?: number; failed_cues?: number; index?: number;
   start?: number; end?: number; text?: string; translation?: string; cached?: boolean; provisional?: boolean;
   detail?: string; code?: string; hide_after_ms?: number; stage?: string; progress?: string;
 };

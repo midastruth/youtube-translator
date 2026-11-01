@@ -18,6 +18,7 @@ export async function eventually(check: () => boolean, message = "browser condit
 type Message = { action: string };
 type VttResponse = { ok: boolean; count?: number; filename?: string; error?: string };
 export type StreamCall = { url: string; body: StreamRequest; controller: ReadableStreamDefaultController<Uint8Array>; signal?: AbortSignal | null };
+export type WindowCall = { body: StreamRequest & { playback_ms: number }; signal?: AbortSignal | null; respond: (cues: { index: number; translation?: string }[], status?: number) => void };
 
 export class BrowserFixture {
   dom = new JSDOM(`<!doctype html><title>Fixture - YouTube</title><div id="movie_player" class="html5-video-player"><div class="html5-video-container"><video></video></div><div class="ytp-chrome-bottom"><div class="ytp-right-controls"></div></div></div>`, {
@@ -27,6 +28,7 @@ export class BrowserFixture {
   scriptDirectory: string;
   streams: StreamCall[] = [];
   streamResponses: Response[] = [];
+  windows: WindowCall[] = [];
   requests: { url: string; init?: RequestInit }[] = [];
   downloads: { filename: string; blob: Blob }[] = [];
   messages: Message[] = [];
@@ -105,6 +107,13 @@ export class BrowserFixture {
     if (url.includes("/api/timedtext")) return new Response(this.playerPayload);
     if (url.includes("/api/subtitle/tracks")) return Response.json(this.tracksStatus === 200
       ? { tracks: [{ source: "manual", language: "en" }] } : { detail: "Backend 400" }, { status: this.tracksStatus });
+    if (url.endsWith("/api/subtitle/translate-window")) {
+      return new Promise(resolve => this.windows.push({
+        body: JSON.parse(String(init?.body)), signal: init?.signal,
+        // Like streams, permit late responses after abort to exercise stale-result guards.
+        respond: (cues, status = 200) => resolve(Response.json({ cues }, { status })),
+      }));
+    }
     if (!url.endsWith("/api/subtitle/stream")) throw new Error(`Unexpected URL ${url}`);
     const body: StreamRequest = JSON.parse(String(init?.body));
     if (this.streamResponses.length) return this.streamResponses.shift()!;
@@ -162,5 +171,6 @@ export class BrowserFixture {
     this.dom.window.close();
     for (const dom of this.optionPages) dom.window.close();
     for (const call of this.streams) { try { call.controller.close(); } catch {} }
+    for (const call of this.windows) call.respond([]);
   }
 }

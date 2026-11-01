@@ -1,6 +1,31 @@
-import type { Subtitle } from "./types.js";
+import type { Subtitle, SubtitleEvent } from "./types.js";
 
-export type PendingSubtitle = Omit<Subtitle, "start" | "end"> & Partial<Pick<Subtitle, "start" | "end">>;
+export type PendingSubtitle = Omit<Subtitle, "start" | "end"> & Partial<Pick<Subtitle, "start" | "end">> & {
+  translationSource?: "legacy" | "document-preview" | "document";
+};
+
+export function usableTranslation(value: string | undefined): value is string {
+  return Boolean(value?.trim() && value.trim() !== "[Translation failed]");
+}
+
+/** Source replay must not clear a fallback; document results always outrank it. */
+export function mergeSubtitleEvent(previous: PendingSubtitle | undefined, event: SubtitleEvent, documentMode: boolean): PendingSubtitle {
+  const next: PendingSubtitle = {
+    ...previous,
+    start: event.start ?? previous?.start,
+    end: event.end ?? previous?.end,
+    text: event.text ?? previous?.text ?? "",
+    translation: previous?.translation ?? "",
+  };
+  if (usableTranslation(event.translation)) {
+    const source = documentMode ? (event.provisional ? "document-preview" : "document") : "legacy";
+    if (!(next.translationSource === "document" && source === "document-preview")) {
+      next.translation = event.translation;
+      next.translationSource = source;
+    }
+  }
+  return next;
+}
 
 export function videoIdFromUrl(url: string) {
   try { return new URL(url).searchParams.get("v") || ""; } catch { return ""; }

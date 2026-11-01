@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { URL } from "node:url";
 import { sendSSE as writeSSE, withHeartbeats } from "./streaming.js";
+import { playbackWindowCues, type PlaybackWindowRequest } from "./playback-window.js";
 
 import type {
   SubtitleTrack,
@@ -889,6 +890,34 @@ export function createApp(deps?: Partial<AppDependencies>): http.RequestListener
         }
 
         sendJson(res, 200, { video_id: videoId, title, tracks } satisfies TracksResponse);
+        return;
+      }
+
+      // ── POST /api/subtitle/translate-window ───────────────────────────
+      // Temporary legacy subtitles for the player's vicinity. Preserve the
+      // document stream's exact cue boundaries and indices; never run ingestion.
+      if (method === "POST" && pathname === "/api/subtitle/translate-window") {
+        const body = await parseJsonBody<PlaybackWindowRequest>(req);
+        validateSubtitleRequest(body);
+        const cues = playbackWindowCues(body);
+        const controller = new AbortController();
+        const onClose = () => { if (!res.writableEnded) controller.abort(); };
+        res.on("close", onClose);
+        try {
+          const translated = await resolved.translateSubtitles(cues, body.source_language!, body.translate_to!, {
+            provider: body.translate_provider, apiKey: body.translate_api_key,
+            baseUrl: body.translate_base_url,
+            model: body.translate_model || process.env.TRANSLATION_AGENT_MODEL || "sol",
+            whole: true, chunkSize: 12, concurrency: 2, timeout: 20,
+            signal: controller.signal,
+          });
+          controller.signal.throwIfAborted();
+          sendJson(res, 200, { cues: cues.map((cue, index) => ({
+            ...cue, translation: translated[index]?.translation || "",
+          })) });
+        } finally {
+          res.removeListener("close", onClose);
+        }
         return;
       }
 

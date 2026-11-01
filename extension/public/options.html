@@ -61,7 +61,7 @@
       <option value="document">字幕编辑 Agent — 主 Agent 统筹，最多 9 个子 Agent 并行</option>
       <option value="legacy">快速模式 — 独立逐句 / 小块翻译</option>
     </select>
-    <div class="hint">主 Agent 规划风格与术语，按内容派发 1～9 个子 Agent 并行翻译，验收并关闭子 Agent 后统一发布。需支持 SSE 和工具调用的 OpenAI-compatible 模型；所有 Agent 共用任务请求预算，不会自动降级为逐句翻译。</div>
+    <div class="hint">主 Agent 统筹开头专用 Agent 和最多 9 个后续 Agent 翻译全文。等待期间，快速模式只补当前播放位置前 10 秒、后 45 秒的字幕；文档片段完成后自动替换，全文审校后再统一更新。需支持 SSE 和工具调用的 OpenAI-compatible 模型。附近快速翻译会产生额外 API 费用，不计入 Agent 任务预算；关闭翻译可停止附近请求。</div>
     <label>OpenAI API Key</label>
     <input type="password" id="translateApiKey" placeholder="sk-...">
     <label>API 地址</label>

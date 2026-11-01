@@ -32,6 +32,9 @@ flowchart TD
     DW <--> LLM[pi-ai 流式调用：ChatCompletions SSE + Tools]
     CHILD <--> LLM
     
+    E -->|document 等待期间：播放位置前10秒/后45秒，最多12条| PW[POST /api/subtitle/translate-window：原编号与时间轴直译]
+    PW --> L
+    PW -->|仅补空缺，document 预览/定稿优先| E
     Q -->|legacy：快速模式| L[server/src/translate.ts 快速翻译调度]
     L <--> API[OpenAI-compatible / DeepL API]
     
@@ -87,6 +90,7 @@ flowchart TD
 - **持久化循环**：每个主/子回合完成后保存检查点，保留独立会话、文件和错误状态；失败只重试相应子任务，退避不阻塞兄弟任务。主、子请求及重试共用预算，默认 `0` 不限次数。重启仅可能重做尚未保存的在途回合。
 - **发布门禁**：开头 Agent 自查、校验并显式提交后，宿主保存 `preview_cues` 并先发 `provisional: true` 预览，供边看边等后续翻译。全部子任务提交合并后，主 Agent 语义检查与修订，再 `accept_translation` → `close_subagents` → `validate_translation` → `finish_translation`。修改译文使验收和校验失效；宿主复核后原子发布全文，以相同索引覆盖开头预览，只有此时发送 `done`。
 - **质量与性能边界**：结构由程序保证，语义由子 Agent 翻译与主 Agent 验收负责；无法由结构校验保证语义正确，实际加速比受模型服务并发限流影响。
+- **播放附近兜底**：扩展以同一套原文编号和毫秒时间轴调用 `/api/subtitle/translate-window`，只补当前前 10 秒、后 45 秒内尚无译文的字幕，每批最多 12 条、12000 字符；不重断句，不写团队工作区。document 分段预览和最终结果自动覆盖 legacy，反向覆盖被禁止。拖动进度取消无关请求；document 失败仍可继续附近兜底，关闭/导航/全文成功则停止。额外调用不占 Agent 请求/Token 预算，会增加费用。
 - **任务边界**：仅注册 `subtitle_translation_team`，保留团队任务的恢复能力。旧单 Agent、固定阶段流程及规则原型已移除，其历史任务不能续翻，需重新开始。详见 [主/子 Agent 翻译](document-translation.md)。
 
 ---

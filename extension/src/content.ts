@@ -1,10 +1,12 @@
 /* YouTube Subtitle Translator — Content Script */
 import { parseBrowserSubtitles, displayError } from "./types.js";
-import type { ExtensionSettings, StoredSettings, Subtitle, BrowserSubtitles, DisplayError, SubtitleEvent } from "./types.js";
-import { exportableSubtitles, formatVtt, subtitleIndexAt, videoIdFromUrl } from "./subtitles.js";
+import type { ExtensionSettings, StoredSettings, BrowserSubtitles, DisplayError, SubtitleEvent } from "./types.js";
+import { exportableSubtitles, formatVtt, mergeSubtitleEvent, subtitleIndexAt, videoIdFromUrl } from "./subtitles.js";
 import type { PendingSubtitle } from "./subtitles.js";
 import { buildStreamRequest, hasBrowserSubtitles, selectBackendTrack } from "./stream-request.js";
 import { apiStream } from "./subtitle-stream.js";
+import { PlaybackFallback } from "./playback-fallback.js";
+import type { WindowTranslation } from "./playback-fallback.js";
 
 const CID = "yts-overlay";
 
@@ -16,6 +18,7 @@ let statusTimer: ReturnType<typeof setTimeout> | null = null;
 let loadAbortController: AbortController | null = null;
 let renderFrame: number | null = null;
 let browserSubtitleCache: BrowserSubtitles | null = null;
+let playbackFallback: PlaybackFallback | null = null;
 
 const DEF: ExtensionSettings = {
   backendUrl: "http://localhost:8787",
@@ -89,6 +92,8 @@ function waitForRetry(delay: number, signal: AbortSignal) {
 }
 
 function cancelActiveLoad() {
+  playbackFallback?.stop();
+  playbackFallback = null;
   loadGeneration += 1;
   loadAbortController?.abort();
   loadAbortController = null;
@@ -263,6 +268,8 @@ function idxOf(ms: number) {
 // ── load ───────────────────────────────────────────────────
 
 async function load(pageUrl: string) {
+  playbackFallback?.stop();
+  playbackFallback = null;
   loadAbortController?.abort();
   const controller = new AbortController();
   loadAbortController = controller;
@@ -323,6 +330,31 @@ async function load(pageUrl: string) {
     showStatus(
       track || browserSubs ? "正在处理并流式翻译字幕…" : "没有字幕，正在使用 Whisper 转写…",
     );
+    const documentMode = body.translate_engine === "document" && Boolean(body.translate_to);
+    let fromLang = body.source_language || body.language || langs[0] || "auto";
+    if (documentMode) {
+      // Keep this independent of the main stream: document errors retain useful
+      // temporary subtitles; navigation/toggle and successful publication stop it.
+      playbackFallback = new PlaybackFallback({
+        subtitles: () => subtitles,
+        position: () => (videoEl?.currentTime || 0) * 1000,
+        refresh: () => { if (generation === loadGeneration) tick(); },
+        request: async (cues, position, signal) => {
+          const response = await fetch(`${baseUrl}/api/subtitle/translate-window`, {
+            method: "POST", headers: { "Content-Type": "application/json" }, signal,
+            body: JSON.stringify({
+              url: pageUrl, source_cues: cues, source_language: fromLang, playback_ms: position,
+              translate_to: body.translate_to, translate_engine: "legacy",
+              translate_provider: body.translate_provider, translate_api_key: body.translate_api_key,
+              translate_base_url: body.translate_base_url, translate_model: body.translate_model,
+            }),
+          });
+          if (!response.ok) throw new Error(`Temporary translation: ${response.status}`);
+          const result: { cues: WindowTranslation[] } = await response.json();
+          return result.cues;
+        },
+      });
+    }
     let totalCues = 0;
     let restoredCues = 0;
     let streamDone = false;
@@ -340,6 +372,7 @@ async function load(pageUrl: string) {
 
         if (event.type === "meta") {
           receivedMeta = true;
+          fromLang = event.from_lang || fromLang;
           totalCues = Number(event.total_cues) || 0;
           sourceLoaded ||= totalCues > 0;
           restoredCues = Math.min(
@@ -370,13 +403,8 @@ async function load(pageUrl: string) {
         if (["source_cue", "cue_chunk", "cue"].includes(event.type)) {
           const index = Number(event.index);
           if (!Number.isInteger(index) || index < 0) return;
-          const previous: Partial<Subtitle> = subtitles[index] || {};
-          subtitles[index] = {
-            start: event.start ?? previous.start,
-            end: event.end ?? previous.end,
-            text: event.text ?? previous.text ?? "",
-            translation: event.translation ?? previous.translation ?? "",
-          };
+          subtitles[index] = mergeSubtitleEvent(subtitles[index], event, documentMode);
+          playbackFallback?.update();
           if (event.type === "cue") translated.add(index);
           if (videoEl && subtitles.every(Boolean)) {
             ci = idxOf(videoEl.currentTime * 1000);
@@ -432,6 +460,8 @@ async function load(pageUrl: string) {
       if (generation !== loadGeneration || settings.enabled === false) return;
       if (!streamDone) throw new Error("字幕流提前结束");
       if (failedCues === 0) {
+        playbackFallback?.stop();
+        playbackFallback = null;
         showStatus(`字幕翻译完成（${totalCues || subtitles.length} 条）`, "success", 3000);
         break;
       }
@@ -489,6 +519,7 @@ function bindVideo(nextVideo: HTMLVideoElement) {
 }
 function tick() {
   if (!videoEl) return;
+  playbackFallback?.update();
   const i = idxOf(videoEl.currentTime * 1000);
   ci = i;
   // Refresh even when the cue index did not change: the player may have

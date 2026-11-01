@@ -7,6 +7,9 @@ const extensionOnly = process.argv.includes("--extension");
 if (!extensionOnly) {
   await rm("dist/worker", { recursive: true, force: true });
   await rm("dist/server", { recursive: true, force: true });
+  await rm("dist/shared", { recursive: true, force: true });
+  const sharedEntries = (await readdir("shared")).filter(name => name.endsWith(".ts")).map(name => `shared/${name}`);
+  await build({ entryPoints: sharedEntries, outdir: "dist/shared", platform: "neutral", format: "esm", target: "es2022", sourcemap: true });
   const workerEntries = (await readdir("worker")).filter(name => name.endsWith(".ts")).map(name => `worker/${name}`);
   await build({ entryPoints: workerEntries, outdir: "dist/worker", platform: "node", format: "esm", target: "node22", sourcemap: true });
 

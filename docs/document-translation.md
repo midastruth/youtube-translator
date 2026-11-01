@@ -25,6 +25,14 @@ dispatch_subagents：共享规范，分派开头专用 Agent + 最多 9 个后�
 
 入口不变：扩展选择 `document`，通过 `POST /api/subtitle/stream` 或 WebSocket 提交。`legacy` 快速模式保持原样。仅支持 `document` 与 `legacy`，旧 `agent` 枚举已移除。
 
+## 扩展播放附近的 legacy 临时译文
+
+扩展在 document 原文到达后，通过 `POST /api/subtitle/translate-window` 为当前播放位置前 10 秒、后 45 秒内尚无译文的字幕请求 legacy 上下文翻译。一次最多 12 条、合计 12000 字符，单窗口串行；优先当前和后续字幕，不翻译整部视频。请求包含 `playback_ms`、`source_language`、`translate_to` 及带原始 `index` 的 `source_cues`（毫秒）；服务端验证窗口和上限，直接翻译，不获取字幕或重新断句。模型、端点和密钥沿用 document 配置。
+
+显示优先级：document 正式译文 > document 已提交片段预览 > legacy 临时译文 > 原文。临时译文仅留在浏览器当前字幕会话中，不写入 document 检查点，不参与团队审校或发布。原文重放不会清空临时译文，迟到的 legacy 响应不能覆盖 document。成功结果就地复用；失败的字幕至少等待 30 秒再随播放事件重试，不阻塞 document。
+
+拖动播放进度后，只翻译新窗口；不再相关或已被 document 完全覆盖的在途请求会取消。document 失败后附近兜底仍可继续；关闭翻译、导航、设置重载或 document 全文成功时取消。此机制由浏览器扩展驱动，单独调用 document SSE/WebSocket API 不会自动启动 legacy。额外 legacy 请求不计入 Agent 请求/Token 预算，会增加 API 费用；关闭翻译可停止附近兜底请求。
+
 ## 主 Agent：规划、分派、验收
 
 主 Agent 先快速阅读开头和代表性的后文定义，形成共享规范，包括翻译风格、领域、语气、术语的源语言到目标语言映射；提示词要求避免在派发前逐页穷尽全文。宿主提供 `source_bounds`（首尾编号、总条数）和 `dispatch_suggestion`（开头及剩余连续分段），候选已经完整覆盖原文，模型只需按需检查和调整边界，不必读完全篇才知道如何覆盖。候选按条数及附近句末/停顿生成，**不是语义章节识别结果**。

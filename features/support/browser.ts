@@ -26,6 +26,7 @@ export class BrowserFixture {
   settings: Partial<ExtensionSettings>;
   scriptDirectory: string;
   streams: StreamCall[] = [];
+  streamResponses: Response[] = [];
   requests: { url: string; init?: RequestInit }[] = [];
   downloads: { filename: string; blob: Blob }[] = [];
   messages: Message[] = [];
@@ -106,6 +107,7 @@ export class BrowserFixture {
       ? { tracks: [{ source: "manual", language: "en" }] } : { detail: "Backend 400" }, { status: this.tracksStatus });
     if (!url.endsWith("/api/subtitle/stream")) throw new Error(`Unexpected URL ${url}`);
     const body: StreamRequest = JSON.parse(String(init?.body));
+    if (this.streamResponses.length) return this.streamResponses.shift()!;
     const stream = new ReadableStream<Uint8Array>({ start: controller => {
       this.streams.push({ url, body, controller, signal: init?.signal });
     } });

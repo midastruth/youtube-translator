@@ -1,6 +1,6 @@
 /* YouTube Subtitle Translator — Content Script */
 import { parseBrowserSubtitles, displayError } from "./types.js";
-import type { ExtensionSettings, StoredSettings, Subtitle, BrowserSubtitles, DisplayError } from "./types.js";
+import type { ExtensionSettings, StoredSettings, Subtitle, BrowserSubtitles, DisplayError, SubtitleEvent } from "./types.js";
 import { exportableSubtitles, formatVtt, subtitleIndexAt, videoIdFromUrl } from "./subtitles.js";
 import type { PendingSubtitle } from "./subtitles.js";
 import { buildStreamRequest, hasBrowserSubtitles, selectBackendTrack } from "./stream-request.js";
@@ -119,6 +119,7 @@ function requestBrowserSubtitles(id: string, languages: string[]) {
 }
 
 function waitForBrowserSubtitles(id: string, signal: AbortSignal, timeout = 8000): Promise<BrowserSubtitles | null> {
+  if (signal.aborted) return Promise.resolve(null);
   if (browserSubtitleCache?.videoId === id) return Promise.resolve(browserSubtitleCache);
   return new Promise(resolve => {
     let timer: ReturnType<typeof setTimeout>;
@@ -272,6 +273,7 @@ async function load(pageUrl: string) {
   overlay();
   showStatus("正在连接字幕后端…");
   let sourceLoaded = false;
+  let receivedMeta = false;
   try {
     const baseUrl = (settings.backendUrl || DEF.backendUrl).replace(/\/+$/, "");
     const langs = (settings.languages || DEF.languages)
@@ -314,7 +316,7 @@ async function load(pageUrl: string) {
       }
     }
 
-    const body = buildStreamRequest({
+    let body = buildStreamRequest({
       pageUrl, languages: langs, track, browserSubtitles: browserSubs, title: document.title, settings,
     });
 
@@ -333,10 +335,11 @@ async function load(pageUrl: string) {
       translated.clear();
 
       const streamBaseUrl = (settings.backendUrl || DEF.backendUrl).replace(/\/+$/, "");
-      await apiStream(streamBaseUrl, "/api/subtitle/stream", body, controller.signal, event => {
+      const onEvent = (event: SubtitleEvent) => {
         if (generation !== loadGeneration || settings.enabled === false) return;
 
         if (event.type === "meta") {
+          receivedMeta = true;
           totalCues = Number(event.total_cues) || 0;
           sourceLoaded ||= totalCues > 0;
           restoredCues = Math.min(
@@ -402,7 +405,29 @@ async function load(pageUrl: string) {
           streamDone = true;
           failedCues = Math.max(0, Number(event.failed_cues) || 0);
         }
-      });
+      };
+      try {
+        await apiStream(streamBaseUrl, "/api/subtitle/stream", body, controller.signal, onEvent);
+      } catch (value) {
+        if (generation !== loadGeneration || controller.signal.aborted) return;
+        const error = displayError(value);
+        // Track discovery can succeed while the subsequent yt-dlp subtitle
+        // download is blocked. Switch sources once, before translation starts;
+        // never restart a translation/provider failure or a browser-source job.
+        if (receivedMeta || !track || browserSubs || !/yt-dlp|Unable to download video subtitles/i.test(error.message)) throw value;
+        showStatus("后端字幕下载失败，正在读取播放器字幕；请打开播放器原始字幕（如英文）…");
+        requestBrowserSubtitles(pageVideoId, langs);
+        browserSubs = await waitForBrowserSubtitles(pageVideoId, controller.signal);
+        if (generation !== loadGeneration || controller.signal.aborted) return;
+        if (!browserSubs || browserSubs.videoId !== pageVideoId || !hasBrowserSubtitles(browserSubs)) {
+          throw new Error(`${error.message}；未能读取播放器字幕，请打开播放器原始字幕后重新开启翻译`);
+        }
+        // Omitting track avoids carrying the failed backend language selection
+        // into the browser-source request. The backend skips yt-dlp for this body.
+        body = buildStreamRequest({ pageUrl, languages: langs, browserSubtitles: browserSubs, title: document.title, settings });
+        showStatus("已读取播放器字幕，正在处理并流式翻译…");
+        await apiStream(streamBaseUrl, "/api/subtitle/stream", body, controller.signal, onEvent);
+      }
 
       if (generation !== loadGeneration || settings.enabled === false) return;
       if (!streamDone) throw new Error("字幕流提前结束");

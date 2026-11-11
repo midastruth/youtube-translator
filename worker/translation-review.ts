@@ -49,22 +49,69 @@ export function readBilingual(input: DocumentInput, state: Workspace, args: unkn
  */
 export function briefGlossary(brief: string) {
   const terms: { term: string; targets: string[] }[] = [];
-  const pattern = /([^\n;；,，.。!?！？:：=→>()（）]{1,60}?)\s*(?:=>|->|→|=)\s*([^\n;；,，。()（）]{1,60})/gu;
-  for (const [, rawTerm, rawTarget] of brief.matchAll(pattern)) {
+  const pattern = /([^\n;；,，.。!?！？:：=→>()（）]{1,60}?)\s*(?:=>|->|→|=)\s*([^\n;；,，。()（）]{1,60})/gdu;
+  for (const match of brief.matchAll(pattern)) {
+    const [, rawTerm, rawTarget] = match;
+    // A comma inside a number ($15,000 = 1.5万美元) must not start a new entry.
+    const before = brief[(match.index ?? 0) - 1];
+    if (before && /[\p{L}\p{N},.]/u.test(before)) continue;
     const term = rawTerm.trim().replace(/^[-*•"'“‘`\s]+|["'”’`]+$/gu, "").trim();
     const targets = rawTarget.split(/[/|]|或/u).map(t => t.trim().replace(/^["'“‘`]+|["'”’`.]+$/gu, "").trim()).filter(Boolean);
     if (term.length < 2 || term.split(/\s+/).length > 6 || !targets.length) continue;
+    // "quirk = quirk" notes the model should keep a term as-is; searching for the
+    // Latin term inside a Chinese translation would only produce false positives.
+    if (/^[\p{Script=Latin}\p{N}]/u.test(term) && targets.every(t => t.toLocaleLowerCase() === term.toLocaleLowerCase())) continue;
     if (!terms.some(t => t.term.toLocaleLowerCase() === term.toLocaleLowerCase())) terms.push({ term, targets });
   }
   return terms;
 }
 function termPattern(term: string) {
   const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  // Latin terms match at word starts (plurals still match); CJK terms match anywhere.
-  return new RegExp(/^[\p{Script=Latin}\p{N}]/u.test(term) ? `(?<![\\p{L}\\p{N}])${escaped}` : escaped, "iu");
+  // Latin terms match whole words only ("MA" must not match "market", "long" must
+  // not match "long-term"); CJK terms have no word boundaries and match anywhere.
+  return new RegExp(/^[\p{Script=Latin}\p{N}]/u.test(term) ? `(?<![\\p{L}\\p{N}-])${escaped}(?![\\p{L}\\p{N}-])` : escaped, "iu");
 }
 
-const numbers = (text: string) => text.match(/\d+(?:[.,:]\d+)*/g)?.map(n => n.replace(/,/g, "")) ?? [];
+// Digits glued to Latin letters ("mid20s", "stage 2A") are ASR/notation fragments, not
+// numbers, and would otherwise be reported missing forever.
+const numbers = (text: string) => text.match(/(?<![\p{Script=Latin}])\d+(?:[.,:]\d+)*(?![\p{Script=Latin}])/gu)?.map(n => n.replace(/,/g, "")) ?? [];
+/** Values written in Chinese or scaled with 万/千/亿 are correct renderings of a source
+ * digit, so a source number counts as present when its value appears either way. */
+const CJK_DIGITS: Record<string, number> = { 零: 0, 〇: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+const CJK_UNITS: Record<string, number> = { 十: 10, 百: 100, 千: 1000, 万: 10_000, 亿: 100_000_000 };
+const SCALE: Record<string, number> = { 千: 1000, 万: 10_000, 百万: 1_000_000, 亿: 100_000_000 };
+function seenNumbers(text: string) {
+  const values = new Set<number>();
+  for (const run of text.match(/[零〇一二两三四五六七八九十百千万亿]+/gu) ?? []) {
+    let total = 0, section = 0, digit = 0;
+    for (const char of run) {
+      if (char in CJK_DIGITS) {
+        digit = CJK_DIGITS[char];
+        // "三五年" / "十次里对八次" state values without a unit.
+        if (digit > 0) values.add(digit);
+        continue;
+      }
+      const unit = CJK_UNITS[char];
+      if (unit < 10_000) section += (digit || 1) * unit;
+      else { total += (section + digit) * unit; section = 0; }
+      digit = 0;
+    }
+    const value = total + section + digit;
+    if (value > 0) values.add(value);
+  }
+  for (const [, amount, scale] of text.matchAll(/(\d+(?:\.\d+)?)(百万|千|万|亿)/gu)) {
+    values.add(Math.round(Number(amount) * SCALE[scale]));
+  }
+  // Digits already in the translation (11:00 read as "11点") count as the same value.
+  for (const token of text.match(/\d+(?:\.\d+)?/gu) ?? []) values.add(Number(token));
+  return values;
+}
+const numericValue = (token: string) => {
+  // Clock positions are read as "11点", "1点半", not as "11:00".
+  const clock = token.match(/^(\d{1,2}):(\d{2})$/u);
+  if (clock) return Number(clock[1]) + (clock[2] === "00" ? 0 : Number(clock[2]) / 60);
+  return Number(token);
+};
 const baseLanguage = (lang: string) => lang.toLowerCase().split(/[-_]/)[0];
 const comparable = (text: string) => text.toLocaleLowerCase().replace(/\s+/g, " ").trim();
 const median = (values: number[]) => {
@@ -88,8 +135,15 @@ export function reviewChecklist(input: DocumentInput, state: Workspace & { revis
     const issues: string[] = [];
     if (translation === null) { counts.missing++; issues.push("missing translation"); }
     else {
-      const target = translation.replace(/,/g, "");
-      const absent = numbers(cue.text).filter(n => !target.includes(n));
+      // Commas are purely formatting; a comma-decimals heuristic would accept
+      // "3,5" for "3.5", so compare a digit stream instead.
+      const target = translation.replace(/[\s,]/g, "");
+      const spelled = seenNumbers(translation);
+      const absent = numbers(cue.text).filter(n => {
+        if (target.includes(n)) return false;
+        const value = numericValue(n);
+        return !spelled.has(value) && !spelled.has(Math.floor(value));
+      });
       if (absent.length) { counts.numbers++; issues.push(`numbers not found in translation: ${absent.join(", ")}`); }
       if (differentLanguage && /\s/.test(cue.text.trim()) && cue.text.length >= 8 && comparable(cue.text) === comparable(translation)) {
         counts.untranslated++; issues.push("translation identical to source");

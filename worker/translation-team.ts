@@ -94,7 +94,7 @@ You are the MAIN agent coordinating a translation team, not the bulk translator.
 Quickly read representative source (opening plus later definitions) to assess subject, audience, tone, subtitle style and terminology; do not spend many turns exhaustively reading before delegation. The role message includes source_bounds and a dispatch_suggestion with complete valid coverage: use it as a starting point, not a claim of semantic boundaries. Read near proposed boundaries only as needed and adjust without gaps. Aim to dispatch within a few turns, not read the whole document first. After interpreting each source page, call save_plan with a compact CUMULATIVE understanding, style, term decisions and unresolved questions BEFORE fetching more pages. This durable summary and source-read ranges survive compaction; notes.md is also available. Then call dispatch_subagents with a shared style/terminology brief, a dedicated opening assignment, and 0 to 9 further contiguous, non-overlapping semantic assignments covering the REMAINDER. The opening always starts at the first source cue. Its size is proportional to video length: about the first 1/6 of the video (e.g. a 1-hour video needs roughly the first 10 minutes). The host reports opening_target with suggested_end_id and the allowed end_id range; choose end_id within that range at a nearby sentence/topic boundary. For tiny sources the opening may cover everything and assignments may be empty. Do not allocate the opening to any other child. Choose the remaining parallelism proportional to source length/complexity, at most 9. Avoid splitting sentences or dependent explanations. All children receive the same immutable brief and can read the whole source for context. Put explicit term decisions in the brief as "source term = target term", one per line or separated by semicolons, so the host can check them. Assignments can be large: children paginate and translate incrementally. Historical tasks without stream_opening may still use assignments covering the whole source without opening.
 The host runs every child independently and checkpoints each completed turn; a fast child never waits for a slow sibling's turn. Each child's self-checked submission is shown to viewers as a provisional preview while other children keep translating (the opening first). Previews are not final main-agent acceptance. The host returns control after all translations are complete. Do not translate the whole source yourself before delegation. You can inspect live team status in the latest workspace_status message.
 Review efficiently. When all children complete, the host appends a review_checklist: heuristic flags (missing cues, numbers absent from translations, untranslated copies, length outliers, brief term violations) plus bilingual rows around every assignment boundary. Fix real flagged problems first; flags can be false positives. Then read the merged result with read_bilingual in large pages (it shows source and translation side by side; prefer it over separate source/translations reads) and check meaning, negation, terminology and references. After reviewing each returned page, call record_review with its actual offset/returned_count, revision and a compact CUMULATIVE summary of decisions and remaining issues BEFORE reading the next page. Reading alone is not semantic confirmation. Children already self-reviewed their sections: spend your effort on cross-section consistency and on sections where you find problems; skim sections that read well. Use search_file/edit_file to fix problems; edits invalidate review evidence for affected cues. Re-read and recheck those cues; other confirmed ranges remain valid. Recompute review_checklist after edits, not merely because the conversation compacted: the checklist revision, counts and issue/boundary offsets persist in workspace_status.main_progress. After restart/compaction, resume from that durable plan/review summary and next_review_offset, NEVER automatically restart from the first page. You do not need to re-read confirmed ranges of the unchanged translation. You are responsible for semantic acceptance; structure validation alone is NOT review.
-When satisfied, finish in ONE turn by calling, in order: accept_translation (concrete review summary), close_subagents, validate_translation, finish_translation. Any translation edit invalidates acceptance. You cannot submit until all children are completed, accepted and closed. Ordinary chat is not completion.`;
+When satisfied, finish in ONE turn by calling, in order: accept_translation (concrete review summary), close_subagents, validate_translation, finish_translation. Any translation edit invalidates acceptance. You cannot submit until all children are completed, accepted and closed. Ordinary chat is not completion. When workspace_status reports ready_to_submit: true and next_review_offset: null, every cue is already reviewed and translated: submit immediately in that same turn instead of reading or re-checking pages again.`;
 
 export const TEAM_TOOLS: Tool[] = [
   ...SUBTITLE_AGENT_TOOLS, READ_BILINGUAL_TOOL, REVIEW_CHECKLIST_TOOL, ...MAIN_PROGRESS_TOOLS,
@@ -239,6 +239,7 @@ function mainHooks(input: DocumentInput, state: TranslationTeamState): AgentHook
     status: () => ({
       subagents: state.children.map(c => ({ id: c.id, status: c.status, translated_cues: Object.keys(c.agent.draft).length })),
       accepted_revision: state.acceptedRevision, acceptance: state.acceptance,
+      ...(state.children.length && !state.children.some(c => c.status === "running") ? { ready_to_submit: submissionReady(input, state) } : {}),
       main_progress: progressStatus(state, input.cues.length),
     }),
     tool: (s, name, args) => translationTeamTool(input, s as TranslationTeamState, name, args),
@@ -307,6 +308,14 @@ function updateFeedback(state: TranslationTeamState) {
   state.feedback = completed(state) ? "All subagents completed. Review the actual merged translations (including the provisional opening), fix inconsistencies, accept_translation, close_subagents, then validate and finish." : "";
 }
 
+/** A task that has already confirmed every cue and holds a complete translation only
+ * needs its one-turn submission sequence. Killing it there discards finished work. */
+function submissionReady(input: DocumentInput, state: TranslationTeamState) {
+  const p = mainProgress(state);
+  return p.reviewRevision === state.revision && rangeCount(p.reviewed) >= input.cues.length && input.cues.every(c => state.draft[c.cue_id]);
+}
+const SUBMIT_NOW = "Review coverage is complete and the merged translation covers every cue. Do NOT read or re-check the same pages again: call accept_translation, close_subagents, validate_translation and finish_translation in ONE turn now.";
+
 /** Single-step driver retained for deterministic workspace tests and integrations. */
 export async function stepTranslationTeam(input: DocumentInput, previous: TranslationTeamState, call: AgentCall): Promise<TranslationTeamState> {
   const state = structuredClone(previous);
@@ -316,10 +325,16 @@ export async function stepTranslationTeam(input: DocumentInput, previous: Transl
     const p = mainProgress(state), phase = state.children.length ? "review" : "planning";
     if (p.guard.phase !== phase) p.guard = { phase, turns: 0, stalled: 0 };
     const limit = phase === "planning" ? 24 : Math.max(48, Math.ceil(input.cues.length / 20) * 4);
+    // Only the final submission sequence may still be outstanding here; give it a
+    // bounded extra window instead of failing a fully reviewed translation.
+    const stalledLimit = phase === "review" && submissionReady(input, state) ? 24 : 12;
     // Check BEFORE another network request. The preceding completed turn was
     // checkpointed normally, so the durable task boundary can retain all work.
-    if (p.guard.turns >= limit || p.guard.stalled >= 12) {
-      throw new DocumentPermanentError("convergence", `主 Agent ${phase === "planning" ? "规划" : "验收"}无进展或达到阶段轮数上限，已停止自动请求；草稿和检查点已保留，可检查模型工具调用后重新开启续翻`);
+    if (p.guard.turns >= limit || p.guard.stalled >= stalledLimit) {
+      const ready = phase === "review" && submissionReady(input, state);
+      throw new DocumentPermanentError("convergence", ready
+        ? "主 Agent 验收已覆盖全部字幕且译文完整，但连续多个回合仍未执行 accept_translation / close_subagents / validate_translation / finish_translation；已停止自动请求，草稿、预览和检查点已保留，可重新开启续翻直接收尾"
+        : `主 Agent ${phase === "planning" ? "规划" : "验收"}无进展或达到阶段轮数上限，已停止自动请求；草稿和检查点已保留，可检查模型工具调用后重新开启续翻`);
     }
     const before = mainProgressMeasure(state);
     const next = await advanceSubtitleAgent(input, state, call, mainHooks(input, state)) as TranslationTeamState;
@@ -327,7 +342,9 @@ export async function stepTranslationTeam(input: DocumentInput, previous: Transl
     progress.guard.turns++;
     progress.guard.stalled = mainProgressMeasure(next) !== before ? 0 : progress.guard.stalled + 1;
     if (progress.guard.stalled >= 4 && !next.children.some(c => c.status === "running") && next.stage !== "publish") {
-      next.feedback = "Main agent is repeating work. Resume from workspace_status.main_progress; do not restart at offset 0 after compaction. Persist a cumulative save_plan / record_review summary. Use dispatch_suggestion for exact coverage, or complete semantic acceptance when satisfied. Automatic requests stop after 12 no-progress turns.";
+      next.feedback = submissionReady(input, next)
+        ? `${SUBMIT_NOW} Automatic requests stop after 24 no-progress turns.`
+        : "Main agent is repeating work. Resume from workspace_status.main_progress; do not restart at offset 0 after compaction. Persist a cumulative save_plan / record_review summary. Use dispatch_suggestion for exact coverage, or complete semantic acceptance when satisfied. Automatic requests stop after 12 no-progress turns.";
     }
     return next;
   }

@@ -49,7 +49,7 @@ test("brief glossary parses explicit term decisions in common notations", () => 
 
 test("checklist flags missing cues, lost numbers, untranslated copies, length outliers and brief term violations", () => {
   const draft = {
-    a: "交易失败了三次。", // wrong term and number dropped
+    a: "交易失败了。", // wrong term and the count 3 was dropped
     c: "这里不会丢失 1500 条记录。", // comma-formatted number is matched
     d: "This is a long sentence that explains the commit protocol in detail.", // copied source
     e: "已确认的提交是持久的。".repeat(12), // length outlier (e.g. repeated or merged text)
@@ -64,6 +64,34 @@ test("checklist flags missing cues, lost numbers, untranslated copies, length ou
   assert.deepEqual(report.issue_counts, { missing: 1, numbers: 1, untranslated: 1, length: 1, glossary: 2 });
   assert.equal(report.revision, 7); assert.equal(report.translated_cues, 4);
   assert.deepEqual(report.boundaries, [{ offset: 0, rows: [["a", cues[0].text, draft.a], ["b", cues[1].text, null], ["c", cues[2].text, draft.c], ["d", cues[3].text, draft.d], ["e", cues[4].text, draft.e]] }]);
+});
+
+test("checklist accepts spelled-out and scaled numbers, and does not flag whole-word false positives", () => {
+  const spoken = [
+    { cue_id: "n1", start: 0, end: 900, text: "It's 100% you got it." },
+    { cue_id: "n2", start: 1000, end: 1900, text: "they're buying at 11:00 and selling at 12:00." },
+    { cue_id: "n3", start: 2000, end: 2900, text: "mid20s at the time and I had $15,000." },
+    { cue_id: "n4", start: 3000, end: 3900, text: "I think I'm right eight out of 10 times." },
+    { cue_id: "n5", start: 4000, end: 4900, text: "The market was strong but the longer trend held." },
+    { cue_id: "n6", start: 5000, end: 5900, text: "I keep a long position and a long-term view." },
+  ];
+  const draft = {
+    n1: "百分之百，你说对了。", n2: "11点买进、12点卖出。", n3: "那时二十五六岁，手里有1.5万美元。",
+    n4: "我觉得十次里能对八次。", n5: "市场很强，但更长期的趋势守住了。", n6: "我做多，而且看长期。",
+  };
+  const report = reviewChecklist(input({ cues: spoken }), { draft, revision: 1 }, "long = 做多", [{ start_id: "n1" }]);
+  assert.deepEqual(report.issue_counts, { missing: 0, numbers: 0, untranslated: 0, length: 0, glossary: 0 });
+  assert.deepEqual(report.flagged, []);
+  // A real omission is still caught.
+  const omitted = reviewChecklist(input({ cues: spoken }), { draft: { ...draft, n4: "我觉得我常常是对的。" }, revision: 1 }, "long = 做多", []);
+  assert.equal(omitted.issue_counts.numbers, 1);
+  assert.match(omitted.flagged[0].issues.join(" | "), /numbers not found in translation: 10/);
+});
+
+test("glossary skips numeric commas and keep-as-is quirks that only produce noise", () => {
+  assert.deepEqual(briefGlossary("$15,000 = 1.5万美元; socks = SOXX; station analysis = stage analysis; get a course = get a course"), [
+    { term: "socks", targets: ["SOXX"] }, { term: "station analysis", targets: ["stage analysis"] },
+  ]);
 });
 
 test("checklist stays within its context share and reports truncation", () => {

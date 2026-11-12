@@ -84,17 +84,14 @@ const SCALE: Record<string, number> = { 千: 1000, 万: 10_000, 百万: 1_000_00
 function seenNumbers(text: string) {
   const values = new Set<number>();
   for (const run of text.match(/[零〇一二两三四五六七八九十百千万亿]+/gu) ?? []) {
-    // Pure digit runs: "二〇一九" is read positionally, "三五年"/"七八个" are approximations
-    // naming each digit. Runs with units ("二十五") only count as their full value, so
-    // "二十五" does not also satisfy a dropped source 2 or 5.
-    if (run.length > 1 && [...run].every(char => char in CJK_DIGITS)) {
-      values.add(Number([...run].map(char => CJK_DIGITS[char]).join("")));
-      for (const char of run) if (CJK_DIGITS[char] > 0) values.add(CJK_DIGITS[char]);
-      continue;
-    }
     let total = 0, section = 0, digit = 0;
     for (const char of run) {
-      if (char in CJK_DIGITS) { digit = CJK_DIGITS[char]; continue; }
+      if (char in CJK_DIGITS) {
+        digit = CJK_DIGITS[char];
+        // "三五年" / "十次里对八次" state values without a unit.
+        if (digit > 0) values.add(digit);
+        continue;
+      }
       const unit = CJK_UNITS[char];
       if (unit < 10_000) section += (digit || 1) * unit;
       else { total += (section + digit) * unit; section = 0; }
@@ -110,11 +107,11 @@ function seenNumbers(text: string) {
   for (const token of text.match(/\d+(?:\.\d+)?/gu) ?? []) values.add(Number(token));
   return values;
 }
-/** Values a source token may legitimately appear as. Only clock times accept their
- * hour ("11:30" → "11点半"); other decimals must keep their value, so 2.5 → 2 is flagged. */
-const numericValues = (token: string) => {
+const numericValue = (token: string) => {
+  // Clock positions are read as "11点", "1点半", not as "11:00".
   const clock = token.match(/^(\d{1,2}):(\d{2})$/u);
-  return clock ? [Number(clock[1])] : [Number(token)];
+  if (clock) return Number(clock[1]) + (clock[2] === "00" ? 0 : Number(clock[2]) / 60);
+  return Number(token);
 };
 const baseLanguage = (lang: string) => lang.toLowerCase().split(/[-_]/)[0];
 const comparable = (text: string) => text.toLocaleLowerCase().replace(/\s+/g, " ").trim();
@@ -143,7 +140,11 @@ export function reviewChecklist(input: DocumentInput, state: Workspace & { revis
       // "3,5" for "3.5", so compare a digit stream instead.
       const target = translation.replace(/[\s,]/g, "");
       const spelled = seenNumbers(translation);
-      const absent = numbers(cue.text).filter(n => !target.includes(n) && !numericValues(n).some(value => spelled.has(value)));
+      const absent = numbers(cue.text).filter(n => {
+        if (target.includes(n)) return false;
+        const value = numericValue(n);
+        return !spelled.has(value) && !spelled.has(Math.floor(value));
+      });
       if (absent.length) { counts.numbers++; issues.push(`numbers not found in translation: ${absent.join(", ")}`); }
       if (differentLanguage && /\s/.test(cue.text.trim()) && cue.text.length >= 8 && comparable(cue.text) === comparable(translation)) {
         counts.untranslated++; issues.push("translation identical to source");

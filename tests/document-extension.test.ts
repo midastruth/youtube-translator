@@ -42,3 +42,43 @@ test("explicit saved fast-mode preference is preserved", async () => {
     assert.equal(browser.streams[0].body.translate_engine, "legacy");
   } finally { browser.close(); }
 });
+
+test("a failed document review keeps submitted previews and explains resuming", async () => {
+  const browser = new BrowserFixture();
+  try {
+    browser.execute("content"); browser.toggle();
+    await eventually(() => browser.streams.length === 1);
+    browser.send([
+      { type: "meta", total_cues: 3 },
+      { type: "source_cue", index: 0, start: 0, end: 1000, text: "One" },
+      { type: "source_cue", index: 1, start: 1000, end: 2000, text: "Two" },
+      { type: "source_cue", index: 2, start: 2000, end: 3000, text: "Three" },
+      { type: "cue", index: 0, start: 0, end: 1000, text: "One", translation: "一", provisional: true },
+    ]);
+    browser.send([{ type: "error", code: "document_translation_failed", detail: "主 Agent 验收已覆盖全部字幕但未收尾" }]);
+    browser.finish();
+    await eventually(() => browser.dom.window.document.querySelector(".status")?.textContent?.includes("预览字幕仍可观看") === true);
+    const message = browser.dom.window.document.querySelector(".status")!.textContent!;
+    assert.match(message, /主 Agent 验收已覆盖全部字幕但未收尾/);
+    assert.match(message, /已提交的 1\/3 条预览字幕仍可观看/);
+    assert.match(message, /重新开启翻译会从检查点续翻/);
+  } finally { browser.close(); }
+});
+
+test("the resume hint also appears when every cue was previewed before the review failed", async () => {
+  const browser = new BrowserFixture();
+  try {
+    browser.execute("content"); browser.toggle();
+    await eventually(() => browser.streams.length === 1);
+    browser.send([
+      { type: "meta", total_cues: 2 },
+      { type: "source_cue", index: 0, start: 0, end: 1000, text: "One" },
+      { type: "source_cue", index: 1, start: 1000, end: 2000, text: "Two" },
+      { type: "cue", index: 0, start: 0, end: 1000, text: "One", translation: "一", provisional: true },
+      { type: "cue", index: 1, start: 1000, end: 2000, text: "Two", translation: "二", provisional: true },
+    ]);
+    browser.send([{ type: "error", code: "document_translation_failed", detail: "主 Agent 验收已覆盖全部字幕但未收尾" }]);
+    browser.finish();
+    await eventually(() => browser.dom.window.document.querySelector(".status")?.textContent?.includes("已提交的 2/2 条预览字幕仍可观看") === true);
+  } finally { browser.close(); }
+});

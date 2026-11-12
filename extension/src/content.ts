@@ -503,7 +503,15 @@ async function load(pageUrl: string) {
           : budgetExhausted
             ? `翻译请求预算已耗尽：请在扩展设置中将“任务请求预算”设为 0（关闭限制）或提高上限（如 512），保存后重新开启翻译，可续翻已保存草稿。原始错误：${detail}`
             : `${sourceLoaded ? "字幕翻译失败" : "字幕加载失败"}：${detail}`;
-    showStatus(message, "error", Math.max(0, Number(e?.hideAfterMs) || 0));
+    const previewed = subtitles.filter(s => s?.translationSource === "document-preview" || s?.translationSource === "document").length;
+    showStatus(
+      // A failed full-text review keeps its submitted previews on screen; say so
+      // instead of only reporting an unexplained failure.
+      e?.code === "document_translation_failed" && previewed > 0 && !budgetExhausted
+        ? `${message}（已提交的 ${previewed}/${subtitles.length} 条预览字幕仍可观看，重新开启翻译会从检查点续翻）`
+        : message,
+      "error", Math.max(0, Number(e?.hideAfterMs) || 0),
+    );
     console.error("[YTS]", e);
   } finally {
     if (loadAbortController === controller) loadAbortController = null;

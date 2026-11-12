@@ -228,3 +228,27 @@ for (const phase of ["planning", "review"] as const) test(`watchdog bounds ${pha
     assert.equal(Object.keys(state.draft).length, phase === "review" ? 9 : 0);
   }
 });
+
+test("a fully reviewed complete translation is not failed on the final submission turn", async () => {
+  const input = document(9); let state = initialTranslationTeamState(input);
+  translationTeamTool(input, state, "dispatch_subagents", { brief: "Concise.", ...dispatchSuggestion(input) });
+  mergeCompletedChildren(input, state);
+  translationTeamTool(input, state, "read_bilingual", { offset: 0, count: 9 });
+  translationTeamTool(input, state, "record_review", { offset: 0, count: 9, revision: state.revision, summary: "Checked all nine rows; meaning, numbers and terms correct." });
+  let requests = 0;
+  // The model keeps re-reading instead of submitting. Review coverage is already
+  // complete, so the host must keep prompting for submission past the 12-turn
+  // stall guard rather than discarding an entirely finished translation.
+  const call = async (context: Context) => {
+    requests++;
+    if (requests === 14) {
+      const live = JSON.parse((context.messages.at(-2) as { content: string }).content);
+      assert.equal(live.ready_to_submit, true);
+      assert.match((context.messages.at(-1) as { content: string }).content, /accept_translation, close_subagents, validate_translation and finish_translation in ONE turn/);
+    }
+    return requests > 20 ? response(finish) : response([{ name: "read_bilingual", args: { offset: 0, count: 9 } }]);
+  };
+  for (let i = 0; i < 21; i++) { state = await stepTranslationTeam(input, state, call); state = forceCompaction(state); }
+  assert.ok(requests > 20, "submission window survives the 12-turn stall guard");
+  assert.equal(finalTranslationTeamCues(input, state).length, 9);
+});

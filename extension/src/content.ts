@@ -507,7 +507,7 @@ async function load(pageUrl: string) {
     showStatus(
       // A failed full-text review keeps its submitted previews on screen; say so
       // instead of only reporting an unexplained failure.
-      e?.code === "document_translation_failed" && previewed > 0 && previewed < subtitles.length && !budgetExhausted
+      e?.code === "document_translation_failed" && previewed > 0 && !budgetExhausted
         ? `${message}（已提交的 ${previewed}/${subtitles.length} 条预览字幕仍可观看，重新开启翻译会从检查点续翻）`
         : message,
       "error", Math.max(0, Number(e?.hideAfterMs) || 0),

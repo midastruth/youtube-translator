@@ -45,6 +45,10 @@ test("brief glossary parses explicit term decisions in common notations", () => 
     { term: "transaction", targets: ["事务"] }, { term: "rollback", targets: ["回滚", "回退"] }, { term: "commit", targets: ["提交"] },
   ]);
   assert.deepEqual(briefGlossary("No term decisions here."), []);
+  // Comma-separated and numbered lists are common in model-written briefs.
+  const trading = [{ term: "MA", targets: ["均线"] }, { term: "long", targets: ["做多"] }];
+  assert.deepEqual(briefGlossary("MA = 均线, long = 做多"), trading);
+  assert.deepEqual(briefGlossary("1. MA = 均线\n2. long = 做多"), trading);
 });
 
 test("checklist flags missing cues, lost numbers, untranslated copies, length outliers and brief term violations", () => {
@@ -86,6 +90,17 @@ test("checklist accepts spelled-out and scaled numbers, and does not flag whole-
   const omitted = reviewChecklist(input({ cues: spoken }), { draft: { ...draft, n4: "我觉得我常常是对的。" }, revision: 1 }, "long = 做多", []);
   assert.equal(omitted.issue_counts.numbers, 1);
   assert.match(omitted.flagged[0].issues.join(" | "), /numbers not found in translation: 10/);
+});
+
+test("number equivalence does not hide changed values", () => {
+  const rows = [
+    { cue_id: "x1", start: 0, end: 900, text: "It costs 2.5 dollars." },
+    { cue_id: "x2", start: 1000, end: 1900, text: "We have 25 users." },
+    { cue_id: "x3", start: 2000, end: 2900, text: "It started in 2019." },
+    { cue_id: "x4", start: 3000, end: 3900, text: "Buy at 11:30 sharp." },
+  ];
+  const report = reviewChecklist(input({ cues: rows }), { draft: { x1: "售价2美元。", x2: "我们有二十个用户。", x3: "始于二〇一九年。", x4: "11点半买入。" }, revision: 1 }, "", []);
+  assert.deepEqual(report.flagged.map(f => f.cue_id), ["x1", "x2"]);
 });
 
 test("glossary skips numeric commas and keep-as-is quirks that only produce noise", () => {

@@ -1,4 +1,5 @@
 import { TranslateError } from "./errors.js";
+import { contentVersion } from "../../worker/cache-version.js";
 import { modelEndpoint } from "../../worker/model-endpoint.js";
 import type { SubtitleCue } from "./types.js";
 
@@ -23,6 +24,11 @@ Rules:
 7. Preserve each input marker exactly: input "[$12] text" must become
    "[$12] translated text".
 8. Do NOT add headers, explanations, code fences, or any extra text.`;
+
+export const LEGACY_TRANSLATION_VERSION = contentVersion("legacy", {
+  single: OPENAI_TRANSLATE_SYSTEM_PROMPT, whole: WHOLE_TRANSLATE_SYSTEM_PROMPT,
+  workflow: "legacy-v3",
+});
 
 export interface TranslateOptions {
   signal?: AbortSignal;

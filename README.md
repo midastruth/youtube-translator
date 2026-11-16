@@ -126,7 +126,7 @@ TRANSLATION_OUTPUT_TOKENS=16384
 - `TRANSLATION_REASONING_EFFORT` 支持 `off`（默认）、`minimal`、`low`、`medium`、`high`、`xhigh`；具体档位必须由所选模型支持，建议先用 `medium`。`off` 表示不发送推理强度参数，**不保证关闭上游模型默认的推理**。
 - 团队模式可分别配置：`TRANSLATION_MAIN_REASONING_EFFORT=high`（主 Agent 规划与验收）、`TRANSLATION_SUBAGENT_REASONING_EFFORT=medium`（子 Agent 翻译）。支持相同档位，未设置或留空时继承 `TRANSLATION_REASONING_EFFORT`；显式 `off` 只让对应角色不发送推理强度参数。`.env.example` 已提供 high / medium 示例。
 - 开启后由 `pi-ai` 发送 `reasoning_effort`，使用 `max_completion_tokens` 并省略自定义 `temperature`。输出上限包含隐藏推理 Token 和可见输出；如果出现截断，可提高 `TRANSLATION_OUTPUT_TOKENS`，同时确保上下文预算充足。
-- 主、子 Agent 的有效推理强度会随任务持久化并参与缓存键；修改配置不会改变已运行或续翻任务的调用方式。历史任务保持原有推理设置，不会读取新的角色配置；不保存或展示推理内容。这些配置不作用于快速模式。
+- 主、子 Agent 的有效推理强度会随任务持久化，并作为独立的质量配置参与缓存键；修改推理强度会请求新的译文。视频标题、上下文/输出 token 容量不参与缓存键。已运行或续翻任务继续使用持久化的原有设置，不读取新的角色配置；不保存或展示推理内容。这些配置不作用于快速模式。
 - 以上针对 OpenAI Chat Completions；其他兼容接口须支持相同参数。OpenAI 的内部推理不会通过此接口返回，无需为多轮工具调用回传 `reasoning_content`。
 
 本地修改后重启 `npm start`；Docker 部署修改后执行 `docker compose up -d --build --force-recreate server`。
@@ -199,6 +199,15 @@ make build-extension
   - 模型与 Whisper 端点均由服务端固定（`OPENAI_BASE_URL` / `WHISPER_BASE_URL`），请求中的 `translate_base_url` / `whisper_base_url` 必须与之完全一致，且不跟随重定向；服务端密钥只发往所属服务商（如 `OPENAI_API_KEY` 不会发往默认的 Groq 端点）。
 
 实现与限制细节详见 [`docs/document-translation.md`](docs/document-translation.md) 与 [`docs/translation-architecture.md`](docs/translation-architecture.md)。
+
+### 翻译缓存与清理
+
+- 文档翻译的缓存版本由实际主/子 Agent 提示词和工具描述/schema 内容哈希生成；快速模式也对实际翻译提示词做哈希。更新提示词后不会继续命中旧版本的成功结果。
+- 快速模式的 REST、SSE、WebSocket 共享缓存，并复用部分成功结果，只补译缺失项。`translate_whole` 是显式的提示词选择，whole/batch 缓存相互隔离；不会因为字幕达到 100 条就自动换模式。分块大小属于调度参数，不参与缓存身份；复用的是首次成功生成的译文。
+- `DELETE /api/cache/:videoId` 清理该视频的文件缓存和 durable 翻译任务；`DELETE /api/cache` 清理全部。正在运行的文档任务会先取消，成功结果和续翻草稿不再可复用，下一次请求会重新翻译。响应中的 `removed` 是文件数，`jobs_removed` 是任务数。SQLite 文件和历史任务收据保留作审计，不直接删除数据库文件。
+- 新写入的缓存带有显式视频归属和 TTL 类别，避免通过文件名前缀猜测；旧格式仍可读取。durable 任务首次升级时回填索引一次，后续重启直接加载索引，不逐个打开任务文档。
+- 流式翻译每 10 条或进度更新时距上次落盘超过 2 秒写入一次，完成、断开和错误退出时补写已完成的字幕；未完成的单条流式译文不作为缓存命中。
+- 容量和 TTL 按 `CACHE_MAINTENANCE_INTERVAL_SECONDS`（默认 24 小时）在启动及后续缓存访问时检查，不在每次写入时强制扫描全目录；维护周期内可暂时超过容量上限。可通过 `POST /api/cache/purge` 立即清理过期项。超过 1 小时的孤儿临时文件会被回收。
 
 ### 元数据过期与缓存复用
 

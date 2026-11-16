@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { URL } from "node:url";
 import { sendSSE as writeSSE, withHeartbeats } from "./streaming.js";
+import { TranslationCheckpoint } from "./translation-checkpoint.js";
 import { playbackWindowCues, type PlaybackWindowRequest } from "./playback-window.js";
 
 import type {
@@ -964,7 +965,7 @@ export function createApp(deps?: Partial<AppDependencies>): http.RequestListener
         }
 
         // Legacy translation path
-        const strategy = body.translate_whole ? "rest-whole-v1" : "rest-batch-v1";
+        const strategy = body.translate_whole ? "whole" : "batch";
         const profileKey = getTranslationProfile({
           cues,
           provider: body.translate_provider,
@@ -977,7 +978,7 @@ export function createApp(deps?: Partial<AppDependencies>): http.RequestListener
           segmentation: body.segmentation || "rule",
         });
 
-        let working = cues.map((c) => ({ ...c }));
+        const working = cues.map((c) => ({ ...c }));
         const cached = await resolved.cache.getTranslation(
           meta.video_id,
           meta.from_lang,
@@ -986,23 +987,24 @@ export function createApp(deps?: Partial<AppDependencies>): http.RequestListener
           profileKey
         );
 
-        const isFullyCached =
-          Array.isArray(cached) &&
-          cached.length === working.length &&
-          cached.every((c) => c.translation && c.translation !== "[Translation failed]");
+        const pendingIndices: number[] = [];
+        for (let i = 0; i < working.length; i++) {
+          const hit = cached?.length === working.length && cached[i]?.text === working[i].text ? cached[i]?.translation : "";
+          if (hit?.trim() && hit !== "[Translation failed]") working[i].translation = hit;
+          else pendingIndices.push(i);
+        }
 
         let translationAttemptFailed = false;
-        if (isFullyCached) {
-          working = cached;
-        } else {
+        if (pendingIndices.length) {
           try {
-            working = await resolved.translateSubtitles(working, meta.from_lang, toLang, {
+            const translated = await resolved.translateSubtitles(pendingIndices.map(i => working[i]), meta.from_lang, toLang, {
               provider: body.translate_provider,
               apiKey: body.translate_api_key,
               baseUrl: body.translate_base_url,
               model: body.translate_model,
               whole: body.translate_whole,
             });
+            for (let i = 0; i < pendingIndices.length; i++) working[pendingIndices[i]].translation = translated[i]?.translation || "";
           } catch (error) {
             // REST provider boundary: known provider failures retain the explicit
             // failed status contract; JSON/configuration/storage errors propagate.
@@ -1178,9 +1180,11 @@ export function createApp(deps?: Partial<AppDependencies>): http.RequestListener
         let legacyLock: string | undefined;
         try {
           const total = cues.length;
-          const useWhole = body.translate_whole || total >= 100;
+          // Transport and scheduling are not translation identity. Whole is an
+          // explicit prompt choice, never silently switched by transcript length.
+          const useWhole = Boolean(body.translate_whole);
           const chunkSize = 10;
-          const strategy = `sse-${useWhole ? "context" : "batch"}-${chunkSize}-v1`;
+          const strategy = useWhole ? "whole" : "batch";
 
           const profileKey = getTranslationProfile({
             cues,
@@ -1247,43 +1251,44 @@ export function createApp(deps?: Partial<AppDependencies>): http.RequestListener
 
           // Chunk-by-chunk translation
           let failedCount = 0;
-          for (let i = 0; i < pendingIndices.length; i += chunkSize) {
-            if (abortController.signal.aborted) break;
-            const chunkIndices = pendingIndices.slice(i, i + chunkSize);
-            const chunkCues = chunkIndices.map((idx) => working[idx]);
+          const checkpoint = new TranslationCheckpoint(() => resolved.cache.putTranslation(
+            meta.video_id, meta.from_lang, body.segmentation || "rule", toLang, profileKey, working,
+          ));
+          try {
+            for (let i = 0; i < pendingIndices.length; i += chunkSize) {
+              if (abortController.signal.aborted) break;
+              const chunkIndices = pendingIndices.slice(i, i + chunkSize);
+              const chunkCues = chunkIndices.map((idx) => working[idx]);
 
-            const translatedChunk = await withHeartbeats(
-              resolved.translateSubtitles(chunkCues, meta.from_lang, toLang, {
-                provider: body.translate_provider,
-                apiKey: body.translate_api_key,
-                baseUrl: body.translate_base_url,
-                model: body.translate_model,
-                whole: useWhole,
-                wholeFallbackToBatch: true,
-                signal: abortController.signal,
-              }),
-              () => sendSSE({ type: "keepalive" }),
-            );
+              const translatedChunk = await withHeartbeats(
+                resolved.translateSubtitles(chunkCues, meta.from_lang, toLang, {
+                  provider: body.translate_provider,
+                  apiKey: body.translate_api_key,
+                  baseUrl: body.translate_base_url,
+                  model: body.translate_model,
+                  whole: useWhole,
+                  wholeFallbackToBatch: true,
+                  signal: abortController.signal,
+                }),
+                () => sendSSE({ type: "keepalive" }),
+              );
 
-            for (let j = 0; j < chunkIndices.length; j++) {
-              const idx = chunkIndices[j];
-              const tr = translatedChunk[j]?.translation || "";
-              if (!tr || tr === "[Translation failed]") {
-                failedCount++;
-              } else {
-                working[idx].translation = tr;
-                await sendSSE({ type: "cue", index: idx, ...working[idx] });
+              for (let j = 0; j < chunkIndices.length; j++) {
+                const idx = chunkIndices[j];
+                const tr = translatedChunk[j]?.translation || "";
+                if (!tr || tr === "[Translation failed]") {
+                  failedCount++;
+                } else {
+                  working[idx].translation = tr;
+                  await checkpoint.update();
+                  await sendSSE({ type: "cue", index: idx, ...working[idx] });
+                }
               }
             }
-
-            await resolved.cache.putTranslation(
-              meta.video_id,
-              meta.from_lang,
-              body.segmentation || "rule",
-              toLang,
-              profileKey,
-              working
-            );
+          } finally {
+            // Includes client disconnects and provider failures; never discard
+            // already completed cues just because the final event cannot send.
+            await checkpoint.flush();
           }
 
           await sendSSE({ type: "done", total_cues: total, failed_cues: failedCount });
@@ -1323,15 +1328,17 @@ export function createApp(deps?: Partial<AppDependencies>): http.RequestListener
           sendError(res, 400, "Invalid video_id");
           return;
         }
+        const jobs_removed = await resolved.worker.clearJobs(videoId);
         const removed = await resolved.cache.clearVideo(videoId);
-        sendJson(res, 200, { removed });
+        sendJson(res, 200, { removed, jobs_removed });
         return;
       }
 
       // ── DELETE /api/cache ─────────────────────────────────────────────
       if (method === "DELETE" && pathname === "/api/cache") {
+        const jobs_removed = await resolved.worker.clearJobs();
         const removed = await resolved.cache.clearAll();
-        sendJson(res, 200, { removed });
+        sendJson(res, 200, { removed, jobs_removed });
         return;
       }
 

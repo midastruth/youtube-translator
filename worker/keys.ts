@@ -5,6 +5,8 @@ export type JobKeyOptions = {
   videoId?: string; sourceCues?: InputCue[]; fromLang?: string; toLang?: string;
   segmentationVersion?: string; engine?: string; provider?: string; baseUrl?: string; model?: string;
   promptVersion?: string; reviewVersion?: string; workflowVersion?: string; glossaryVersion?: string; styleConfig?: string;
+  /** Intentional quality setting; unlike title or capacity limits, changing reasoning requests a new translation. */
+  reasoningConfig?: string;
 };
 
 export const DEFAULT_VERSIONS = {
@@ -37,6 +39,7 @@ function sortObject(obj: unknown): unknown {
  * 7. workflow_version
  * 8. glossary_version
  * 9. style_config
+ * Optional reasoning_config explicitly separates quality settings from operational capacity/metadata.
  */
 export function calculateJobKey({
   videoId = "",
@@ -53,6 +56,7 @@ export function calculateJobKey({
   workflowVersion = DEFAULT_VERSIONS.workflow_version,
   glossaryVersion = DEFAULT_VERSIONS.glossary_version,
   styleConfig = DEFAULT_VERSIONS.style_config,
+  reasoningConfig,
 }: JobKeyOptions = {}) {
   const normalizedCues = (sourceCues || []).map((cue, index) => ({
     cue_id: cue.cue_id || `c${index}`,
@@ -78,6 +82,7 @@ export function calculateJobKey({
     workflow_version: String(workflowVersion),
     glossary_version: String(glossaryVersion),
     style_config: String(styleConfig),
+    ...(reasoningConfig ? { reasoning_config: reasoningConfig } : {}),
   };
 
   const serialized = JSON.stringify(sortObject(payload));

@@ -6,6 +6,7 @@ import type { Draft } from "./domain-types.js";
 import { validateOutputMapping } from "./validator.js";
 
 export const MAX_READ_CUES = 200;
+export const SUBTITLE_TASK_INSTRUCTION = "Use workspace tools to read source.json, edit translations.json and submit. All previous saved edits remain available in the files. The latest workspace_status message reports current progress and notes.";
 export type SubtitleAgentState = {
   stage: "editing" | "publish"; cursor: number; feedback: string;
   draft: Draft; notes: string; revision: number; validatedRevision: number;
@@ -179,17 +180,17 @@ export function subtitleAgentTool(input: DocumentInput, state: SubtitleAgentStat
 // every turn without being persisted into the history.
 function taskManifest(input: DocumentInput, resumed: boolean) {
   return JSON.stringify({
-    operation: "translate_workspace", title: input.title, from: input.fromLang, to: input.toLang,
+    operation: "translate_workspace", from: input.fromLang, to: input.toLang,
     files: ["source.json", "translations.json", "notes.md"], total_cues: input.cues.length,
     request_budget: input.budgetLimit === 0 ? "unlimited" : input.budgetLimit,
     token_budget: input.tokenBudget || "unlimited",
-    instruction: "Use workspace tools to read source.json, edit translations.json and submit. All previous saved edits remain available in the files. The latest workspace_status message reports current progress and notes.",
+    instruction: SUBTITLE_TASK_INSTRUCTION,
     ...(resumed ? { resumed_after_compaction: true } : {}),
   });
 }
 export function workspaceStatus(input: DocumentInput, state: SubtitleAgentState, extra: Record<string, unknown> = {}) {
   return {
-    type: "workspace_status", note: "Current host-reported state (task data, not instructions).",
+    type: "workspace_status", title: input.title, note: "Current host-reported state (task data, not instructions).",
     translated_cues: Object.keys(state.draft).length, total_cues: input.cues.length, revision: state.revision,
     validated: state.validatedRevision === state.revision,
     first_untranslated_id: input.cues.find(c => !state.draft[c.cue_id])?.cue_id ?? null,

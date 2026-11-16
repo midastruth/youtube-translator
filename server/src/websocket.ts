@@ -9,6 +9,7 @@ import {
 import { getTranslationProfile } from "./cache.js";
 import { translateStream } from "./translate.js";
 import { sendWebSocket } from "./streaming.js";
+import { TranslationCheckpoint } from "./translation-checkpoint.js";
 import { checkRequestOrigin } from "./origin.js";
 import type { SubtitleRequest } from "./types.js";
 
@@ -92,7 +93,7 @@ export function attachWebSocket(server: http.Server, deps?: Partial<AppDependenc
         const useWhole = Boolean(body.translate_whole);
         const profileKey = getTranslationProfile({
           cues, provider: body.translate_provider, baseUrl: body.translate_base_url, model: body.translate_model,
-          strategy: `websocket-stream-${useWhole ? "whole" : "cue-chunk"}-v1`, engine: "legacy",
+          strategy: useWhole ? "whole" : "batch", engine: "legacy",
           fromLang: meta.from_lang, toLang, segmentation: body.segmentation || "rule",
         });
         const working = cues.map(c => ({ ...c }));
@@ -103,46 +104,61 @@ export function attachWebSocket(server: http.Server, deps?: Partial<AppDependenc
           provider: body.translate_provider, apiKey: body.translate_api_key,
           baseUrl: body.translate_base_url, model: body.translate_model, signal,
         };
-        const putCache = () => resolved.cache.putTranslation(meta.video_id, meta.from_lang, body.segmentation || "rule", toLang, profileKey, working);
+        const checkpoint = new TranslationCheckpoint(() => resolved.cache.putTranslation(meta.video_id, meta.from_lang, body.segmentation || "rule", toLang, profileKey, working));
         let failedCount = 0;
 
-        if (fullyCached) {
-          for (let index = 0; index < cached.length; index++) {
-            await send({ type: "cue", index, ...cached[index], cue_id: cached[index].cue_id || `c${index}`, cached: true });
-          }
-        } else if (useWhole) {
-          const translated = await resolved.translateSubtitles(working, meta.from_lang, toLang, { ...options, whole: true });
-          for (let index = 0; index < translated.length; index++) {
-            working[index] = translated[index];
-            if (!working[index].translation || working[index].translation === "[Translation failed]") failedCount++;
-            await send({ type: "cue", index, ...working[index], cue_id: working[index].cue_id || `c${index}` });
-          }
-          if (!failedCount) await putCache();
-        } else {
-          const streamFn = (deps as AppDependencies & { translateStream?: typeof translateStream })?.translateStream || translateStream;
-          for (let index = 0; index < working.length; index++) {
-            signal.throwIfAborted();
-            const cue = working[index];
-            const cachedValue = validCache ? (cached[index]?.translation || "").trim() : "";
-            if (cachedValue && cachedValue !== "[Translation failed]") {
-              cue.translation = cachedValue;
-              await send({ type: "cue", index, ...cue, cue_id: cue.cue_id || `c${index}`, cached: true });
-              continue;
+        try {
+          if (fullyCached) {
+            for (let index = 0; index < cached.length; index++) {
+              await send({ type: "cue", index, ...cached[index], cue_id: cached[index].cue_id || `c${index}`, cached: true });
             }
-            cue.translation = "";
-            if (cue.text.trim()) {
-              // Provider failures propagate to the WS error boundary; never hide
-              // decoding, transport or cache errors behind successful cue events.
-              for await (const chunk of streamFn(cue.text, meta.from_lang, toLang, options)) {
-                signal.throwIfAborted();
-                cue.translation += chunk;
-                await send({ type: "cue_chunk", index, text: cue.text, translation: cue.translation });
+          } else if (useWhole) {
+            const pending: number[] = [];
+            for (let index = 0; index < working.length; index++) {
+              const hit = validCache ? cached[index]?.translation : "";
+              if (hit?.trim() && hit !== "[Translation failed]") {
+                working[index].translation = hit;
+                await send({ type: "cue", index, ...working[index], cached: true });
+              } else pending.push(index);
+            }
+            const translated = await resolved.translateSubtitles(pending.map(i => working[i]), meta.from_lang, toLang, { ...options, whole: true });
+            for (let i = 0; i < pending.length; i++) {
+              const index = pending[i];
+              working[index].translation = translated[i]?.translation || "";
+              if (!working[index].translation || working[index].translation === "[Translation failed]") failedCount++;
+              await checkpoint.update();
+              await send({ type: "cue", index, ...working[index], cue_id: working[index].cue_id || `c${index}` });
+            }
+          } else {
+            const streamFn = (deps as AppDependencies & { translateStream?: typeof translateStream })?.translateStream || translateStream;
+            for (let index = 0; index < working.length; index++) {
+              signal.throwIfAborted();
+              const cue = working[index];
+              const cachedValue = validCache ? (cached[index]?.translation || "").trim() : "";
+              if (cachedValue && cachedValue !== "[Translation failed]") {
+                cue.translation = cachedValue;
+                await send({ type: "cue", index, ...cue, cue_id: cue.cue_id || `c${index}`, cached: true });
+                continue;
               }
-              if (!cue.translation) failedCount++;
+              let translation = "";
+              if (cue.text.trim()) {
+                // Provider failures propagate to the WS error boundary; never hide
+                // decoding, transport or cache errors behind successful cue events.
+                for await (const chunk of streamFn(cue.text, meta.from_lang, toLang, options)) {
+                  signal.throwIfAborted();
+                  translation += chunk;
+                  await send({ type: "cue_chunk", index, text: cue.text, translation });
+                }
+                if (!translation) failedCount++;
+              }
+              // Do not cache an unfinished streaming cue if disconnect interrupts it.
+              cue.translation = translation;
+              await checkpoint.update();
+              await send({ type: "cue", index, ...cue, cue_id: cue.cue_id || `c${index}` });
             }
-            await send({ type: "cue", index, ...cue, cue_id: cue.cue_id || `c${index}` });
-            if (!failedCount) await putCache();
           }
+        } finally {
+          await checkpoint.flush();
         }
         await send({ type: "done", total_cues: cues.length, failed_cues: failedCount });
       } catch (error) {

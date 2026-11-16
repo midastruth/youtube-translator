@@ -2,7 +2,7 @@ import { Type } from "@earendil-works/pi-ai";
 import type { AssistantMessage, Context, Tool } from "@earendil-works/pi-ai";
 import {
   advanceSubtitleAgent, finalSubtitleAgentCues, initialSubtitleAgentState,
-  SUBTITLE_AGENT_PROMPT, SUBTITLE_AGENT_TOOLS, subtitleAgentContext, subtitleAgentTool, WorkspaceError, MAX_READ_CUES,
+  SUBTITLE_AGENT_PROMPT, SUBTITLE_AGENT_TOOLS, SUBTITLE_TASK_INSTRUCTION, subtitleAgentContext, subtitleAgentTool, WorkspaceError, MAX_READ_CUES,
 } from "./subtitle-agent.js";
 import type { AgentCall, AgentHooks, SubtitleAgentState } from "./subtitle-agent.js";
 import { callDocumentTurn, DocumentModelError, DocumentPermanentError, inputBudget, outputBudget, outputEstimate, parseReasoningEffort, tokenEstimate } from "./document-translation.js";
@@ -13,12 +13,14 @@ import type { DocumentAdvanceControl } from "./document-task.js";
 import { setTimeout as delay } from "node:timers/promises";
 import { MAIN_PROGRESS_TOOLS, addRange, invalidateReview, mainProgress, progressStatus, progressTool, rangeCount } from "./team-progress.js";
 import type { MainProgress } from "./team-progress.js";
+import { contentVersion } from "./cache-version.js";
 
-export const TRANSLATION_TEAM_VERSION = "subtitle-translation-team-v2-streaming";
 export const MAX_SUBAGENTS = 9; // Remainder agents; the dedicated opening is additional.
 /** The opening covers roughly this share of the video (1 hour -> first 10 minutes). */
 export const OPENING_DURATION_RATIO = 1 / 6;
 const OPENING_MIN_RATIO = 0.75, OPENING_MAX_RATIO = 1.5, OPENING_SMALL_CUES = 30;
+const SECTION_INSTRUCTION = "Translate this contiguous section using the shared brief; consult full-source context as needed.";
+const OPENING_INSTRUCTION = "Translate and self-review the opening promptly using the shared brief.";
 
 /** Host-computed opening range, proportional to video length. Deterministic from the source. */
 export function openingTarget(cues: DocumentInput["cues"]) {
@@ -51,11 +53,11 @@ export function dispatchSuggestion(input: DocumentInput) {
       end = candidates.filter(n => /[.!?。！？]["'”’)]?\s*$/u.test(input.cues[n].text) || input.cues[n + 1].start - input.cues[n].end >= 1000)
         .sort((a, b) => Math.abs(a - target) - Math.abs(b - target))[0] ?? target;
     }
-    assignments.push({ start_id: input.cues[cursor].cue_id, end_id: input.cues[end].cue_id, instructions: "Translate this contiguous section using the shared brief; consult full-source context as needed." });
+    assignments.push({ start_id: input.cues[cursor].cue_id, end_id: input.cues[end].cue_id, instructions: SECTION_INSTRUCTION });
     cursor = end + 1;
   }
   return {
-    ...(openingEnd >= 0 ? { opening: { end_id: input.cues[openingEnd].cue_id, instructions: "Translate and self-review the opening promptly using the shared brief." } } : {}),
+    ...(openingEnd >= 0 ? { opening: { end_id: input.cues[openingEnd].cue_id, instructions: OPENING_INSTRUCTION } } : {}),
     assignments,
   };
 }
@@ -252,11 +254,23 @@ The role message's initial_source_page contains an exact, read-only first page o
 Prefer one substantial translation write per source page rather than many tiny writes; shrink batches when needed to avoid output truncation. Avoid routine notes/progress writes and redundant reads; save notes only for useful terminology, ambiguity or context-compaction recovery. The preloaded page remains the FIRST page after restart/compaction: consult workspace_status and saved translations before continuing, never overwrite saved work just because this page is present.
 Do not skip semantic self-review: inspect the actual saved translations against the source, correct meaning, omissions, negation, numbers and terminology, then validate_translation and finish_translation. These checks and explicit submission remain mandatory; the MAIN agent will also review the merged result.`;
 
+const OPENING_PROMPT = "\nYou are the dedicated OPENING agent: viewers are waiting for these first subtitles. Work efficiently in large batches, self-review and submit promptly. This is a provisional preview, not whole-document acceptance.";
+
+// Hash the actual prompts AND tool schemas. A prompt edit cannot silently reuse old results.
+export const TRANSLATION_TEAM_CONTRACT = {
+  main: TEAM_PROMPT, child: CHILD_PROMPT, opening: OPENING_PROMPT,
+  mainTools: TEAM_TOOLS, childTools: CHILD_TOOLS,
+  taskInstruction: SUBTITLE_TASK_INSTRUCTION, sectionInstruction: SECTION_INSTRUCTION, openingInstruction: OPENING_INSTRUCTION,
+  workflow: "translation-team-v3", openingRatio: OPENING_DURATION_RATIO,
+  openingMin: OPENING_MIN_RATIO, openingMax: OPENING_MAX_RATIO, openingSmallCues: OPENING_SMALL_CUES, maxSubagents: MAX_SUBAGENTS,
+};
+export const TRANSLATION_TEAM_VERSION = contentVersion("subtitle-team", TRANSLATION_TEAM_CONTRACT);
+
 /** Immutable first page: cacheable across turns/recovery, bounded for reading AND translation.
  * Reserve ample room for live status/notes, history and subsequent tool results.
  */
 function childContext(assigned: DocumentInput, brief: string, child: TranslationChild, context: Context): Context {
-  const systemPrompt = CHILD_PROMPT + (child.kind === "opening" ? "\nYou are the dedicated OPENING agent: viewers are waiting for these first subtitles. Work efficiently in large batches, self-review and submit promptly. This is a provisional preview, not whole-document acceptance." : "");
+  const systemPrompt = CHILD_PROMPT + (child.kind === "opening" ? OPENING_PROMPT : "");
   const source = assigned.cues.slice(0, MAX_READ_CUES);
   const page = () => ({ path: "source.json", offset: 0, content: source, next_offset: source.length < assigned.cues.length ? source.length : null, total_cues: assigned.cues.length });
   const roleMessage = () => ({ role: "user" as const, timestamp: 0, content: JSON.stringify({

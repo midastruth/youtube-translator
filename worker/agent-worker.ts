@@ -5,6 +5,7 @@ import { createRegistry, defineExtension, Harness } from "@earendil-works/pi-dur
 
 import { openOwnedSqliteStorage } from "./storage.js";
 import { SubtitleJobDoc } from "./job-document.js";
+import { JobIndexDoc, type JobIndexEntry } from "./job-index.js";
 import { calculateJobKey } from "./keys.js";
 import type { JobRecord, SubmitJobOptions, TaskResult, StreamEvent, JobDocument } from "./types.js";
 import { DocumentResumeDoc, documentCredentials } from "./document-task.js";
@@ -37,6 +38,15 @@ export class AgentWorker {
   jobs = new Map<string, JobRecord>();
   pendingJobs = new Map<string, Promise<JobRecord>>();
   extension: ReturnType<typeof defineExtension> | null = null;
+  private jobIndex = new Map<string, ConversationId>();
+  private indexedJobs = new Map<ConversationId, JobIndexEntry>();
+  private jobOperations: Promise<unknown> = Promise.resolve();
+
+  private serializeJobs<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.jobOperations.then(operation);
+    this.jobOperations = result.catch(() => {});
+    return result;
+  }
 
   private get activeHarness(): Harness {
     if (!this.harness) throw new Error("Worker harness is not open");
@@ -79,6 +89,7 @@ export class AgentWorker {
       this.context
     );
 
+    await this.loadJobIndex();
     this.harness.resume();
   }
 
@@ -129,28 +140,56 @@ export class AgentWorker {
   }
 
   async getJob(jobKeyOrId: string | ConversationId): Promise<JobRecord | null> {
-    for (const job of this.jobs.values()) {
-      if (job.jobKey === jobKeyOrId || job.jobId === jobKeyOrId) {
-        return job;
-      }
-    }
+    const id = typeof jobKeyOrId === "number" ? jobKeyOrId : this.jobIndex.get(jobKeyOrId);
+    const key = id === undefined ? undefined : this.indexedJobs.get(id)?.jobKey;
+    const job = key ? this.jobs.get(key) : typeof jobKeyOrId === "string" ? this.jobs.get(jobKeyOrId) : undefined;
+    if (job && (job.jobKey === jobKeyOrId || job.jobId === jobKeyOrId || job.conversationId === jobKeyOrId)) return job;
     return this.findStoredJob(jobKeyOrId);
   }
 
-  private async findStoredJob(jobKeyOrId: string | ConversationId): Promise<JobRecord | null> {
-    if (!this.storage || !this.harness) return null;
-    let page = await this.storage.scanConversations({ order: "descending" }, 100, undefined, this.context);
-    while (true) {
-      for (const item of page.items || []) {
-        const doc = await this.harness.snapshot(SubtitleJobDoc, item.id, this.context);
-        if (doc && (doc.job_key === jobKeyOrId || doc.job_id === jobKeyOrId || item.id === jobKeyOrId)) {
-          return this.restoreJob(item.id, doc);
+  private rememberJob(conversationId: ConversationId, entry: JobIndexEntry) {
+    this.indexedJobs.set(conversationId, entry);
+    this.jobIndex.set(entry.jobKey, conversationId);
+    this.jobIndex.set(entry.jobId, conversationId);
+  }
+
+  private async loadJobIndex() {
+    const harness = this.activeHarness;
+    let index = await harness.snapshot(JobIndexDoc, this.context);
+    if (!index) {
+      // Upgrade old databases once, before starting tasks. All later lookups,
+      // including misses and restarts, use the atomically maintained index.
+      const entries: Record<string, JobIndexEntry> = {};
+      let page = await this.storage!.scanConversations({}, 100, undefined, this.context);
+      while (true) {
+        for (const item of page.items) {
+          const doc = await harness.snapshot(SubtitleJobDoc, item.id, this.context);
+          if (doc?.job_key) entries[item.id] = { jobKey: doc.job_key, jobId: doc.job_id || `job-${item.id}`, videoId: doc.video_id };
         }
+        if (!page.next) break;
+        page = await this.storage!.scanConversations({}, 100, page.next, this.context);
       }
-      if (!page.next) break;
-      page = await this.storage.scanConversations({ order: "descending" }, 100, page.next, this.context);
+      await harness.commit(async tx => { (await tx.doc(JobIndexDoc)).entries = entries; }, this.context);
+      index = { entries };
     }
-    return null;
+    this.jobIndex.clear(); this.indexedJobs.clear();
+    for (const [id, entry] of Object.entries(index.entries)) this.rememberJob(Number(id) as ConversationId, entry);
+  }
+
+  private async findStoredJob(jobKeyOrId: string | ConversationId): Promise<JobRecord | null> {
+    if (!this.harness) return null;
+    // Conversation IDs are numeric direct addresses; string keys/IDs must be
+    // indexed. A miss never falls back to scanning the entire durable database.
+    const id = typeof jobKeyOrId === "number" ? jobKeyOrId : this.jobIndex.get(jobKeyOrId);
+    if (id === undefined) return null;
+    const doc = await this.harness.snapshot(SubtitleJobDoc, id, this.context);
+    if (!doc?.job_key) return null;
+    if (!this.indexedJobs.has(id)) {
+      const entry = { jobKey: doc.job_key, jobId: doc.job_id || `job-${id}`, videoId: doc.video_id };
+      await this.harness.commit(async tx => { (await tx.doc(JobIndexDoc)).entries[id] = entry; }, this.context);
+      this.rememberJob(id, entry);
+    }
+    return this.restoreJob(id, doc);
   }
 
   private restoreJob(conversationId: ConversationId, doc: JobDocument): JobRecord {
@@ -172,7 +211,7 @@ export class AgentWorker {
       throw new Error("Worker only supports the document engine; use the server for legacy translation");
     }
     const { cues = [], videoId = "", title = "", fromLang = "en", toLang = "zh-CN", segmentation = "rule", provider = "openai", ...config } = options;
-    return this.submitDocumentJob({ ...config, cues, videoId, title, fromLang, toLang, segmentation, provider });
+    return this.serializeJobs(() => this.submitDocumentJob({ ...config, cues, videoId, title, fromLang, toLang, segmentation, provider }));
   }
 
   private async submitDocumentJob(options: SubmitJobOptions): Promise<JobRecord> {
@@ -187,12 +226,9 @@ export class AgentWorker {
       videoId: options.videoId, sourceCues: cues, fromLang: options.fromLang, toLang: options.toLang,
       segmentationVersion: options.segmentation, engine: "document", provider: "openai", model: config.model, baseUrl: config.baseUrl,
       workflowVersion: TRANSLATION_TEAM_VERSION, promptVersion: TRANSLATION_TEAM_VERSION, reviewVersion: TRANSLATION_TEAM_VERSION,
-      styleConfig: JSON.stringify({
-        context: config.contextTokens, output: config.outputTokens, title: options.title || "",
-        // Preserve existing cache keys when reasoning is not explicitly enabled.
-        ...(config.reasoningEffort !== "off" ? { reasoningEffort: config.reasoningEffort } : {}),
-        ...(teamReasoning.main !== config.reasoningEffort || teamReasoning.subagent !== config.reasoningEffort ? { teamReasoning } : {}),
-      }),
+      // Capacity and display metadata are not translation identity. Reasoning is
+      // an explicit quality choice; running/resumed tasks retain their saved settings.
+      reasoningConfig: JSON.stringify(teamReasoning),
     });
     if (options.apiKey) documentCredentials.set(jobKey, options.apiKey);
     if (this.pendingJobs.has(jobKey)) return this.pendingJobs.get(jobKey)!;
@@ -236,7 +272,9 @@ export class AgentWorker {
         doc.from_lang = input.fromLang; doc.to_lang = input.toLang; doc.source_cues = cues;
         doc.status = "running"; doc.stage = "editing"; doc.budget_limit = input.budgetLimit;
         doc.token_budget_limit = input.tokenBudget;
+        (await tx.doc(JobIndexDoc)).entries[conversation.id] = { jobKey, jobId: input.jobId, videoId: input.videoId };
       }, this.context);
+      this.rememberJob(conversation.id, { jobKey, jobId: input.jobId, videoId: input.videoId });
       if (!taskId) throw new Error("Document task creation failed");
       const emitter = new EventEmitter(); emitter.on("error", () => {});
       const job: JobRecord = {
@@ -306,14 +344,7 @@ export class AgentWorker {
   }
 
   async abortJob(jobId: string) {
-    let target = null;
-    for (const job of this.jobs.values()) {
-      if (job.jobId === jobId) {
-        target = job;
-        break;
-      }
-    }
-
+    const target = await this.getJob(jobId);
     if (!target) return false;
     target.aborted = true;
     target.status = "cancelled";
@@ -321,6 +352,36 @@ export class AgentWorker {
     if (target.taskId !== null) await this.activeHarness.abortTask(target.taskId, this.context);
     target.emitter.emit("cancelled");
     return true;
+  }
+
+  /** Invalidate cached results and checkpoints, including jobs restored after restart.
+   * Retire current documents only after cancellation has drained their writers.
+   * Durable task receipts are audit history, not reusable subtitle cache entries.
+   */
+  async clearJobs(videoId?: string): Promise<number> {
+    return this.serializeJobs(async () => {
+      const entries = [...this.indexedJobs].filter(([, entry]) => videoId === undefined || entry.videoId === videoId);
+      for (const [id, entry] of entries) {
+        const job = await this.getJob(id);
+        if (job?.taskId) {
+          await this.activeHarness.abortTask(job.taskId, this.context);
+          await this.activeHarness.waitForTask(job.taskId, this.context);
+          await job.taskPromise;
+        }
+        if (job) { job.aborted = true; job.status = "cancelled"; job.finalResult = null; job.emitter.emit("cancelled"); }
+        await this.activeHarness.commit(async tx => {
+          await tx.retireDoc(SubtitleJobDoc, id);
+          await tx.retireDoc(DocumentResumeDoc, id);
+          delete (await tx.doc(JobIndexDoc)).entries[id];
+        }, this.context);
+        this.jobs.delete(entry.jobKey); this.indexedJobs.delete(id);
+        // A retried key may have historical conversations; preserve its newest address.
+        if (this.jobIndex.get(entry.jobKey) === id) this.jobIndex.delete(entry.jobKey);
+        if (this.jobIndex.get(entry.jobId) === id) this.jobIndex.delete(entry.jobId);
+        documentCredentials.delete(entry.jobKey);
+      }
+      return entries.length;
+    });
   }
 
   /** Application snapshot; delivery adapters do not need durable document details. */

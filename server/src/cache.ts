@@ -3,6 +3,17 @@ import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { SubtitleCue } from "./types.js";
+import { LEGACY_TRANSLATION_VERSION } from "./translate.js";
+
+type CacheIdentity = { videoId: string; kind: string };
+type CacheEnvelope = { cacheFormat: "subtitle-cache-v3"; videoId: string; kind: string; value: string };
+function envelope(text: string): CacheEnvelope | null {
+  try {
+    const value = JSON.parse(text);
+    return value?.cacheFormat === "subtitle-cache-v3" && typeof value.videoId === "string" &&
+      typeof value.kind === "string" && typeof value.value === "string" ? value : null;
+  } catch { return null; }
+}
 
 export const TRANSLATION_CACHE_VERSION = "translation-v2";
 
@@ -94,9 +105,9 @@ export function getTranslationProfile(params: TranslationProfileParams): string 
     from_lang: params.fromLang || "en",
     to_lang: params.toLang || "zh-CN",
     segmentation: params.segmentation || "rule",
-    prompt_version: params.promptVersion || "prompt-v1",
-    review_version: params.reviewVersion || "review-v1",
-    workflow_version: params.workflowVersion || "wf-v1",
+    prompt_version: params.promptVersion || LEGACY_TRANSLATION_VERSION,
+    review_version: params.reviewVersion || LEGACY_TRANSLATION_VERSION,
+    workflow_version: params.workflowVersion || LEGACY_TRANSLATION_VERSION,
     glossary_version: params.glossaryVersion || "glossary-v1",
     style_config: params.styleConfig || "standard",
     source_cues: sourceCues,
@@ -137,6 +148,7 @@ export class SubtitleCache {
 
   private _lock = new AsyncLock();
   private _lastMaintenance = Date.now();
+  private _lastTouch = new Map<string, number>();
 
   constructor(
     cacheDirOrOptions: string | SubtitleCacheOptions = "./cache",
@@ -247,9 +259,12 @@ export class SubtitleCache {
   }
 
   private async _touchAccess(filePath: string): Promise<void> {
+    const now = Date.now();
+    if (now - (this._lastTouch.get(filePath) || 0) < 60_000) return;
+    this._lastTouch.set(filePath, now);
     try {
       const stat = await fs.stat(filePath);
-      await fs.utimes(filePath, new Date(), stat.mtime);
+      await fs.utimes(filePath, now / 1000, stat.mtimeMs / 1000);
     } catch {
       // Ignore utimes failure
     }
@@ -266,7 +281,7 @@ export class SubtitleCache {
       if (this.maintenanceIntervalSeconds === 0 || elapsed >= this.maintenanceIntervalSeconds) {
         await this.maintain();
       }
-      return value;
+      return envelope(value)?.value ?? value;
     } catch {
       return null;
     }
@@ -274,7 +289,10 @@ export class SubtitleCache {
 
   // ── internal unlocked helpers (called with _lock already held) ─
 
-  private async _writeTextUnlocked(filePath: string, value: string): Promise<void> {
+  private async _writeTextUnlocked(filePath: string, value: string, identity: CacheIdentity): Promise<void> {
+    // Keep legacy paths readable, but persist explicit ownership and TTL class.
+    // Neither video IDs nor language/profile strings are safe filename delimiters.
+    value = JSON.stringify({ cacheFormat: "subtitle-cache-v3", ...identity, value } satisfies CacheEnvelope);
     await fs.mkdir(this.cacheDir, { recursive: true });
     const tempName = path.join(
       this.cacheDir,
@@ -301,17 +319,40 @@ export class SubtitleCache {
         }
       }
     }
-    await this._maybeMaintainUnlocked({ forceSizeCheck: true });
+    await this._maybeMaintainUnlocked();
   }
 
   private _kindForPath(fileName: string): string | null {
     if (fileName.endsWith("_metadata.json")) return "metadata";
     if (fileName.endsWith("_json3.txt")) return "json3";
     if (!fileName.endsWith(".cues.json")) return null;
-    if (fileName.includes("_whisper-")) return "whisper";
-    if (fileName.includes("_translation-")) return "translation";
-    if (fileName.includes("_none_") || fileName.endsWith("_none.cues.json")) return "cues";
-    return "translation";
+    const legacy = this._legacyIdentity(fileName);
+    return legacy?.kind || "translation";
+  }
+
+  /** Read old unwrapped files without prefix guessing (IDs may contain underscores). */
+  private _legacyIdentity(fileName: string): CacheIdentity | null {
+    if (fileName.endsWith("_metadata.json")) {
+      return { videoId: fileName.slice(0, -"_metadata.json".length).replace(/-metadata-[a-f0-9]{16,64}$/, ""), kind: "metadata" };
+    }
+    const json3 = fileName.match(/^(.*)_([A-Za-z]{2,3}(?:-[A-Za-z0-9]+)*)_json3\.txt$/);
+    if (json3) return { videoId: json3[1], kind: "json3" };
+    const cues = fileName.match(/^(.*)_([^_]+)_(rule|statistical|whisper-timed-v1|whisper-v1)_([^_]+)(?:_(.+))?\.cues\.json$/);
+    if (!cues) return null;
+    return { videoId: cues[1], kind: cues[3].startsWith("whisper-") ? "whisper" : cues[4] === "none" ? "cues" : "translation" };
+  }
+
+  private async _identity(fileName: string): Promise<CacheIdentity | null> {
+    const text = await fs.readFile(path.join(this.cacheDir, fileName), "utf8");
+    const stored = envelope(text);
+    if (stored) return stored;
+    if (fileName.endsWith("_metadata.json")) {
+      try {
+        const data = JSON.parse(text);
+        if (typeof data?.id === "string") return { videoId: data.id, kind: "metadata" };
+      } catch { /* Legacy corrupt metadata still has a recognizable filename. */ }
+    }
+    return this._legacyIdentity(fileName);
   }
 
   private async _purgeExpiredUnlocked(): Promise<number> {
@@ -325,12 +366,16 @@ export class SubtitleCache {
     }
     for (const entry of entries) {
       if (!this.isManagedCacheFile(entry)) continue;
-      if (entry.startsWith(".cache-tmp-")) continue;
       const filePath = path.join(this.cacheDir, entry);
       try {
         const stat = await fs.stat(filePath);
         if (!stat.isFile()) continue;
-        const kind = this._kindForPath(entry);
+        if (entry.startsWith(".cache-tmp-")) {
+          // Other cache instances may be writing; only collect crash leftovers.
+          if (now - stat.mtimeMs / 1000 >= 3600) { await fs.unlink(filePath); removed++; }
+          continue;
+        }
+        const kind = (await this._identity(entry))?.kind;
         // Metadata TTL controls freshness, not retention: stale metadata locates
         // expensive source/translation caches without requiring yt-dlp. It is
         // still subject to size-based eviction and explicit cache deletion.
@@ -338,6 +383,7 @@ export class SubtitleCache {
         const ttl = kind ? this.ttls[kind] : null;
         if (ttl !== null && ttl !== undefined && now - stat.mtimeMs / 1000 >= ttl) {
           await fs.unlink(filePath);
+          this._lastTouch.delete(filePath);
           removed++;
         }
       } catch {
@@ -383,6 +429,7 @@ export class SubtitleCache {
     for (const item of fileList) {
       try {
         await fs.unlink(item.filePath);
+        this._lastTouch.delete(item.filePath);
         total -= item.size;
         removed++;
         if (total <= this.maxBytes) {
@@ -402,19 +449,17 @@ export class SubtitleCache {
     return p + s;
   }
 
-  private async _maybeMaintainUnlocked(options?: { forceSizeCheck?: boolean }): Promise<void> {
+  private async _maybeMaintainUnlocked(): Promise<void> {
     const elapsed = (Date.now() - this._lastMaintenance) / 1000;
     const due =
       this.maintenanceIntervalSeconds === 0 || elapsed >= this.maintenanceIntervalSeconds;
     if (due) {
       await this._maintainUnlocked();
-    } else if (options?.forceSizeCheck) {
-      await this._enforceSizeLimitUnlocked();
     }
   }
 
   private async _clearVideoUnlocked(videoId: string): Promise<number> {
-    const prefix = `${videoId.replace(/\//g, "_").replace(/\\/g, "_")}_`;
+    const safeId = videoId.replace(/\//g, "_").replace(/\\/g, "_");
     let entries: string[];
     try {
       entries = await fs.readdir(this.cacheDir);
@@ -423,9 +468,12 @@ export class SubtitleCache {
     }
     let removed = 0;
     for (const entry of entries) {
-      if (entry.startsWith(prefix) && this.isManagedCacheFile(entry)) {
+      if ((entry.startsWith(`${safeId}_`) || entry.startsWith(`${safeId}-metadata-`)) && this.isManagedCacheFile(entry)) {
         try {
-          await fs.unlink(path.join(this.cacheDir, entry));
+          if ((await this._identity(entry))?.videoId !== videoId) continue;
+          const filePath = path.join(this.cacheDir, entry);
+          await fs.unlink(filePath);
+          this._lastTouch.delete(filePath);
           removed++;
         } catch {
           continue;
@@ -436,6 +484,7 @@ export class SubtitleCache {
   }
 
   private async _clearAllUnlocked(): Promise<number> {
+    this._lastTouch.clear();
     let entries: string[];
     try {
       entries = await fs.readdir(this.cacheDir);
@@ -476,7 +525,9 @@ export class SubtitleCache {
 
   async putMetadata(videoId: string, data: any): Promise<void> {
     await this._lock.acquire(() =>
-      this._writeTextUnlocked(this._path(videoId, "metadata.json"), JSON.stringify(data))
+      this._writeTextUnlocked(this._path(videoId, "metadata.json"), JSON.stringify(data), {
+        videoId: typeof data?.id === "string" ? data.id : videoId, kind: "metadata",
+      })
     );
   }
   async put_metadata(videoId: string, data: any): Promise<void> {
@@ -494,7 +545,7 @@ export class SubtitleCache {
 
   async putJson3(videoId: string, lang: string, data: string): Promise<void> {
     await this._lock.acquire(() =>
-      this._writeTextUnlocked(this._path(videoId, lang, "json3.txt"), data)
+      this._writeTextUnlocked(this._path(videoId, lang, "json3.txt"), data, { videoId, kind: "json3" })
     );
   }
   async put_json3(videoId: string, lang: string, data: string): Promise<void> {
@@ -566,7 +617,7 @@ export class SubtitleCache {
     await this._lock.acquire(() =>
       this._writeTextUnlocked(
         this._cuesPath(videoId, lang, segmentation, toLang, profile),
-        JSON.stringify(cues)
+        JSON.stringify(cues), { videoId, kind }
       )
     );
   }

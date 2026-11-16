@@ -200,6 +200,12 @@ make build-extension
 
 实现与限制细节详见 [`docs/document-translation.md`](docs/document-translation.md) 与 [`docs/translation-architecture.md`](docs/translation-architecture.md)。
 
+### 元数据过期与缓存复用
+
+`CACHE_METADATA_TTL_SECONDS`（默认 24 小时）控制元数据的新鲜度。过期元数据仍保留作字幕缓存的定位信息，不会被 TTL 清理删除，但仍受容量淘汰和显式清缓存操作约束。
+
+通过 yt-dlp 加载字幕时，如果旧元数据能定位到当前语言、断句方式或 Whisper 配置对应的字幕缓存，会直接复用，并继续查找已有译文，无需重新访问 YouTube。缓存未命中时仍会刷新元数据，获取失败会正常报错；字幕轨道列表接口也仍要求新鲜元数据。此机制不恢复已经被删除的元数据或字幕缓存。
+
 ---
 
 ## 开发与测试

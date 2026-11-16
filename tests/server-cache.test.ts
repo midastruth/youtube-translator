@@ -100,8 +100,9 @@ describe("SubtitleCache", () => {
     await sleep(80);
 
     const removed = await shortCache.purgeExpired();
-    assert.equal(removed, 2);
+    assert.equal(removed, 1);
     assert.equal(await shortCache.getMetadata("abc"), null);
+    assert.deepEqual(await shortCache.getMetadata("abc", { allowStale: true }), { id: "abc" });
     assert.equal(await shortCache.getJson3("abc", "en"), null);
   });
 
@@ -114,10 +115,36 @@ describe("SubtitleCache", () => {
     assert.equal(await shortCache.getMetadata("abc"), null);
   });
 
+  it("stale metadata reads preserve freshness and remain subject to explicit deletion", async () => {
+    const data = { id: "abc", title: "Test Video" };
+    await cache.putMetadata("abc", data);
+    const file = cache._path("abc", "metadata.json");
+    const expired = new Date(Date.now() - 7200 * 1000);
+    await fs.utimes(file, expired, expired);
+    const before = await fs.stat(file);
+    assert.equal(await cache.getMetadata("abc"), null);
+    assert.deepEqual(await cache.getMetadata("abc", { allowStale: true }), data);
+    assert.equal((await fs.stat(file)).mtimeMs, before.mtimeMs);
+    await cache.maintain();
+    assert.deepEqual(await cache.getMetadata("abc", { allowStale: true }), data);
+    assert.equal(await cache.clearVideo("abc"), 1);
+    assert.equal(await cache.getMetadata("abc", { allowStale: true }), null);
+  });
+
+  it("stale metadata remains subject to size-based eviction", async () => {
+    await cache.putMetadata("abc", { id: "abc", title: "Test Video" });
+    const expired = new Date(Date.now() - 7200 * 1000);
+    await fs.utimes(cache._path("abc", "metadata.json"), expired, expired);
+    cache.maxBytes = 1;
+    assert.equal(await cache.enforceSizeLimit(), 1);
+    assert.equal(await cache.getMetadata("abc", { allowStale: true }), null);
+  });
+
   it("test_corrupted_json_returns_none", async () => {
     const p = cache._path("abc", "metadata.json");
     await fs.writeFile(p, "not valid json{{{", "utf-8");
     assert.equal(await cache.getMetadata("abc"), null);
+    assert.equal(await cache.getMetadata("abc", { allowStale: true }), null);
   });
 
   it("test_special_characters_in_keys", async () => {
@@ -167,7 +194,8 @@ describe("SubtitleCache", () => {
 
     await sleep(80);
     const removed = await customCache.purgeExpired();
-    assert.equal(removed, 2);
+    assert.equal(removed, 1);
+    assert.deepEqual(await customCache.getMetadata("abc", { allowStale: true }), { id: "abc" });
 
     assert.equal(await customCache.getMetadata("abc"), null);
     assert.equal(await customCache.getJson3("abc", "en"), null);

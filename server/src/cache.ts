@@ -255,9 +255,8 @@ export class SubtitleCache {
     }
   }
 
-  private async _readText(filePath: string, kind: string): Promise<string | null> {
-    const fresh = await this._isFresh(filePath, kind);
-    if (!fresh) {
+  private async _readText(filePath: string, kind: string, allowStale = false): Promise<string | null> {
+    if (!allowStale && !(await this._isFresh(filePath, kind))) {
       return null;
     }
     try {
@@ -332,6 +331,10 @@ export class SubtitleCache {
         const stat = await fs.stat(filePath);
         if (!stat.isFile()) continue;
         const kind = this._kindForPath(entry);
+        // Metadata TTL controls freshness, not retention: stale metadata locates
+        // expensive source/translation caches without requiring yt-dlp. It is
+        // still subject to size-based eviction and explicit cache deletion.
+        if (kind === "metadata") continue;
         const ttl = kind ? this.ttls[kind] : null;
         if (ttl !== null && ttl !== undefined && now - stat.mtimeMs / 1000 >= ttl) {
           await fs.unlink(filePath);
@@ -458,8 +461,8 @@ export class SubtitleCache {
 
   // ── metadata ─────────────────────────────────────────────────
 
-  async getMetadata(videoId: string): Promise<any | null> {
-    const text = await this._readText(this._path(videoId, "metadata.json"), "metadata");
+  async getMetadata(videoId: string, options?: { allowStale?: boolean }): Promise<any | null> {
+    const text = await this._readText(this._path(videoId, "metadata.json"), "metadata", options?.allowStale);
     if (text === null) return null;
     try {
       return JSON.parse(text);
@@ -467,8 +470,8 @@ export class SubtitleCache {
       return null;
     }
   }
-  async get_metadata(videoId: string): Promise<any | null> {
-    return this.getMetadata(videoId);
+  async get_metadata(videoId: string, options?: { allowStale?: boolean }): Promise<any | null> {
+    return this.getMetadata(videoId, options);
   }
 
   async putMetadata(videoId: string, data: any): Promise<void> {

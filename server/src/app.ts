@@ -556,6 +556,35 @@ export function normalizeCuesToMilliseconds(cues: SubtitleCue[]): SubtitleCue[] 
   }));
 }
 
+/** Only source-cache hits may use stale metadata; never download using stale tracks. */
+async function getCachedSubtitleFlow(
+  req: SubtitleRequest,
+  deps: ResolvedDependencies,
+  metadata: any,
+): Promise<SubtitleProcessResult | null> {
+  if (!metadata?.id) return null;
+  const videoId = String(metadata.id);
+  const title = String(metadata.title || videoId);
+  const segmentation = req.segmentation || "rule";
+  const languages = req.languages?.length ? req.languages : ["zh-Hans", "zh-Hant", "zh", "en"];
+  const selected = deps.chooseSubtitle(metadata, languages, req.allow_automatic !== false);
+  if (selected) {
+    const language = Array.isArray(selected) ? selected[0] : selected.language;
+    const source = Array.isArray(selected) ? selected[1] : selected.source;
+    const cues = await deps.cache.getCues(videoId, language, segmentation, null, { profile: "segment-v1" });
+    if (Array.isArray(cues) && cues.length > 0) {
+      return { meta: { video_id: videoId, title, from_lang: language, source }, cues };
+    }
+  } else if (req.whisper_enabled) {
+    const profile = getWhisperCacheProfile(req.whisper_language, req.whisper_base_url, req.whisper_model);
+    const cues = await deps.cache.getCues(videoId, profile, "whisper-timed-v1", null, { kind: "whisper" });
+    if (Array.isArray(cues) && cues.length > 0) {
+      return { meta: { video_id: videoId, title, from_lang: req.whisper_language || "auto", source: "whisper" }, cues };
+    }
+  }
+  return null;
+}
+
 export async function processSubtitleFlow(
   req: SubtitleRequest,
   deps: ResolvedDependencies
@@ -603,9 +632,17 @@ export async function processSubtitleFlow(
 
   let metadata = await deps.cache.getMetadata(cacheKey);
   if (!metadata) {
+    const stale = await deps.cache.getMetadata(cacheKey, { allowStale: true });
+    const cached = await getCachedSubtitleFlow(req, deps, stale);
+    if (cached) return cached;
+    // A different language/segmentation/profile or a source-cache miss still
+    // needs fresh metadata. Do not hide ingestion errors in that case.
     metadata = await deps.fetchMetadata(req.url);
     await deps.cache.putMetadata(cacheKey, metadata);
   }
+
+  const cached = await getCachedSubtitleFlow(req, deps, metadata);
+  if (cached) return cached;
 
   const videoId = String(metadata?.id || "unknown");
   const title = String(metadata?.title || videoId);
@@ -628,26 +665,6 @@ export async function processSubtitleFlow(
       req.whisper_base_url,
       req.whisper_model
     );
-
-    const cachedWhisperCues = await deps.cache.getCues(
-      videoId,
-      whisperProfile,
-      "whisper-timed-v1",
-      null,
-      { kind: "whisper" }
-    );
-
-    if (cachedWhisperCues && Array.isArray(cachedWhisperCues) && cachedWhisperCues.length > 0) {
-      return {
-        meta: {
-          video_id: videoId,
-          title,
-          from_lang: req.whisper_language || "auto",
-          source: "whisper",
-        },
-        cues: cachedWhisperCues,
-      };
-    }
 
     // De-duplicate concurrent Whisper jobs for the same video & profile
     const lockKey = `${videoId}:${whisperProfile}`;
@@ -724,20 +741,6 @@ export async function processSubtitleFlow(
   } else {
     selectedLang = selected.language;
     sourceType = selected.source;
-  }
-
-  // Check cached processed cues first
-  const cachedCues = await deps.cache.getCues(videoId, selectedLang, segmentation, null, { profile: "segment-v1" });
-  if (cachedCues && Array.isArray(cachedCues) && cachedCues.length > 0) {
-    return {
-      meta: {
-        video_id: videoId,
-        title,
-        from_lang: selectedLang,
-        source: sourceType,
-      },
-      cues: cachedCues,
-    };
   }
 
   // Validate downloads before persisting: malformed JSON must not poison cache.

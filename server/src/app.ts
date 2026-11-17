@@ -855,6 +855,32 @@ export function createApp(deps?: Partial<AppDependencies>): http.RequestListener
           if (profile) cacheKey = `${cacheKey}-metadata-${profile}`;
 
           metadata = await resolved.cache.getMetadata(cacheKey);
+          if (!metadata && url.searchParams.get("prefer_cached") === "true") {
+            // The extension discovers tracks before opening the subtitle stream.
+            // Let it reach the same stale-metadata recovery path as the stream,
+            // but only when the requested source is already cached. Ordinary
+            // track listing and cache misses must still fetch fresh metadata.
+            const stale = await resolved.cache.getMetadata(cacheKey, { allowStale: true });
+            const cached = await getCachedSubtitleFlow({
+              url: videoUrl, languages: langList,
+              segmentation: url.searchParams.get("segmentation") === "statistical" ? "statistical" : "rule",
+              whisper_enabled: url.searchParams.get("whisper_enabled") === "true",
+              whisper_language: url.searchParams.get("whisper_language") || undefined,
+              whisper_base_url: url.searchParams.get("whisper_base_url") || undefined,
+              whisper_model: url.searchParams.get("whisper_model") || undefined,
+            }, resolved, stale);
+            if (cached) {
+              const { video_id, title, from_lang, source } = cached.meta;
+              // Return the precise cached track rather than other stale tracks
+              // which could lead the extension to select a different language.
+              const tracks: SubtitleTrack[] = source === "whisper" ? [] : [{
+                language: from_lang, source: source as "manual" | "automatic",
+                label: `${from_lang}${source === "automatic" ? " (auto)" : ""}`,
+              }];
+              sendJson(res, 200, { video_id, title, tracks, cached_source: true } satisfies TracksResponse);
+              return;
+            }
+          }
           if (!metadata) {
             metadata = await resolved.fetchMetadata(videoUrl);
             await resolved.cache.putMetadata(cacheKey, metadata);

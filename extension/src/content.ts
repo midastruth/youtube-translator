@@ -291,11 +291,22 @@ async function load(pageUrl: string) {
     // Let bridge.js start capturing YouTube's own captions in parallel; they
     // are only used if the backend (yt-dlp) cannot provide a track.
     requestBrowserSubtitles(pageVideoId, langs);
-    const params = new URLSearchParams({ url: pageUrl, languages: langs.join(",") });
+    // Track discovery must not require YouTube when the stream can already
+    // restore cached subtitles. Send only source-cache identity, never API keys.
+    const params = new URLSearchParams({
+      url: pageUrl, languages: langs.join(","), prefer_cached: "true",
+      segmentation: settings.segmentation || "rule",
+    });
+    if (settings.whisperEnabled) {
+      params.set("whisper_enabled", "true");
+      if (settings.whisperLanguage) params.set("whisper_language", settings.whisperLanguage);
+      if (settings.whisperBaseUrl) params.set("whisper_base_url", settings.whisperBaseUrl);
+      if (settings.whisperModel) params.set("whisper_model", settings.whisperModel);
+    }
     const tracksResponse = await fetch(`${baseUrl}/api/subtitle/tracks?${params}`, {
       signal: controller.signal,
     });
-    let tr: { tracks: { source: string; language: string }[] } = { tracks: [] };
+    let tr: { tracks: { source: string; language: string }[]; cached_source?: boolean } = { tracks: [] };
     let tracksError: Error | null = null;
     if (tracksResponse.ok) {
       tr = await tracksResponse.json();
@@ -309,13 +320,13 @@ async function load(pageUrl: string) {
     // Fallback: yt-dlp is blocked (e.g. HTTP 400 bot check) or found no
     // track. Give YouTube's own player a moment to provide its captions.
     let browserSubs: BrowserSubtitles | null = null;
-    if (!track) {
+    if (!track && !tr.cached_source) {
       showStatus("后端无法获取字幕，正在尝试读取播放器字幕…");
       browserSubs = await waitForBrowserSubtitles(pageVideoId, controller.signal);
       if (generation !== loadGeneration) return;
       if (browserSubs?.videoId !== pageVideoId || !hasBrowserSubtitles(browserSubs)) browserSubs = null;
     }
-    if (!track && !browserSubs) {
+    if (!track && !browserSubs && !tr.cached_source) {
       if (tracksError && !settings.whisperEnabled) throw tracksError;
       if (!settings.whisperEnabled) {
         showStatus("没有找到匹配字幕，可在设置中启用 Whisper", "error");

@@ -65,6 +65,8 @@ export type TracksResponse = {
   video_id: string;
   title: string;
   tracks: SubtitleTrack[];
+  /** Opt-in discovery found cached source cues, including Whisper with no track. */
+  cached_source?: boolean;
 };
 
 export type HealthResponse = {

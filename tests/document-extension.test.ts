@@ -19,6 +19,40 @@ test("new installations choose document mode and display background editing-agen
   } finally { browser.close(); }
 });
 
+test("cached Whisper discovery skips waiting for player captions and passes only non-secret cache settings", async () => {
+  const browser = new BrowserFixture({ segmentation: "statistical", whisperEnabled: true,
+    whisperLanguage: "en", whisperBaseUrl: "https://whisper.invalid/v1", whisperModel: "whisper-custom",
+    whisperApiKey: "secret-whisper-key", translateApiKey: "secret-translation-key" });
+  const originalFetch = browser.dom.window.fetch.bind(browser.dom.window);
+  let query: URLSearchParams | undefined;
+  browser.dom.window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input).includes("/api/subtitle/tracks?")) {
+      query = new URL(String(input)).searchParams;
+      return Response.json({ tracks: [], cached_source: true });
+    }
+    return originalFetch(input, init);
+  };
+  try {
+    browser.execute("content"); browser.toggle();
+    await eventually(() => browser.streams.length === 1, "cached Whisper must start without player captions");
+    assert.equal(query?.get("prefer_cached"), "true");
+    assert.equal(query?.get("segmentation"), "statistical");
+    assert.equal(query?.get("whisper_enabled"), "true");
+    assert.equal(query?.get("whisper_language"), "en");
+    assert.equal(query?.get("whisper_base_url"), "https://whisper.invalid/v1");
+    assert.equal(query?.get("whisper_model"), "whisper-custom");
+    assert.doesNotMatch(query!.toString(), /secret|api_key/i);
+    assert.equal(browser.streams[0].body.source_events, undefined);
+    assert.equal(browser.streams[0].body.source_cues, undefined);
+    assert.equal(browser.streams[0].body.whisper_language, "en");
+    browser.send([{ type: "meta", total_cues: 1, completed_cues: 1 },
+      { type: "cue", index: 0, start: 0, end: 2000, text: "Hello", translation: "你好", cached: true },
+      { type: "done", failed_cues: 0 }]);
+    browser.finish();
+    await eventually(() => browser.dom.window.document.querySelector(".status")?.textContent?.includes("字幕翻译完成") === true);
+  } finally { browser.close(); }
+});
+
 test("obsolete saved engine settings select the current team mode", async () => {
   const browser = new BrowserFixture({ translateEngine: "agent" });
   try {

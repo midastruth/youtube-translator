@@ -12,6 +12,7 @@ import type { SubtitleRequest } from "../server/src/types.js";
 import { AgentWorker } from "../worker/agent-worker.js";
 import { trustModelEndpoint } from "./support/model-endpoint.js";
 import { respondAsSubtitleAgent } from "./support/subtitle-agent-model.js";
+import { BrowserFixture, eventually } from "../features/support/browser.js";
 
 const url = "https://www.youtube.com/watch?v=stale_video";
 const metadata = { id: "stale_video", title: "Cached video", subtitles: { en: [{ ext: "json3" }] } };
@@ -143,7 +144,76 @@ describe("Expired metadata must not block cached subtitles (#4)", () => {
     assert.equal(fetches, 1);
   });
 
-  it("replays a durable document translation over SSE after metadata expiry and restart without any network calls", { timeout: 15000 }, async () => {
+  it("lets opt-in track discovery reuse only matching cached source cues while ordinary discovery stays fresh", async () => {
+    let fetches = 0;
+    const running = await startServer({ port: 0, host: "127.0.0.1", cache, worker,
+      fetchMetadata: async () => { fetches++; throw new IngestError("YouTube bot check"); },
+    });
+    const tracksUrl = `http://127.0.0.1:${running.port}/api/subtitle/tracks?${new URLSearchParams({ url, languages: "en" })}`;
+    try {
+      const response = await fetch(`${tracksUrl}&prefer_cached=true&segmentation=rule`);
+      assert.equal(response.status, 200);
+      assert.deepEqual(await response.json(), {
+        video_id: metadata.id, title: metadata.title, cached_source: true,
+        tracks: [{ language: "en", source: "manual", label: "en" }],
+      });
+      assert.equal(fetches, 0);
+      assert.equal(await cache.getMetadata(metadataKey()), null, "discovery must not refresh stale metadata");
+      for (const query of [
+        {}, { prefer_cached: "true", segmentation: "statistical" }, { prefer_cached: "true", languages: "ja" },
+      ]) {
+        const target = new URL(tracksUrl);
+        for (const [key, value] of Object.entries(query)) target.searchParams.set(key, value);
+        assert.equal((await fetch(target)).status, 400, JSON.stringify(query));
+      }
+      assert.equal(fetches, 3);
+      await cache.putCues(metadata.id, "en", "rule", null, [], { profile: "segment-v1" });
+      assert.equal((await fetch(`${tracksUrl}&prefer_cached=true`)).status, 400);
+      assert.equal(fetches, 4, "a source-cache miss must still refresh metadata");
+    } finally { await running.close(); }
+  });
+
+  it("returns only the cached track when stale metadata contains multiple related languages", async () => {
+    await cache.putMetadata(metadataKey(), { ...metadata, subtitles: { "en-US": [{ ext: "json3" }], ...metadata.subtitles } });
+    await fs.utimes(cache._path(metadataKey(), "metadata.json"), expired, expired);
+    const running = await startServer({ port: 0, host: "127.0.0.1", cache, worker,
+      fetchMetadata: async () => { assert.fail("cached exact-language track must be reusable"); },
+    });
+    try {
+      const response = await fetch(`http://127.0.0.1:${running.port}/api/subtitle/tracks?${new URLSearchParams({ url, languages: "en", prefer_cached: "true" })}`);
+      assert.equal(response.status, 200);
+      assert.deepEqual((await response.json()).tracks, [{ language: "en", source: "manual", label: "en" }]);
+    } finally { await running.close(); }
+  });
+
+  it("supports cached Whisper discovery only for the matching transcription profile", async () => {
+    await cache.putMetadata(metadataKey(), { ...metadata, subtitles: {} });
+    await fs.utimes(cache._path(metadataKey(), "metadata.json"), expired, expired);
+    await cache.putCues(metadata.id, getWhisperCacheProfile("en"), "whisper-timed-v1", null, cues, { kind: "whisper" });
+    let fetches = 0;
+    const running = await startServer({ port: 0, host: "127.0.0.1", cache, worker,
+      fetchMetadata: async () => { fetches++; throw new IngestError("refresh required"); },
+    });
+    const params = new URLSearchParams({ url, languages: "en", prefer_cached: "true", whisper_enabled: "true", whisper_language: "en" });
+    const tracksUrl = `http://127.0.0.1:${running.port}/api/subtitle/tracks?`;
+    try {
+      const response = await fetch(`${tracksUrl}${params}`);
+      assert.equal(response.status, 200);
+      assert.deepEqual(await response.json(), { video_id: metadata.id, title: metadata.title, tracks: [], cached_source: true });
+      assert.equal(fetches, 0);
+      for (const [key, value] of [
+        ["whisper_language", "ja"], ["whisper_enabled", "false"],
+        ["whisper_model", "another-model"], ["whisper_base_url", "https://another-whisper.invalid/v1"],
+      ]) {
+        const mismatch = new URLSearchParams(params);
+        mismatch.set(key, value);
+        assert.equal((await fetch(`${tracksUrl}${mismatch}`)).status, 400, key);
+      }
+      assert.equal(fetches, 4);
+    } finally { await running.close(); }
+  });
+
+  it("replays a durable document translation over SSE and through the browser after metadata expiry and restart without any network calls", { timeout: 15000 }, async () => {
     let modelCalls = 0, metadataCalls = 0;
     const modelServer = http.createServer(async (req, res) => {
       let raw = "";
@@ -193,6 +263,28 @@ describe("Expired metadata must not block cached subtitles (#4)", () => {
       assert.ok(translated.every(event => event.cached && event.translation.startsWith("测试译文：")));
       assert.equal(modelCalls, previousCalls, "durable result must not be translated again");
       assert.equal(metadataCalls, 0, "metadata expiry must not require yt-dlp");
+
+      // Exercise the real extension entry point, including its preliminary track
+      // discovery, with no player captions available and YouTube unavailable.
+      const browser = new BrowserFixture({ backendUrl: `http://127.0.0.1:${running!.port}`,
+        languages: "en", translateBaseUrl: baseUrl, translateApiKey: "test-key", translateRequestBudget: 512 });
+      browser.dom.reconfigure({ url });
+      const requests: string[] = [];
+      browser.dom.window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        requests.push(String(input));
+        return fetch(input, init);
+      };
+      try {
+        browser.execute("content");
+        assert.equal(requests.length, 0, "refresh must leave translation off");
+        browser.toggle();
+        await eventually(() => browser.dom.window.document.querySelector(".status")?.textContent?.includes("字幕翻译完成") === true);
+        browser.seek(500);
+        assert.equal(browser.dom.window.document.querySelector(".tran")?.textContent, "测试译文：c0");
+        assert.equal(requests.filter(value => value.includes("/api/subtitle/tracks?")).length, 1);
+        assert.equal(metadataCalls, 0, "browser track discovery must not require yt-dlp either");
+        assert.equal(modelCalls, previousCalls, "browser refresh must reuse the durable translation");
+      } finally { browser.close(); }
     } finally {
       if (running) await running.close();
       restoreEndpoint();

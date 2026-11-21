@@ -1,6 +1,28 @@
-import type { StoredSettings } from "./types.js";
+import type { ExtensionSettings, StoredSettings } from "./types.js";
+import { updateSettings } from "./settings.js";
 
-const RANGE_KEYS = ["fontSizeOrig", "fontSizeTran", "bgOpacity"];
+const RANGE_KEYS = ["fontSizeOrig", "fontSizeTran", "bgOpacity", "fontScale"];
+const LIVE_KEYS = [...RANGE_KEYS, "autoScale", "isBilingual", "origColor", "tranColor"];
+const pendingDisplayEdits = new Map<string, symbol>();
+
+function displayValues() {
+  return {
+    fontSizeOrig: Number(getVal("fontSizeOrig")), fontSizeTran: Number(getVal("fontSizeTran")),
+    fontScale: Number(getVal("fontScale")) / 100, autoScale: getVal("autoScale") === "true",
+    isBilingual: getVal("isBilingual") === "true", origColor: getVal("origColor"),
+    tranColor: getVal("tranColor"), bgOpacity: Number(getVal("bgOpacity")) / 100,
+  };
+}
+
+function previewDisplay() {
+  const s = displayValues();
+  const orig = document.getElementById("previewOrig")!;
+  const tran = document.getElementById("previewTran")!;
+  orig.style.cssText = `font-size:${s.fontSizeOrig * s.fontScale}px;color:${s.origColor};font-weight:500;display:${s.isBilingual ? "block" : "none"}`;
+  tran.style.cssText = `font-size:${s.fontSizeTran * s.fontScale}px;color:${s.tranColor};font-weight:400`;
+  document.getElementById("subtitlePreview")!.style.background = `rgba(0,0,0,${s.bgOpacity})`;
+}
+
 
 function setVal(id: string, value: string | number) {
   const element = document.getElementById(id);
@@ -17,7 +39,7 @@ function getVal(id: string) {
 function updateRangeLabel(id: string) {
   const span = document.getElementById(`${id}Val`);
   if (!span) return;
-  span.textContent = `${getVal(id)}${id === "bgOpacity" ? "%" : "px"}`;
+  span.textContent = `${getVal(id)}${id === "bgOpacity" || id === "fontScale" ? "%" : "px"}`;
 }
 
 function loadSettings() {
@@ -39,12 +61,15 @@ function loadSettings() {
     setVal("whisperModel", settings.whisperModel || "");
     setVal("whisperLanguage", settings.whisperLanguage || "");
     setVal("isBilingual", settings.isBilingual !== false ? "true" : "false");
-    setVal("fontSizeOrig", settings.fontSizeOrig || 22);
-    setVal("fontSizeTran", settings.fontSizeTran || 18);
+    setVal("fontSizeOrig", settings.fontSizeOrig || 18);
+    setVal("fontSizeTran", settings.fontSizeTran || 24);
+    setVal("fontScale", Math.round((settings.fontScale ?? 1) * 100));
+    setVal("autoScale", settings.autoScale !== false ? "true" : "false");
     setVal("origColor", settings.origColor || "#ffffff");
     setVal("tranColor", settings.tranColor || "#ffff00");
     setVal("bgOpacity", Math.round((settings.bgOpacity ?? 0.6) * 100));
     RANGE_KEYS.forEach(updateRangeLabel);
+    previewDisplay();
   });
 }
 
@@ -63,44 +88,57 @@ function saveSettings() {
   budgetInput.setCustomValidity(budget !== undefined && (!Number.isSafeInteger(budget) || budget < 0 || budget > 1000)
     ? "请输入 0～1000 的整数（0 关闭限制），或留空使用服务端配置" : "");
   if (!budgetInput.reportValidity()) return;
-  chrome.storage.local.get(["ytsSettings"], (data: StoredSettings) => {
-    // Keep page-controlled display state such as positionY.
-    const settings = { ...(data.ytsSettings || {}) };
-    delete settings.enabled;
-    for (const id of [
-      "backendUrl", "languages", "toLang", "segmentation", "translateEngine",
-      "translateApiKey", "translateBaseUrl", "translateModel",
-      "whisperApiKey", "whisperBaseUrl", "whisperModel", "whisperLanguage",
-      "origColor", "tranColor",
-    ] as const) {
-      settings[id] = getVal(id).trim();
-    }
+  // Capture the edited fields now, not after an asynchronous storage read.
+  // Live display controls and dragged position are saved independently.
+  const settings: Partial<ExtensionSettings> = {};
+  for (const id of [
+    "backendUrl", "languages", "toLang", "segmentation", "translateEngine",
+    "translateApiKey", "translateBaseUrl", "translateModel",
+    "whisperApiKey", "whisperBaseUrl", "whisperModel", "whisperLanguage",
+  ] as const) {
+    settings[id] = getVal(id).trim();
+  }
 
-    settings.backendUrl = (settings.backendUrl || "").replace(/\/+$/, "") || "http://localhost:8787";
-    if (budget === undefined) delete settings.translateRequestBudget;
-    else settings.translateRequestBudget = budget;
-    settings.translateWhole = getVal("translateWhole") === "true";
-    settings.whisperEnabled = getVal("whisperEnabled") === "true";
-    settings.isBilingual = getVal("isBilingual") === "true";
-    settings.bgOpacity = Number.parseInt(getVal("bgOpacity"), 10) / 100;
-    settings.fontSizeOrig = Number.parseInt(getVal("fontSizeOrig"), 10) || 22;
-    settings.fontSizeTran = Number.parseInt(getVal("fontSizeTran"), 10) || 18;
-    settings.positionY ??= 12;
-    settings.autoTranslate = true;
+  settings.backendUrl = (settings.backendUrl || "").replace(/\/+$/, "") || "http://localhost:8787";
+  if (budget !== undefined) settings.translateRequestBudget = budget;
+  settings.translateWhole = getVal("translateWhole") === "true";
+  settings.whisperEnabled = getVal("whisperEnabled") === "true";
+  settings.autoTranslate = true;
 
-    chrome.storage.local.set({ ytsSettings: settings }, () => {
-      const message = document.getElementById("savedMsg");
-      if (!message) return;
-      message.classList.remove("show");
-      void message.offsetWidth;
-      message.classList.add("show");
-    });
+  updateSettings(settings, budget === undefined ? ["enabled", "translateRequestBudget"] : ["enabled"], () => {
+    const message = document.getElementById("savedMsg");
+    if (!message) return;
+    message.classList.remove("show");
+    void message.offsetWidth;
+    message.classList.add("show");
   });
 }
 
-for (const key of RANGE_KEYS) {
-  document.getElementById(key)?.addEventListener("input", () => updateRangeLabel(key));
+for (const key of LIVE_KEYS) {
+  document.getElementById(key)?.addEventListener("input", () => {
+    if (RANGE_KEYS.includes(key)) updateRangeLabel(key);
+    previewDisplay();
+    const value = displayValues()[key as keyof ReturnType<typeof displayValues>];
+    const edit = Symbol();
+    pendingDisplayEdits.set(key, edit);
+    updateSettings({ [key]: value }, [], () => {
+      if (pendingDisplayEdits.get(key) === edit) pendingDisplayEdits.delete(key);
+    });
+  });
 }
+chrome.storage.onChanged.addListener(changes => {
+  if (!changes.ytsSettings) return;
+  const before = (changes.ytsSettings.oldValue || {}) as Record<string, unknown>;
+  const after = (changes.ytsSettings.newValue || {}) as Record<string, unknown>;
+  for (const key of LIVE_KEYS) {
+    // Queued writes may announce an older value while this control has newer input.
+    if (pendingDisplayEdits.has(key) || before[key] === after[key] || after[key] === undefined) continue;
+    const value = after[key];
+    setVal(key, key === "fontScale" || key === "bgOpacity" ? Math.round(Number(value) * 100) : String(value));
+    if (RANGE_KEYS.includes(key)) updateRangeLabel(key);
+  }
+  previewDisplay();
+});
 document.getElementById("downloadVttButton")?.addEventListener("click", downloadVtt);
 document.getElementById("saveButton")?.addEventListener("click", saveSettings);
 

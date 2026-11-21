@@ -3,7 +3,8 @@ import { test } from "node:test";
 import { BrowserFixture, eventually, OLD_SETTINGS } from "../features/support/browser.js";
 import type { StreamRequest } from "../extension/src/types.js";
 
-const downloadError = "yt-dlp failed: ERROR: Unable to download video subtitles for 'en': HTTP Error 429: Too Many Requests";
+const downloadError = "Caption acquisition was rejected by the upstream service";
+const ingestionError = { detail: downloadError, code: "subtitle_ingestion_failed" };
 const events = [{ tStartMs: 1000, dDurationMs: 1500, segs: [{ utf8: "Hello.", tOffsetMs: 123 }] }];
 const source = { videoId: "fixture-video", title: "Player title", language: "en", events };
 const status = (browser: BrowserFixture) => browser.dom.window.document.querySelector(".status")?.textContent || "";
@@ -22,11 +23,11 @@ for (const transport of ["http400", "http429", "sse"] as const) {
       browser.setPlayerResponse({ videoDetails: { videoId: "fixture-video" }, captions: { playerCaptionsTracklistRenderer: {
         captionTracks: [{ baseUrl: "https://www.youtube.com/api/timedtext?v=fixture-video&lang=en", languageCode: "en" }],
       } } });
-      if (transport !== "sse") browser.streamResponses.push(Response.json({ detail: downloadError }, { status: transport === "http400" ? 400 : 429 }));
+      if (transport !== "sse") browser.streamResponses.push(Response.json(ingestionError, { status: transport === "http400" ? 400 : 429 }));
       browser.execute("bridge"); browser.execute("content"); browser.toggle();
       if (transport === "sse") {
         await eventually(() => browser.streams.length === 1);
-        browser.send([{ type: "error", detail: downloadError }]); browser.finish();
+        browser.send([{ type: "error", ...ingestionError }]); browser.finish();
       }
       await eventually(() => streamBodies(browser).length === 2, "browser subtitle retry");
       const [original, fallback] = streamBodies(browser);
@@ -51,7 +52,7 @@ test("download fallback waits for original player captions, ignores other videos
   try {
     browser.execute("content"); browser.toggle();
     await eventually(() => browser.streams.length === 1);
-    browser.send([{ type: "error", detail: downloadError }]); browser.finish();
+    browser.send([{ type: "error", ...ingestionError }]); browser.finish();
     await eventually(() => status(browser).includes("请打开播放器"));
     capture(browser, { ...source, videoId: "another-video" });
     await new Promise(resolve => setTimeout(resolve, 20));
@@ -59,7 +60,7 @@ test("download fallback waits for original player captions, ignores other videos
     capture(browser);
     await eventually(() => browser.streams.length === 2);
     assert.deepEqual(browser.streams[1].body.source_events, events);
-    browser.send([{ type: "error", detail: downloadError }]); browser.finish();
+    browser.send([{ type: "error", ...ingestionError }]); browser.finish();
     await eventually(() => status(browser).startsWith("字幕加载失败"));
     capture(browser);
     await new Promise(resolve => setTimeout(resolve, 20));
@@ -72,7 +73,7 @@ test("missing player captions time out without repeating yt-dlp and retain the o
   try {
     const originalTimeout = browser.dom.window.setTimeout.bind(browser.dom.window);
     browser.dom.window.setTimeout = (handler, timeout, ...args) => originalTimeout(handler, timeout === 8000 ? 10 : timeout, ...args);
-    browser.streamResponses.push(Response.json({ detail: downloadError }, { status: 400 }));
+    browser.streamResponses.push(Response.json(ingestionError, { status: 400 }));
     browser.execute("content"); browser.toggle();
     await eventually(() => status(browser).startsWith("字幕加载失败"));
     assert.ok(status(browser).includes(downloadError));
@@ -85,7 +86,7 @@ for (const action of ["disable", "navigate"] as const) {
   test(`${action} cancels a pending browser fallback; late captions cannot restart it`, async () => {
     const browser = new BrowserFixture();
     try {
-      browser.streamResponses.push(Response.json({ detail: downloadError }, { status: 400 }));
+      browser.streamResponses.push(Response.json(ingestionError, { status: 400 }));
       browser.execute("content"); browser.toggle();
       await eventually(() => status(browser).includes("请打开播放器"));
       if (action === "disable") browser.toggle();
@@ -100,7 +101,9 @@ for (const action of ["disable", "navigate"] as const) {
 
 test("translation and unrelated backend errors never switch to browser captions", async () => {
   for (const scenario of [
-    { meta: true, detail: downloadError },
+    { meta: true, ...ingestionError },
+    { meta: false, detail: "yt-dlp: Unable to download video subtitles" },
+    { meta: false, detail: "yt-dlp wrapper translation failure", code: "document_translation_failed" },
     { meta: false, detail: "Translation provider HTTP Error 429: Too Many Requests" },
     { meta: false, detail: "Document translation exhausted its model request budget" },
   ]) {
@@ -110,7 +113,7 @@ test("translation and unrelated backend errors never switch to browser captions"
       await eventually(() => browser.streams.length === 1);
       capture(browser);
       if (scenario.meta) browser.send([{ type: "meta", total_cues: 1 }]);
-      browser.send([{ type: "error", detail: scenario.detail }]); browser.finish();
+      browser.send([{ type: "error", ...scenario }]); browser.finish();
       await eventually(() => status(browser).includes(scenario.detail));
       assert.equal(browser.streams.length, 1);
       assert.equal(streamBodies(browser).length, 1);

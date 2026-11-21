@@ -1,4 +1,4 @@
-import type { StreamRequest, SubtitleEvent } from "./types.js";
+import type { DisplayError, StreamRequest, SubtitleEvent } from "./types.js";
 
 function consumeFrame(frame: string, onEvent: (event: SubtitleEvent) => void) {
   const data = frame.split("\n")
@@ -36,7 +36,9 @@ export async function apiStream(baseUrl: string, path: string, body: StreamReque
   });
   if (!response.ok) {
     const error = await response.json().catch(() => ({}));
-    throw new Error(error.detail || `Backend ${response.status}`);
+    const streamError: DisplayError = new Error(error.detail || `Backend ${response.status}`);
+    if (typeof error.code === "string") streamError.code = error.code;
+    throw streamError;
   }
   if (!response.body) throw new Error("浏览器不支持流式字幕响应");
   await consumeSubtitleStream(response.body, onEvent);

@@ -20,7 +20,7 @@ import type {
   FlatEvent,
   PreparedEvents,
 } from "./types.js";
-import { IngestError, TranslateError } from "./errors.js";
+import { IngestError, SubtitleIngestionError, TranslateError } from "./errors.js";
 import { checkRequestOrigin, setCorsHeaders } from "./origin.js";
 import { AgentWorker } from "../../worker/agent-worker.js";
 import { SubtitleCache, getTranslationProfile, type SubtitleCacheOptions } from "./cache.js";
@@ -187,8 +187,8 @@ export function sendJson(res: http.ServerResponse, statusCode: number, data: any
   res.end(payload);
 }
 
-export function sendError(res: http.ServerResponse, statusCode: number, detail: string): void {
-  sendJson(res, statusCode, { detail });
+export function sendError(res: http.ServerResponse, statusCode: number, detail: string, code?: string): void {
+  sendJson(res, statusCode, { detail, ...(code ? { code } : {}) });
 }
 
 export { setCorsHeaders } from "./origin.js";
@@ -638,7 +638,11 @@ export async function processSubtitleFlow(
     if (cached) return cached;
     // A different language/segmentation/profile or a source-cache miss still
     // needs fresh metadata. Do not hide ingestion errors in that case.
-    metadata = await deps.fetchMetadata(req.url);
+    try {
+      metadata = await deps.fetchMetadata(req.url);
+    } catch (error) {
+      throw new SubtitleIngestionError(error);
+    }
     await deps.cache.putMetadata(cacheKey, metadata);
   }
 
@@ -748,11 +752,14 @@ export async function processSubtitleFlow(
   let downloadedJson3 = false;
   let json3Text = await deps.cache.getJson3(videoId, selectedLang);
   if (!json3Text) {
-    const downloaded = await deps.fetchSubtitleJson3(req.url, selectedLang);
+    let downloaded;
+    try {
+      downloaded = await deps.fetchSubtitleJson3(req.url, selectedLang);
+    } catch (error) {
+      throw new SubtitleIngestionError(error);
+    }
     if (!downloaded) {
-      const err = new Error("Failed to download subtitle");
-      (err as any).statusCode = 500;
-      throw err;
+      throw new SubtitleIngestionError(new Error("Failed to download subtitle"));
     }
     json3Text = typeof downloaded === "string" ? downloaded : JSON.stringify(downloaded);
     downloadedJson3 = true;
@@ -1107,7 +1114,7 @@ export function createApp(deps?: Partial<AppDependencies>): http.RequestListener
           cues = result.cues;
         } catch (err: any) {
           const status = err?.statusCode || (err instanceof IngestError ? 400 : 500);
-          sendError(res, status, err?.message || String(err));
+          sendError(res, status, err?.message || String(err), err instanceof SubtitleIngestionError ? err.code : undefined);
           return;
         }
 

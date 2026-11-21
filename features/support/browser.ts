@@ -36,6 +36,13 @@ export class BrowserFixture {
   response?: VttResponse;
   tracksStatus = 200;
   playerPayload = "";
+  storageDelayMs = 0;
+  storageWrites = 0;
+  storageFailure?: "get" | "set";
+  private storageError?: { message: string };
+  private backgroundLoaded = false;
+  private registeringBackground = false;
+  private backgroundListener?: (msg: Message, sender: object, send: (response: unknown) => void) => boolean | undefined;
   private blobs = new Map<string, Blob>();
   private optionPages: JSDOM[] = [];
   private contentListener?: (msg: Message, sender: object, send: (response: VttResponse) => void) => void;
@@ -73,20 +80,50 @@ export class BrowserFixture {
   }
 
   private chromeBoundary() {
+    const fixture = this;
+    const storageCallback = (callback: () => void) => {
+      if (this.storageDelayMs) setTimeout(callback, this.storageDelayMs);
+      else callback();
+    };
     return {
       storage: {
         local: {
-          get: (_keys: string[], callback: (data: { ytsSettings: Partial<ExtensionSettings> }) => void) => callback({ ytsSettings: { ...this.settings } }),
+          get: (_keys: string[], callback: (data: { ytsSettings: Partial<ExtensionSettings> }) => void) => {
+            const snapshot = { ...this.settings };
+            storageCallback(() => {
+              this.storageError = this.storageFailure === "get" ? { message: "fixture read failure" } : undefined;
+              callback({ ytsSettings: snapshot });
+              this.storageError = undefined;
+            });
+          },
           set: (data: { ytsSettings: Partial<ExtensionSettings> }, callback?: () => void) => {
-            const oldValue = this.settings;
-            this.settings = { ...data.ytsSettings };
-            for (const listener of this.storageListeners) listener({ ytsSettings: { oldValue, newValue: this.settings } });
-            callback?.();
+            const snapshot = { ...data.ytsSettings };
+            storageCallback(() => {
+              this.storageError = this.storageFailure === "set" ? { message: "fixture write failure" } : undefined;
+              if (!this.storageError) {
+                const oldValue = this.settings;
+                this.settings = snapshot;
+                this.storageWrites++;
+                for (const listener of this.storageListeners) listener({ ytsSettings: { oldValue, newValue: this.settings } });
+              }
+              callback?.();
+              this.storageError = undefined;
+            });
           },
         },
         onChanged: { addListener: (listener: (changes: { ytsSettings: { oldValue: Partial<ExtensionSettings>; newValue: Partial<ExtensionSettings> } }) => void) => this.storageListeners.push(listener) },
       },
-      runtime: { onMessage: { addListener: (listener: NonNullable<BrowserFixture["contentListener"]>) => { this.contentListener = listener; } } },
+      runtime: {
+        get lastError() { return fixture.storageError; },
+        onMessage: { addListener: (listener: NonNullable<BrowserFixture["contentListener"]> & NonNullable<BrowserFixture["backgroundListener"]>) => {
+          if (this.registeringBackground) this.backgroundListener = listener;
+          else this.contentListener = listener;
+        } },
+        sendMessage: (message: Message, send: (response: unknown) => void) => {
+          if (!this.backgroundLoaded) this.execute("background");
+          this.backgroundListener!(structuredClone(message), {}, response => send(structuredClone(response)));
+        },
+      },
       tabs: {
         query: (_query: object, callback: (tabs: { id: number }[]) => void) => callback([{ id: 1 }]),
         sendMessage: (_id: number, message: Message, callback?: (response: VttResponse) => void) => {
@@ -125,7 +162,11 @@ export class BrowserFixture {
   }
 
   execute(name: "background" | "bridge" | "content") {
+    if (name === "background" && this.backgroundLoaded) return;
+    this.registeringBackground = name === "background";
     this.dom.window.eval(fs.readFileSync(`${this.scriptDirectory}/${name}.js`, "utf8"));
+    this.registeringBackground = false;
+    if (name === "background") this.backgroundLoaded = true;
   }
   options() {
     const dom = new JSDOM(fs.readFileSync(`${this.scriptDirectory}/options.html`, "utf8"), { runScripts: "outside-only" });

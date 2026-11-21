@@ -6,6 +6,7 @@ export type ExtensionSettings = {
   whisperEnabled: boolean; whisperApiKey: string; whisperBaseUrl: string; whisperModel: string; whisperLanguage: string;
   isBilingual: boolean; fontSizeOrig: number; fontSizeTran: number; positionY: number;
   origColor: string; tranColor: string; bgOpacity: number;
+  autoScale?: boolean; fontScale?: number;
 };
 export type StoredSettings = { ytsSettings?: Partial<ExtensionSettings> };
 export type Subtitle = { start: number; end: number; text: string; translation?: string };

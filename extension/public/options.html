@@ -113,16 +113,27 @@
       <option value="false">仅译文</option>
     </select>
 
+    <label>自动缩放</label>
+    <select id="autoScale">
+      <option value="true">随播放器大小缩放（推荐）</option>
+      <option value="false">固定字号</option>
+    </select>
+    <div class="hint">以 1280px 播放器为基准，自动缩放范围 80%～160%，全屏同样生效。</div>
     <div class="row">
-      <label>原文大小</label>
-      <input type="range" id="fontSizeOrig" min="14" max="48" value="22">
-      <span class="val" id="fontSizeOrigVal">22px</span>
+      <label>整体大小</label>
+      <input type="range" id="fontScale" min="50" max="200" step="10" value="100">
+      <span class="val" id="fontScaleVal">100%</span>
+    </div>
+    <div class="row">
+      <label>原文基础字号</label>
+      <input type="range" id="fontSizeOrig" min="14" max="48" value="18">
+      <span class="val" id="fontSizeOrigVal">18px</span>
     </div>
 
     <div class="row">
-      <label>译文大小</label>
-      <input type="range" id="fontSizeTran" min="12" max="40" value="18">
-      <span class="val" id="fontSizeTranVal">18px</span>
+      <label>译文基础字号</label>
+      <input type="range" id="fontSizeTran" min="12" max="40" value="24">
+      <span class="val" id="fontSizeTranVal">24px</span>
     </div>
 
     <div class="row">
@@ -141,6 +152,13 @@
       <span class="val" id="bgOpacityVal">60%</span>
     </div>
 
+    <div style="margin-top:16px;padding:16px;background:#252525;text-align:center;border-radius:8px">
+      <div id="subtitlePreview" style="display:inline-block;max-width:100%;padding:6px 14px;border-radius:8px;line-height:1.4">
+        <div id="previewOrig">A better way to read subtitles.</div>
+        <div id="previewTran">让字幕更清晰，让阅读更轻松。</div>
+      </div>
+    </div>
+    <div class="hint">显示设置即时预览并自动保存，不会重新翻译。上方预览展示基础字号 × 整体大小；实际字幕还随播放器缩放。整体大小在此调整，播放器保持简洁。</div>
     <div class="hint" style="margin-top:12px">
       💡 字幕框可<span style="color:#3ea6ff">鼠标拖拽</span>调整位置，位置自动保存
     </div>

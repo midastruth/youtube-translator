@@ -5,6 +5,8 @@ import { exportableSubtitles, formatVtt, mergeSubtitleEvent, subtitleIndexAt, vi
 import type { PendingSubtitle } from "./subtitles.js";
 import { buildStreamRequest, hasBrowserSubtitles, selectBackendTrack } from "./stream-request.js";
 import { apiStream } from "./subtitle-stream.js";
+import { updateSettings } from "./settings.js";
+import { DISPLAY_DEFAULTS, DISPLAY_KEYS, subtitleScale } from "./subtitle-display.js";
 import { PlaybackFallback } from "./playback-fallback.js";
 import type { WindowTranslation } from "./playback-fallback.js";
 
@@ -17,6 +19,7 @@ let loadedVideoId = "", loadGeneration = 0;
 let statusTimer: ReturnType<typeof setTimeout> | null = null;
 let loadAbortController: AbortController | null = null;
 let renderFrame: number | null = null;
+let playbackFrame: number | null = null;
 let browserSubtitleCache: BrowserSubtitles | null = null;
 let playbackFallback: PlaybackFallback | null = null;
 
@@ -32,7 +35,7 @@ const DEF: ExtensionSettings = {
   whisperEnabled: false, whisperApiKey: "", whisperBaseUrl: "", whisperModel: "", whisperLanguage: "",
   // display
   isBilingual: true,
-  fontSizeOrig: 22, fontSizeTran: 18,
+  ...DISPLAY_DEFAULTS,
   positionY: 12, origColor: "#ffffff", tranColor: "#ffff00",
   bgOpacity: 0.6,
 };
@@ -49,16 +52,34 @@ const styleEl = document.createElement("style");
 styleEl.id = "yts-style";
 document.head.appendChild(styleEl);
 
+let playerRoot: Element | null = null;
+let playerWidth = 1280;
+const playerResize = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(entries => {
+  const width = entries[0]?.contentRect.width;
+  if (width && width !== playerWidth) { playerWidth = width; syncStyle(); scheduleRefresh(); }
+});
+
+function observePlayer(mount: Element) {
+  if (playerRoot === mount) return;
+  playerResize?.disconnect();
+  playerRoot = mount;
+  playerWidth = mount.getBoundingClientRect().width || 1280;
+  playerResize?.observe(mount);
+  syncStyle();
+}
+
 function syncStyle() {
+  const scale = subtitleScale(playerWidth, settings.autoScale !== false, settings.fontScale);
   const bg = `rgba(0,0,0,${settings.bgOpacity ?? 0.6})`;
   styleEl.textContent = `
-    #${CID} { --yts-bottom:${settings.positionY ?? 12}%; position:absolute; bottom:var(--yts-bottom); left:50%; transform:translateX(-50%); text-align:center; z-index:59; pointer-events:auto; max-width:85%; cursor:grab; user-select:none; visibility:visible; opacity:1; }
+    #${CID} { --yts-bottom:${settings.positionY ?? 12}%; position:absolute; bottom:var(--yts-bottom); left:50%; transform:translateX(-50%); text-align:center; z-index:59; pointer-events:auto; width:max-content; max-width:85%; cursor:grab; user-select:none; visibility:visible; opacity:1; }
+    .html5-video-player.ytp-fullscreen > #${CID} { max-width:95%; }
     .html5-video-player:not(.ytp-autohide) > #${CID} { bottom:max(var(--yts-bottom), 64px); }
     .html5-video-player.ytp-fullscreen:not(.ytp-autohide) > #${CID} { bottom:max(var(--yts-bottom), 76px); }
     #${CID}.drag { cursor:grabbing; }
     #${CID} .bg { display:none; padding:6px 14px; border-radius:8px; background:${bg}; }
-    #${CID} .orig { display:none; color:${settings.origColor||"#fff"}; font-size:${settings.fontSizeOrig||22}px; font-weight:600; line-height:1.4; text-shadow:1px 1px 2px #000; pointer-events:none; }
-    #${CID} .tran { display:none; color:${settings.tranColor||"#ff0"}; font-size:${settings.fontSizeTran||18}px; font-weight:500; line-height:1.4; text-shadow:1px 1px 2px #000; pointer-events:none; }
+    #${CID} .orig { display:none; color:${settings.origColor||"#fff"}; font-size:${Number(((settings.fontSizeOrig || 18) * scale).toFixed(2))}px; font-weight:500; line-height:1.4; text-shadow:1px 1px 2px #000; pointer-events:none; }
+    #${CID} .tran { display:none; color:${settings.tranColor||"#ff0"}; font-size:${Number(((settings.fontSizeTran || 24) * scale).toFixed(2))}px; font-weight:400; line-height:1.4; text-shadow:1px 1px 2px #000; pointer-events:none; }
     #${CID} .status { display:none; margin:0 auto 8px; width:max-content; max-width:80vw; padding:7px 12px; border-radius:6px; background:rgba(0,0,0,.82); color:#fff; font-size:14px; line-height:1.35; text-shadow:none; pointer-events:none; }
     #${CID} .status.success { color:#7ee787; }
     #${CID} .status.error { color:#ff8b8b; }
@@ -92,6 +113,7 @@ function waitForRetry(delay: number, signal: AbortSignal) {
 }
 
 function cancelActiveLoad() {
+  stopPlaybackClock();
   playbackFallback?.stop();
   playbackFallback = null;
   loadGeneration += 1;
@@ -167,7 +189,10 @@ function overlay() {
   const mount = document.querySelector("#movie_player")
     || videoEl?.closest?.(".html5-video-player")
     || videoEl?.closest?.(".html5-video-container");
-  if (mount && el.parentElement !== mount) mount.appendChild(el);
+  if (mount) {
+    observePlayer(mount);
+    if (el.parentElement !== mount) mount.appendChild(el);
+  }
   return el;
 }
 
@@ -251,11 +276,7 @@ function drag(el: HTMLElement) {
   });
   document.addEventListener("mouseup", () => {
     if (!down) return; down = false; el.classList.remove("drag");
-    chrome.storage.local.get(["ytsSettings"], (d: StoredSettings) => {
-      const s = d.ytsSettings || {};
-      s.positionY = settings.positionY;
-      chrome.storage.local.set({ ytsSettings: s });
-    });
+    updateSettings({ positionY: settings.positionY });
   });
 }
 
@@ -453,7 +474,7 @@ async function load(pageUrl: string) {
         // Track discovery can succeed while the subsequent yt-dlp subtitle
         // download is blocked. Switch sources once, before translation starts;
         // never restart a translation/provider failure or a browser-source job.
-        if (receivedMeta || !track || browserSubs || !/yt-dlp|Unable to download video subtitles/i.test(error.message)) throw value;
+        if (receivedMeta || !track || browserSubs || error.code !== "subtitle_ingestion_failed") throw value;
         showStatus("后端字幕下载失败，正在读取播放器字幕；请打开播放器原始字幕（如英文）…");
         requestBrowserSubtitles(pageVideoId, langs);
         browserSubs = await waitForBrowserSubtitles(pageVideoId, controller.signal);
@@ -531,13 +552,41 @@ async function load(pageUrl: string) {
 
 // ── events ─────────────────────────────────────────────────
 
+// timeupdate can be hundreds of milliseconds apart and skip short cues.
+// Poll the media clock each display frame, but only while playback is active.
+function stopPlaybackClock() {
+  if (playbackFrame !== null) cancelAnimationFrame(playbackFrame);
+  playbackFrame = null;
+}
+function startPlaybackClock() {
+  if (playbackFrame !== null || !settings.enabled || !videoEl || videoEl.paused || videoEl.ended) return;
+  playbackFrame = requestAnimationFrame(() => {
+    playbackFrame = null;
+    if (!settings.enabled || !videoEl || videoEl.paused || videoEl.ended) return;
+    tick();
+    startPlaybackClock();
+  });
+}
+function pausePlaybackClock() {
+  stopPlaybackClock();
+  tick();
+}
 function bindVideo(nextVideo: HTMLVideoElement) {
+  stopPlaybackClock();
   videoEl?.removeEventListener("timeupdate", tick);
+  videoEl?.removeEventListener("seeking", tick);
+  videoEl?.removeEventListener("play", startPlaybackClock);
+  videoEl?.removeEventListener("pause", pausePlaybackClock);
+  videoEl?.removeEventListener("ended", pausePlaybackClock);
   videoEl = nextVideo;
   videoEl.addEventListener("timeupdate", tick);
+  videoEl.addEventListener("seeking", tick);
+  videoEl.addEventListener("play", startPlaybackClock);
+  videoEl.addEventListener("pause", pausePlaybackClock);
+  videoEl.addEventListener("ended", pausePlaybackClock);
 }
 function tick() {
-  if (!videoEl) return;
+  if (!videoEl || !settings.enabled) return;
   playbackFallback?.update();
   const i = idxOf(videoEl.currentTime * 1000);
   ci = i;
@@ -554,10 +603,14 @@ function findV() {
   const videoChanged = v !== videoEl;
   const idChanged = vid !== loadedVideoId;
   if (videoChanged) bindVideo(v);
-  if (videoChanged || idChanged) {
+  startPlaybackClock();
+  if (idChanged) {
     loadedVideoId = vid;
     browserSubtitleCache = null;
     load(`https://www.youtube.com/watch?v=${vid}`);
+  } else if (videoChanged) {
+    // A rebuilt media element is still the same subtitle session.
+    tick();
   }
 }
 function videoId() { return videoIdFromUrl(location.href); }
@@ -627,19 +680,8 @@ function injectToggle() {
   wrapper.appendChild(btn);
   target.insertBefore(wrapper, target.firstChild);
 
-  // re-inject on toolbar rebuild
-  const bar = document.querySelector(".ytp-chrome-bottom");
-  if (bar) {
-    const mo = new MutationObserver(() => {
-      if (!document.getElementById("yts-toggle")) {
-        const t = document.querySelector(".ytp-right-controls");
-        if (t && !t.querySelector(".yts-toggle-wrap")) {
-          t.insertBefore(wrapper, t.firstChild);
-        }
-      }
-    });
-    mo.observe(bar, { childList: true, subtree: true });
-  }
+  // The body observer handles replacement of the entire toolbar as well as
+  // late-created controls, without retaining observers on detached toolbars.
 }
 
 function updateToggleIcon(btn: HTMLElement) {
@@ -664,6 +706,7 @@ chrome.storage.local.get(["ytsSettings"], (d: StoredSettings) => {
       !root || (record.target !== root && !root.contains(record.target))
     ));
     if (!hasExternalMutation) return;
+    injectToggle();
     findV();
     if (settings.enabled !== false && (subtitles.length || statusTimer)) scheduleRefresh();
   });
@@ -690,16 +733,14 @@ chrome.storage.onChanged.addListener(changes => {
       ...Object.keys(oldStored),
       ...Object.keys(newStored),
     ]);
-    const positionOnly = [...changedKeys].every(key => (
-      key === "positionY" || oldStored[key as keyof ExtensionSettings] === newStored[key as keyof ExtensionSettings]
+    const displayOnly = [...changedKeys].every(key => (
+      DISPLAY_KEYS.includes(key) || oldStored[key as keyof ExtensionSettings] === newStored[key as keyof ExtensionSettings]
     ));
     const enabled = settings.enabled;
     settings = { ...DEF, ...newStored, enabled };
     syncStyle();
-    // Dragging persists only positionY. Applying that storage update must not
-    // clear and fetch the already loaded subtitles, which causes a visible
-    // flash as soon as the mouse button is released.
-    if (positionOnly) {
+    // Display changes must never restart translation or consume API requests.
+    if (displayOnly) {
       refresh();
       return;
     }
